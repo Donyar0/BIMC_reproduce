@@ -12,6 +12,7 @@ class MiniImagenet(DatasetBase):
 
         self.image_folder = os.path.join(self.root, 'miniimagenet/images')
         self.split_folder = os.path.join(self.root, 'miniimagenet/split') 
+        self.image_index = self.build_image_index(self.image_folder)
         # self.csv_path = os.path.join(self.csv_folder, f'{split_name}.csv')
 
 
@@ -29,13 +30,35 @@ class MiniImagenet(DatasetBase):
             lines = f.readlines()[1:]
             for line in lines:
                 path, label = line.strip().split(',')
-                full_path = os.path.join(self.image_folder, path)
+                full_path = self.resolve_image_path(path)
                 data.append(full_path)
                 if label not in class2index:
                     class2index[label] = len(class2index)
                 targets.append(class2index[label])
                 data2target[full_path] = class2index[label]
         return data, targets
+
+    def build_image_index(self, image_folder):
+        image_index = {}
+        for dirpath, _, filenames in os.walk(image_folder):
+            for filename in filenames:
+                if filename.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
+                    image_index.setdefault(filename, os.path.join(dirpath, filename))
+        return image_index
+
+    def resolve_image_path(self, path):
+        full_path = os.path.join(self.image_folder, path)
+        if os.path.exists(full_path):
+            return full_path
+
+        filename = os.path.basename(path)
+        if filename in self.image_index:
+            return self.image_index[filename]
+
+        raise FileNotFoundError(
+            f"MiniImagenet image not found: {full_path}. "
+            f"Also searched by filename under {self.image_folder}."
+        )
 
 
 
