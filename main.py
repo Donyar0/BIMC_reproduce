@@ -1,5 +1,6 @@
 from yacs.config import CfgNode as CN
 from utils.util import set_gpu, set_seed
+from utils.experiment_logger import finish, init_swanlab
 import argparse
 
 def print_args(cfg):
@@ -94,6 +95,11 @@ def main():
 
     parser.add_argument('--data_cfg', type=str, help="Path to the data configuration file")
     parser.add_argument('--train_cfg', type=str, help="Path to the training configuration file")
+    parser.add_argument('--use_swanlab', action='store_true', help="Enable SwanLab experiment logging")
+    parser.add_argument('--swanlab_project', type=str, default='BIMC_reproduce', help="SwanLab project name")
+    parser.add_argument('--swanlab_experiment', type=str, default='', help="SwanLab experiment name")
+    parser.add_argument('--swanlab_mode', type=str, default='online', choices=['online', 'offline', 'local', 'disabled'],
+                        help="SwanLab running mode")
 
     args = parser.parse_args()
 
@@ -101,6 +107,7 @@ def main():
     train_cfg = args.train_cfg
 
     cfg = setup_cfg(data_cfg, train_cfg)
+    init_swanlab(cfg, args)
 
     # Set the random seed and GPU ID
     set_seed(cfg.SEED)
@@ -109,7 +116,10 @@ def main():
     # Import and run the trainer
     from engine.engine import Runner
     engine = Runner(cfg)
-    engine.run()
+    try:
+        engine.run()
+    finally:
+        finish()
 
 
 if __name__ == '__main__':

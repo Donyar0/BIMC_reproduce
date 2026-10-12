@@ -5,6 +5,7 @@ from datasets.data_manager import DatasetManager
 from torch.nn import functional as F
 from tqdm import tqdm
 from utils.evaluator import AccuracyEvaluator
+from utils.experiment_logger import log_metrics
 from models.bimc import BiMC
 import numpy as np
 import time
@@ -101,11 +102,24 @@ class Runner:
             print(f'=> Task [{i}], Acc: {acc["mean_acc"]:.3f}')
             self.acc_list.append(round(acc["mean_acc"], 3))
             self.task_acc_list.append(acc['task_acc'])
+            log_metrics({
+                'task_id': i,
+                'mean_acc': acc['mean_acc'],
+                'base_avg_acc': acc['base_avg_acc'],
+                'inc_avg_acc': acc['inc_avg_acc'],
+                'harmonic_acc': acc['harmonic_acc'],
+                'elapsed_time': elapsed_time,
+            }, step=i)
 
         print(f'Final acc:{self.acc_list}')
         print('Task-wise acc:')
         for i, task_acc in enumerate(self.task_acc_list):
             print(f'task {i:2d}, acc:{task_acc}')
+        log_metrics({
+            'final_acc': self.acc_list[-1] if self.acc_list else 0.0,
+            "avg_acc": sum(self.acc_list) / len(self.acc_list),
+            
+        })
     
 
     @torch.no_grad()
