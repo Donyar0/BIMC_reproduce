@@ -82,22 +82,37 @@ Captions are truncated to CLIP's 77-token context size if necessary.
 formatted as `image_filename.jpg<TAB>caption`. Use
 `configs/datasets/cub200_image_descriptions.yaml`.
 
-**CIFAR100**: Provide a JSON file at
-`description/cifar100_image_descriptions.json`, mapping the **original
-torchvision training dataset indices** to captions. Example *format only*:
+**CIFAR100**: This repository ALREADY includes image-derived descriptions
+in `description/cifar100/`, e.g. `apple_descriptions.txt` with
+`train_00002.png<TAB>caption` lines. Each `train_NNNNN.png` is matched
+against the original torchvision CIFAR100 training index. Use
+`configs/datasets/cifar100_image_descriptions.yaml`; no JSON conversion or
+additional caption generation is required **for the caption-covered samples**.
 
-```json
-{
-  "0": "Description of training image 0",
-  "1": "Description of training image 1"
-}
-```
+**Important FSCIL sampling difference:** Not every CIFAR100 class has captions
+for all 500 training images (some files contain only 20 entries). A randomly
+sampled novel 5-shot set may therefore contain no corresponding captions.
+For immediate execution, the CIFAR100 image-caption YAML explicitly enables
+`IMAGE_DESCRIPTION_CAPTION_AWARE_SAMPLING: True`: when sampling each *novel*
+class's 5 support images, the data manager selects randomly among TRAIN
+images with captions. Base training image selection remains unchanged.
+For each class the text prototype uses up to five captions that actually
+belong to its selected support images; no unused or test image captions
+contribute. If insufficient matches exist, the code raises a clear error.
 
-The example captions are placeholders, not valid annotations. No CIFAR100
-image-generated captions are bundled or automatically generated. Use
-`configs/datasets/cifar100_image_descriptions.yaml` once you have
-generated captions for actual training images. Each sampled support image
-must be represented in the caption JSON.
+**Fair comparison:** Caption-aware selection changes the novel support split.
+To compare with label descriptions, use the same CIFAR100 image-caption YAML
+but set `DESCRIPTION_SOURCE: "label"` while keeping
+`IMAGE_DESCRIPTION_CAPTION_AWARE_SAMPLING: True` and the same random seed.
+Do NOT compare results with a prior label-description experiment using the
+original unrestricted 5-shot split as if the support sets were identical.
+
+Alternatively, to preserve your original 5-shot split set
+`IMAGE_DESCRIPTION_CAPTION_AWARE_SAMPLING: False` and generate missing
+captions for those exact sampled training images. The code will refuse
+to substitute descriptions of non-support images.
+
+A JSON mapping of original training indices to captions is also supported.
 
 For an isolated ablation, use `USE_PGA: False`, keep the same seed,
 `LAMBDA_T`, `USING_ENSEMBLE`, backbone and dataset split, and compare
