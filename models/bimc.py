@@ -229,7 +229,7 @@ class BiMC(nn.Module):
 
         # [C_task, D, K] attribute bases, [C_task, D] tangent-space centers.
         # Build from original normalized features BEFORE vision prototype calibration.
-        use_pga = getattr(self.cfg.TRAINER.BiMC, 'USE_PGA', True)
+        use_pga = getattr(self.cfg.TRAINER.BiMC, 'USE_PGA', False)
         if use_pga:
             pga_basis, pga_centers = self.compute_attribute_basis(
                 images_features, images_targets,
