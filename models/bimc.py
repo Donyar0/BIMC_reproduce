@@ -181,10 +181,14 @@ class BiMC(nn.Module):
 
             captions, missing = [], []
             if by_image_id is None:
-                matches = sorted(path.glob(f"{global_label + 1:03d}.*_descriptions.txt"))
+                # CIFAR100: apple_descriptions.txt; CUB200: 001.Black_footed_Albatross_descriptions.txt.
+                normalized_name = str(class_name).replace(" ", "_").replace("-", "_").replace("/", "_")
+                cifar_file = path / f"{normalized_name}_descriptions.txt"
+                matches = ([cifar_file] if cifar_file.is_file() else
+                           sorted(path.glob(f"{global_label + 1:03d}.*_descriptions.txt")))
                 if len(matches) != 1:
                     raise FileNotFoundError(
-                        f"Expected one CUB caption file for class {global_label} "
+                        f"Expected one image-caption file for class {global_label} "
                         f"({class_name}) in {path}; found {len(matches)}"
                     )
                 class_captions = {}
@@ -200,20 +204,36 @@ class BiMC(nn.Module):
                             raise ValueError(f"Duplicate caption for {image_name} in {matches[0]}")
                         class_captions[image_name] = parts[1].strip()
 
+            # Only sample *caption-covered* images among this session's support.
+            # Base may contain 500 supports but only 20 captions; we can still
+            # safely use five because these are among the 500 accessible images.
+            # Novel typically has five supports; all five must be covered.
+            needed = min(max_per_class, len(indices)) if max_per_class else len(indices)
             for i in indices:
                 img = support.images[i]
-                image_id = (Path(str(img)).name if support.use_path
-                            else str(int(support.source_indices[i])))
-                caption = (by_image_id if by_image_id is not None else class_captions).get(image_id)
-                if not isinstance(caption, str) or not caption.strip():
-                    missing.append(image_id)
+                source_idx = int(support.source_indices[i])
+                if support.use_path:
+                    image_id = Path(str(img)).name
+                elif by_image_id is None:
+                    # Repository's CIFAR100 per-image files use train_00002.png.
+                    image_id = f"train_{source_idx:05d}.png"
                 else:
+                    image_id = str(source_idx)
+                caption = (by_image_id if by_image_id is not None else class_captions).get(image_id)
+                if isinstance(caption, str) and caption.strip():
                     captions.append(caption.strip())
-            if missing:
+                    if len(captions) >= needed:
+                        break
+                else:
+                    missing.append(image_id)
+            if len(captions) < needed:
                 raise ValueError(
-                    f"Missing {len(missing)} support-image captions for class "
-                    f"{global_label} ({class_name}), e.g. {missing[:5]}. "
-                    "Do not replace them using test or future-session images."
+                    f"Only {len(captions)}/{needed} support-image captions are available "
+                    f"for class {global_label} ({class_name}); missing e.g. {missing[:5]}. "
+                    "For CIFAR100 novel classes, enable "
+                    "IMAGE_DESCRIPTION_CAPTION_AWARE_SAMPLING to sample training "
+                    "supports from caption-covered images. Never use captions of "
+                    "unselected or test images to fill this gap."
                 )
 
             encoded = []
