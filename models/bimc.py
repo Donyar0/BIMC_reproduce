@@ -127,6 +127,64 @@ class BiMC(nn.Module):
         return description_embeddings, all_targets, mean_embeddings
 
 
+
+    @torch.no_grad()
+    def compute_attribute_basis(self, features, labels, K=8):
+        """Compute per-class PGA-like tangent attribute bases from CLIP features.
+
+        Inputs:
+            features: [N, D] L2-normalized or raw image embeddings.
+            labels: [N] integer global class IDs.
+            K: number of attribute directions per class.
+        Returns:
+            basis: [C, D, K], padded with zeros if a class has fewer directions.
+            centers: [C, D] normalized class means (extrinsic Frechet approximation).
+        The C rows follow torch.unique(labels, sorted=True).
+        """
+        x_all = F.normalize(features.float(), dim=-1)  # [N, D]
+        basis_list, center_list = [], []
+        for label in torch.unique(labels, sorted=True):
+            x = x_all[labels == label]                    # [N_c, D]
+            center = F.normalize(x.mean(dim=0), dim=0)   # [D]
+            cosine = (x @ center).clamp(-1.0 + 1e-6, 1.0 - 1e-6)  # [N_c]
+            theta = torch.acos(cosine)                   # [N_c]
+            scale = theta / torch.sqrt((1 - cosine.square()).clamp_min(1e-12))
+            tangent = scale[:, None] * (x - cosine[:, None] * center[None, :])  # [N_c, D]
+            # Right singular vectors span the leading tangent directions.
+            _, _, vh = torch.linalg.svd(tangent, full_matrices=False)
+            rank = min(K, vh.shape[0], max(x.shape[0] - 1, 0))
+            directions = vh[:rank].T                     # [D, rank]
+            if rank < K:
+                directions = F.pad(directions, (0, K - rank))  # [D, K]
+            basis_list.append(directions)
+            center_list.append(center)
+        return torch.stack(basis_list, dim=0), torch.stack(center_list, dim=0)
+
+    @torch.no_grad()
+    def attribute_logits(self, img_feat, basis, centers):
+        """Negative tangent-subspace reconstruction error for each class.
+
+        Inputs:
+            img_feat: [B, D] CLIP image features.
+            basis: [C, D, K] class-specific tangent directions.
+            centers: [C, D] original normalized class centers.
+        Returns:
+            scores: [B, C], larger means closer to the attribute subspace.
+        """
+        z = F.normalize(img_feat.float(), dim=-1)     # [B, D]
+        mu = F.normalize(centers.float(), dim=-1)     # [C, D]
+        basis = basis.float()                          # [C, D, K]
+        cosine = (z @ mu.T).clamp(-1 + 1e-6, 1 - 1e-6)  # [B, C]
+        theta = torch.acos(cosine)                    # [B, C]
+        scale = theta / torch.sqrt((1 - cosine.square()).clamp_min(1e-12))
+        tangent = scale[..., None] * (
+            z[:, None, :] - cosine[..., None] * mu[None, :, :]
+        )                                             # [B, C, D]
+        coeff = torch.einsum("bcd,cdk->bck", tangent, basis)  # [B, C, K]
+        projection = torch.einsum("bck,cdk->bcd", coeff, basis)  # [B, C, D]
+        residual = tangent - projection               # [B, C, D]
+        return -residual.square().sum(dim=-1)         # [B, C]
+
     def soft_calibration(self, base_protos, cur_protos):
         shift_weight = self.cfg.TRAINER.BiMC.LAMBDA_I
         tau = self.cfg.TRAINER.BiMC.TAU
@@ -169,6 +227,17 @@ class BiMC(nn.Module):
         images_features, images_targets, images_proto = \
                                     self.inference_all_img_feature(loader, cls_begin_index)
 
+        # [C_task, D, K] attribute bases, [C_task, D] tangent-space centers.
+        # Build from original normalized features BEFORE vision prototype calibration.
+        use_pga = getattr(self.cfg.TRAINER.BiMC, 'USE_PGA', True)
+        if use_pga:
+            pga_basis, pga_centers = self.compute_attribute_basis(
+                images_features, images_targets,
+                K=int(getattr(self.cfg.TRAINER.BiMC, 'PGA_K', 8))
+            )
+        else:
+            pga_basis, pga_centers = None, None
+
         if cls_begin_index != 0:
             if calibrate_novel_vision_proto:
                 print(f'calibrate vision proto on class [{class_index}]')
@@ -195,7 +264,9 @@ class BiMC(nn.Module):
             'text_features': text_features,
             'text_targets': text_targets,           
   
-            'image_proto': images_proto,
+            'image_proto': images_proto,        # [C_task, D]
+            'pga_basis': pga_basis,             # [C_task, D, K] or None
+            'pga_centers': pga_centers,         # [C_task, D] or None
             'images_features': images_features,
             'images_targets': images_targets,
             'cov_image': cov_images,
@@ -211,7 +282,7 @@ class BiMC(nn.Module):
                            description_proto,
                            description_features, description_targets,
                            text_features,
-                           beta):
+                           beta, pga_basis=None, pga_centers=None):
     
         def knn_similarity_scores(queries, support_features, support_labels):
             """
@@ -272,8 +343,14 @@ class BiMC(nn.Module):
         # Note that image_proto has already been calibrated in the `build_task_statistics` function.
         fused_proto = beta * ((1 - lambda_t) * text_features + lambda_t * description_proto) + (1 - beta) * image_proto        
         fused_proto = F.normalize(fused_proto, dim=-1)  
-        logits_proto_fused = img_feat @ fused_proto.t()
-        prob_fused_proto = F.softmax(logits_proto_fused, dim=-1)
+        logits_proto_fused = img_feat @ fused_proto.t()  # [B, C]
+        if pga_basis is not None and pga_centers is not None:
+            # img_feat [B,D], pga_basis [C,D,K], pga_centers [C,D]
+            # pga_scores [B,C]: negative tangent-subspace reconstruction error.
+            pga_scores = self.attribute_logits(img_feat, pga_basis, pga_centers)
+            pga_weight = float(getattr(self.cfg.TRAINER.BiMC, 'PGA_WEIGHT', 0.1))
+            logits_proto_fused = logits_proto_fused + pga_weight * pga_scores
+        prob_fused_proto = F.softmax(logits_proto_fused, dim=-1)  # [B, C]
 
         logits_cov = _cov_forward(img_feat, image_proto, cov_image)
         logits_knn = knn_similarity_scores(img_feat, description_features, description_targets)    
