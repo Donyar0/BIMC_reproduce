@@ -96,9 +96,10 @@ For immediate execution, the CIFAR100 image-caption YAML explicitly enables
 `IMAGE_DESCRIPTION_CAPTION_AWARE_SAMPLING: True`: when sampling each *novel*
 class's 5 support images, the data manager selects randomly among TRAIN
 images with captions. Base training image selection remains unchanged.
-For each class the text prototype uses up to five captions that actually
-belong to its selected support images; no unused or test image captions
-contribute. If insufficient matches exist, the code raises a clear error.
+For each class the text prototype searches ALL current-session support
+images for up to five available matching captions (rather than checking only
+the first five support images). No unused or test image captions contribute.
+If fewer than five matches exist, the code raises a clear error.
 
 **Fair comparison:** Caption-aware selection changes the novel support split.
 To compare with label descriptions, use the same CIFAR100 image-caption YAML
