@@ -183,7 +183,12 @@ class BiMC(nn.Module):
         coeff = torch.einsum("bcd,cdk->bck", tangent, basis)  # [B, C, K]
         projection = torch.einsum("bck,cdk->bcd", coeff, basis)  # [B, C, D]
         residual = tangent - projection               # [B, C, D]
-        return -residual.square().sum(dim=-1)         # [B, C]
+        # Experiment A: normalize by total tangent energy to reduce
+        # dependence on the query-to-class-center geodesic distance.
+        residual_energy = residual.square().sum(dim=-1)  # [B, C]
+        total_energy = tangent.square().sum(dim=-1)      # [B, C]
+        scores = -residual_energy / total_energy.clamp_min(1e-6)  # [B, C]
+        return scores  # [B, C]
 
     def soft_calibration(self, base_protos, cur_protos):
         shift_weight = self.cfg.TRAINER.BiMC.LAMBDA_I
