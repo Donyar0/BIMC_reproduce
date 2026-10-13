@@ -61,61 +61,36 @@ In this repository, we build our code based on the following excellent open-sour
 
 
 
-## Training-image caption text calibration (experiment)
+## Label + training-image description fusion
 
-Default `DATASET.DESCRIPTION_SOURCE: "label"` keeps the original label-generated
-description prototype. Set `"image"` to replace **only the description prototype
-used in BIMC text calibration**. Label text templates, vision prototypes,
-covariance, PGA, and the label-description matching ensemble branch remain the
-same. `TRAINER.BiMC.TEXT_CALIBRATION: True` is required for this replacement
-to affect the fused classifier.
+Set `DATASET.DESCRIPTION_SOURCE: "fusion"` and
+`DATASET.DESCRIPTION_FUSION_ALPHA: 0.5` to combine the original BIMC
+description prototype and the image-caption prototype:
 
-The implementation uses captions **only for the support images actually sampled
-from the current training session**, to prevent using non-support or test images
-in 5-shot incremental sessions. It raises an error if those captions are missing.
-The default caption budget is five support images per class (also for base
-classes), configurable using `IMAGE_DESCRIPTION_MAX_PER_CLASS` (0 = all).
-Captions are truncated to CLIP's 77-token context size if necessary.
+```
+d_fused = normalize((1 - alpha) * d_label + alpha * d_image)
+t_calibrated = (1 - lambda_t) * t_template + lambda_t * d_fused
+```
 
-**CUB200**: This repository already includes AREA-style captions at
-`description/CUB/001.Black_footed_Albatross_descriptions.txt`, etc.,
-formatted as `image_filename.jpg<TAB>caption`. Use
-`configs/datasets/cub200_image_descriptions.yaml`.
+The original `label` mode is preserved as the baseline. The old
+`image`-only mode has been removed; `alpha=1` provides the image-only
+endpoint for controlled ablations within the fusion formulation.
+`TEXT_CALIBRATION=True` is required for the fused prototype to affect
+the final class scores. The original label descriptions still support
+the separate description-matching ensemble branch.
 
-**CIFAR100**: This repository ALREADY includes image-derived descriptions
-in `description/cifar100/`, e.g. `apple_descriptions.txt` with
-`train_00002.png<TAB>caption` lines. Each `train_NNNNN.png` is matched
-against the original torchvision CIFAR100 training index. Use
-`configs/datasets/cifar100_image_descriptions.yaml`; no JSON conversion or
-additional caption generation is required **for the caption-covered samples**.
+For CIFAR100, use
+`configs/datasets/cifar100_description_fusion.yaml` with existing
+`description/cifar100/*_descriptions.txt`. For CUB200, use
+`configs/datasets/cub200_description_fusion.yaml` with existing
+`description/CUB/*_descriptions.txt`. The text encoder remains frozen.
 
-**Important FSCIL sampling difference:** Not every CIFAR100 class has captions
-for all 500 training images (some files contain only 20 entries). A randomly
-sampled novel 5-shot set may therefore contain no corresponding captions.
-For immediate execution, the CIFAR100 image-caption YAML explicitly enables
-`IMAGE_DESCRIPTION_CAPTION_AWARE_SAMPLING: True`: when sampling each *novel*
-class's 5 support images, the data manager selects randomly among TRAIN
-images with captions. Base training image selection remains unchanged.
-For each class the text prototype searches ALL current-session support
-images for up to five available matching captions (rather than checking only
-the first five support images). No unused or test image captions contribute.
-If fewer than five matches exist, the code raises a clear error.
+Only captions of current-session training support images are used.
+CIFAR100 contains some classes with partial training-caption coverage.
+The provided fusion YAML selects novel 5-shot examples from
+caption-covered training images. This changes the sampling population:
+for a fair comparison, keep this option and the seed fixed in both
+`DESCRIPTION_SOURCE: label` and `fusion` runs.
 
-**Fair comparison:** Caption-aware selection changes the novel support split.
-To compare with label descriptions, use the same CIFAR100 image-caption YAML
-but set `DESCRIPTION_SOURCE: "label"` while keeping
-`IMAGE_DESCRIPTION_CAPTION_AWARE_SAMPLING: True` and the same random seed.
-Do NOT compare results with a prior label-description experiment using the
-original unrestricted 5-shot split as if the support sets were identical.
-
-Alternatively, to preserve your original 5-shot split set
-`IMAGE_DESCRIPTION_CAPTION_AWARE_SAMPLING: False` and generate missing
-captions for those exact sampled training images. The code will refuse
-to substitute descriptions of non-support images.
-
-A JSON mapping of original training indices to captions is also supported.
-
-For an isolated ablation, use `USE_PGA: False`, keep the same seed,
-`LAMBDA_T`, `USING_ENSEMBLE`, backbone and dataset split, and compare
-`DESCRIPTION_SOURCE: "label"` against `"image"`.
-SwanLab reports caption counts as `text_calibration/image_caption_count_*`.
+SwanLab records caption counts, fusion weight and label/image
+description-prototype cosine similarity.
