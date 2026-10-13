@@ -112,8 +112,9 @@ class DatasetManager:
         
         class_to_task_id = find_sublist_indices(self.class_index_in_task, class_idx)
         num_shot = self.num_base_shot if task_id == 0 else self.num_inc_shot
-        data, targets = self._select_data_from_class_index(x, y, class_idx, num_shot, source)
-        task_dataset = TaskDataset(data, targets, transform, class_to_task_id, self.class_names)
+        data, targets, source_indices = self._select_data_from_class_index(x, y, class_idx, num_shot, source)
+        task_dataset = TaskDataset(data, targets, transform, class_to_task_id,
+                                   self.class_names, source_indices=source_indices)
         return task_dataset
     
 
@@ -151,6 +152,7 @@ class DatasetManager:
     def _select_data_from_class_index(self, x, y, class_idx, shot, source):
         ret_x = []
         ret_y = []
+        ret_indices = []
         if isinstance(x, list):
             x = np.array(x)
         for c in class_idx:
@@ -175,10 +177,12 @@ class DatasetManager:
 
             ret_x.append(x[idx_selected])
             ret_y.append(y[idx_selected])
+            ret_indices.append(idx_selected)
         ret_x = np.concatenate(ret_x)
         ret_y = np.concatenate(ret_y)
+        ret_indices = np.concatenate(ret_indices)
 
-        return ret_x, ret_y
+        return ret_x, ret_y, ret_indices
     
 
     def _set_transform(self):
@@ -203,7 +207,8 @@ class DatasetManager:
 
 
 class TaskDataset(Dataset):
-    def __init__(self, images, labels, transform, class_to_task_id=None, class_name=None):
+    def __init__(self, images, labels, transform, class_to_task_id=None,
+                 class_name=None, source_indices=None):
         assert len(images) == len(labels), "Data size error!"
         self.images = images
         self.labels = labels
@@ -211,6 +216,7 @@ class TaskDataset(Dataset):
         self.use_path = isinstance(images[0], str)
         self.class_to_task_id = class_to_task_id
         self.class_name = class_name
+        self.source_indices = source_indices  # Original train/test dataset indices.
 
 
     def __len__(self):
@@ -235,7 +241,8 @@ class TaskDataset(Dataset):
             cls_name = ''
             
         ret = {
-            'idx': idx, 
+            'idx': idx,
+            'source_index': int(self.source_indices[idx]) if self.source_indices is not None else idx,
             'image': image,
             'label': label,
             'cls_name': cls_name,
