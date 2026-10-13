@@ -176,9 +176,10 @@ class BiMC(nn.Module):
                        if int(target) == global_label]
             if not indices:
                 raise ValueError(f"No support images for class {global_label}: {class_name}")
-            if max_per_class:
-                indices = indices[:max_per_class]
-
+            # Do NOT limit indices before checking caption availability.
+            # E.g. a base class has 500 support images but may have captions
+            # only for 69 of them. Search all 500 support images for up to
+            # max_per_class matched captions; never use a non-support image.
             captions, missing = [], []
             if by_image_id is None:
                 # CIFAR100: apple_descriptions.txt; CUB200: 001.Black_footed_Albatross_descriptions.txt.
