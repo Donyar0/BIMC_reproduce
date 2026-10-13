@@ -52,6 +52,15 @@ class Runner:
         for key in keys_to_merge:
             result[key] = torch.cat([d[key] for d in dict_list], dim=0)
 
+        # PGA tensors are class aligned: [C_task,D,K] and [C_task,D].
+        # Concatenate per-task statistics into [C_all,D,K] and [C_all,D].
+        if all(d.get('pga_basis') is not None for d in dict_list):
+            result['pga_basis'] = torch.cat([d['pga_basis'] for d in dict_list], dim=0)
+            result['pga_centers'] = torch.cat([d['pga_centers'] for d in dict_list], dim=0)
+        else:
+            result['pga_basis'] = None
+            result['pga_centers'] = None
+
 
         weights = [len(d['class_index']) for d in dict_list]
 
@@ -150,7 +159,9 @@ class Runner:
                                                    description_features, 
                                                    description_targets,
                                                    text_features,
-                                                   beta=beta)
+                                                   beta=beta,
+                                                   pga_basis=state_dict['pga_basis'],  # [C_all,D,K] or None
+                                                   pga_centers=state_dict['pga_centers'])  # [C_all,D] or None
 
             all_logits.append(logits)
             all_targets.append(targets)
