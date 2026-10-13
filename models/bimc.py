@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import models.clip.clip as clip
 import json
+from pathlib import Path
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -129,6 +130,105 @@ class BiMC(nn.Module):
 
 
     @torch.no_grad()
+    def inference_image_description_prototype(self, class_names, loader, class_index,
+                                              description_path, max_per_class=5):
+        """CLIP description prototypes using ONLY current-session training support.
+
+        Inputs:
+            class_names: [C_task] names in the order of class_index.
+            loader: task training data loader, with dataset.source_indices.
+            class_index: [C_task] zero-based global class labels.
+            description_path: CUB/AREA-style directory or image-ID JSON file.
+            max_per_class: captions per class, 0 means all support examples.
+        Returns:
+            prototypes: [C_task,D] normalized text prototypes.
+            counts: [C_task] selected caption counts.
+        """
+        path = Path(description_path)
+        if not description_path or not path.exists():
+            raise FileNotFoundError(
+                f"IMAGE_DESCRIPTION_PATH not found: {description_path!r}. "
+                "Provide captions for the selected training images first."
+            )
+        if max_per_class < 0:
+            raise ValueError("IMAGE_DESCRIPTION_MAX_PER_CLASS must be >= 0.")
+        support = loader.dataset
+        if not hasattr(support, "source_indices"):
+            raise ValueError("Training dataset must expose original source_indices.")
+        if len(class_names) != len(class_index):
+            raise ValueError("class_names and class_index length mismatch.")
+
+        by_image_id = None
+        if path.is_file():
+            if path.suffix.lower() != ".json":
+                raise ValueError("Image caption file must be JSON, or use CUB directory.")
+            with path.open("r", encoding="utf-8") as handle:
+                by_image_id = json.load(handle)
+            if not isinstance(by_image_id, dict):
+                raise ValueError("Caption JSON must map image IDs to strings.")
+        elif not path.is_dir():
+            raise ValueError(f"Invalid image caption path: {path}")
+
+        prototypes, counts = [], []
+        for class_name, global_label in zip(class_names, class_index):
+            global_label = int(global_label)
+            indices = [i for i, target in enumerate(support.labels)
+                       if int(target) == global_label]
+            if not indices:
+                raise ValueError(f"No support images for class {global_label}: {class_name}")
+            if max_per_class:
+                indices = indices[:max_per_class]
+
+            captions, missing = [], []
+            if by_image_id is None:
+                matches = sorted(path.glob(f"{global_label + 1:03d}.*_descriptions.txt"))
+                if len(matches) != 1:
+                    raise FileNotFoundError(
+                        f"Expected one CUB caption file for class {global_label} "
+                        f"({class_name}) in {path}; found {len(matches)}"
+                    )
+                class_captions = {}
+                with matches[0].open("r", encoding="utf-8") as handle:
+                    for line_no, line in enumerate(handle, 1):
+                        if not line.strip():
+                            continue
+                        parts = line.rstrip("\n").split("\t", 1)
+                        if len(parts) != 2 or not parts[1].strip():
+                            raise ValueError(f"Invalid caption line {matches[0]}:{line_no}")
+                        image_name = Path(parts[0]).name
+                        if image_name in class_captions:
+                            raise ValueError(f"Duplicate caption for {image_name} in {matches[0]}")
+                        class_captions[image_name] = parts[1].strip()
+
+            for i in indices:
+                img = support.images[i]
+                image_id = (Path(str(img)).name if support.use_path
+                            else str(int(support.source_indices[i])))
+                caption = (by_image_id if by_image_id is not None else class_captions).get(image_id)
+                if not isinstance(caption, str) or not caption.strip():
+                    missing.append(image_id)
+                else:
+                    captions.append(caption.strip())
+            if missing:
+                raise ValueError(
+                    f"Missing {len(missing)} support-image captions for class "
+                    f"{global_label} ({class_name}), e.g. {missing[:5]}. "
+                    "Do not replace them using test or future-session images."
+                )
+
+            encoded = []
+            for start in range(0, len(captions), 32):
+                # AREA image captions can exceed the CLIP 77-token limit.
+                tokens = clip.tokenize(captions[start:start + 32], truncate=True).to(self.device)
+                features = self.clip_model.encode_text(tokens).float()  # [B_caption,D]
+                encoded.append(F.normalize(features, dim=-1))
+            class_features = torch.cat(encoded, dim=0)  # [N_caption,D]
+            prototypes.append(F.normalize(class_features.mean(dim=0), dim=0))  # [D]
+            counts.append(len(captions))
+        return torch.stack(prototypes, dim=0), counts  # [C_task,D], [C_task]
+
+
+    @torch.no_grad()
     def compute_attribute_basis(self, features, labels, K=8):
         """Compute per-class PGA-like tangent attribute bases from CLIP features.
 
@@ -224,11 +324,27 @@ class BiMC(nn.Module):
 
         text_features, text_targets = self.inference_text_feature(class_names, self.template, cls_begin_index)
 
+        # Keep label-generated descriptions for the optional KNN ensemble head.
         description_features, description_targets, description_proto = \
-                                  self.inference_all_description_feature(class_names=class_names, 
-                                  gpt_path=self.cfg.DATASET.GPT_PATH,
-                                  cls_begin_index=cls_begin_index)
-        
+            self.inference_all_description_feature(
+                class_names=class_names, gpt_path=self.cfg.DATASET.GPT_PATH,
+                cls_begin_index=cls_begin_index)
+
+        # Image captions replace ONLY description_proto in text calibration:
+        # (1-lambda_t)*text_features + lambda_t*description_proto.
+        image_description_counts = None
+        source = self.cfg.DATASET.DESCRIPTION_SOURCE.lower()
+        if source == "image":
+            description_proto, image_description_counts = \
+                self.inference_image_description_prototype(
+                    class_names=class_names, loader=loader,
+                    class_index=class_index,
+                    description_path=self.cfg.DATASET.IMAGE_DESCRIPTION_PATH,
+                    max_per_class=int(self.cfg.DATASET.IMAGE_DESCRIPTION_MAX_PER_CLASS))
+            print(f"Image-caption text calibration: {image_description_counts} captions per class")
+        elif source != "label":
+            raise ValueError(f"Unexpected DESCRIPTION_SOURCE={source!r}; use label or image.")
+
         images_features, images_targets, images_proto = \
                                     self.inference_all_img_feature(loader, cls_begin_index)
 
@@ -263,6 +379,7 @@ class BiMC(nn.Module):
 
         return {
             'description_proto': description_proto,
+            'image_description_counts': image_description_counts,  # [C_task] or None
             'description_features': description_features,
             'description_targets': description_targets,
 
