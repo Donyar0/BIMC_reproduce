@@ -351,20 +351,32 @@ class BiMC(nn.Module):
                 class_names=class_names, gpt_path=self.cfg.DATASET.GPT_PATH,
                 cls_begin_index=cls_begin_index)
 
-        # Image captions replace ONLY description_proto in text calibration:
-        # (1-lambda_t)*text_features + lambda_t*description_proto.
+        # Fusion: retain original label-generated descriptions and combine with
+        # descriptions of actual support images for the text calibration prototype.
         image_description_counts = None
+        fusion_cosine = None
         source = self.cfg.DATASET.DESCRIPTION_SOURCE.lower()
-        if source == "image":
-            description_proto, image_description_counts = \
+        if source == 'fusion':
+            alpha = float(self.cfg.DATASET.DESCRIPTION_FUSION_ALPHA)
+            if alpha < 0.0 or alpha > 1.0:
+                raise ValueError('DESCRIPTION_FUSION_ALPHA must be between 0 and 1')
+            image_desc_proto, image_description_counts = \
                 self.inference_image_description_prototype(
                     class_names=class_names, loader=loader,
                     class_index=class_index,
                     description_path=self.cfg.DATASET.IMAGE_DESCRIPTION_PATH,
                     max_per_class=int(self.cfg.DATASET.IMAGE_DESCRIPTION_MAX_PER_CLASS))
-            print(f"Image-caption text calibration: {image_description_counts} captions per class")
-        elif source != "label":
-            raise ValueError(f"Unexpected DESCRIPTION_SOURCE={source!r}; use label or image.")
+            label_fp32 = description_proto.float()  # [C_task,D]
+            image_fp32 = image_desc_proto.float()  # [C_task,D]
+            fusion_cosine = F.cosine_similarity(label_fp32, image_fp32, dim=-1).mean().item()
+            description_proto = F.normalize(
+                (1.0 - alpha) * label_fp32 + alpha * image_fp32, dim=-1
+            ).to(dtype=description_proto.dtype)  # [C_task,D]
+            print(f'Description fusion alpha={alpha:.2f}, '
+                  f'caption counts={image_description_counts}, '
+                  f'prototype cosine={fusion_cosine:.4f}')
+        elif source != 'label':
+            raise ValueError(f'Unknown DESCRIPTION_SOURCE={source!r}; use label or fusion')
 
         images_features, images_targets, images_proto = \
                                     self.inference_all_img_feature(loader, cls_begin_index)
@@ -401,6 +413,7 @@ class BiMC(nn.Module):
         return {
             'description_proto': description_proto,
             'image_description_counts': image_description_counts,  # [C_task] or None
+            'description_fusion_cosine': fusion_cosine,
             'description_features': description_features,
             'description_targets': description_targets,
 
