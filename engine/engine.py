@@ -105,6 +105,8 @@ class Runner:
                     'text_calibration/image_caption_count_mean': sum(counts) / len(counts),
                     'text_calibration/image_caption_count_min': min(counts),
                     'text_calibration/image_caption_count_max': max(counts),
+                    'text_calibration/fusion_alpha': self.cfg.DATASET.DESCRIPTION_FUSION_ALPHA,
+                    'text_calibration/label_image_cosine_mean': current_state_dict['description_fusion_cosine'],
                 }, step=i)
 
             state_dict_list.append(current_state_dict)            
