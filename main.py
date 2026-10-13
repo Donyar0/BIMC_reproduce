@@ -36,6 +36,9 @@ def extend_cfg(cfg):
     cfg.DATASET.NAME = ''
     cfg.DATASET.ROOT = ''
     cfg.DATASET.GPT_PATH = ''
+    cfg.DATASET.DESCRIPTION_SOURCE = 'label'  # label | image
+    cfg.DATASET.IMAGE_DESCRIPTION_PATH = ''
+    cfg.DATASET.IMAGE_DESCRIPTION_MAX_PER_CLASS = 5  # 0 means all support images
     cfg.DATASET.NUM_CLASSES   = -1
     cfg.DATASET.NUM_INIT_CLS  = -1
     cfg.DATASET.NUM_INC_CLS   = -1
@@ -70,6 +73,9 @@ def extend_cfg(cfg):
     cfg.TRAINER.BiMC.GAMMA_BASE = -1.0
     cfg.TRAINER.BiMC.GAMMA_INC = -1.0
     cfg.TRAINER.BiMC.USING_ENSEMBLE = False
+    cfg.TRAINER.BiMC.USE_PGA = False
+    cfg.TRAINER.BiMC.PGA_K = 8
+    cfg.TRAINER.BiMC.PGA_WEIGHT = 0.1
 
 
 
