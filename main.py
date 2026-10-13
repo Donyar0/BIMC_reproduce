@@ -36,7 +36,8 @@ def extend_cfg(cfg):
     cfg.DATASET.NAME = ''
     cfg.DATASET.ROOT = ''
     cfg.DATASET.GPT_PATH = ''
-    cfg.DATASET.DESCRIPTION_SOURCE = 'label'  # label | image
+    cfg.DATASET.DESCRIPTION_SOURCE = 'label'  # label | fusion
+    cfg.DATASET.DESCRIPTION_FUSION_ALPHA = 0.5
     cfg.DATASET.IMAGE_DESCRIPTION_PATH = ''
     cfg.DATASET.IMAGE_DESCRIPTION_MAX_PER_CLASS = 5  # 0 means all support images
     cfg.DATASET.IMAGE_DESCRIPTION_CAPTION_AWARE_SAMPLING = False
