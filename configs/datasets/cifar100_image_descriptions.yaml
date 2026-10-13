@@ -3,8 +3,9 @@ DATASET:
   ROOT: "/home/miner/zdy/datasets/cifar100/"
   GPT_PATH: "./description/cifar100_prompts_full.json"
   DESCRIPTION_SOURCE: "image"
-  IMAGE_DESCRIPTION_PATH: "./description/cifar100_image_descriptions.json"
+  IMAGE_DESCRIPTION_PATH: "./description/cifar100"
   IMAGE_DESCRIPTION_MAX_PER_CLASS: 5
+  IMAGE_DESCRIPTION_CAPTION_AWARE_SAMPLING: True  # Novel shots sampled from caption-covered training images
   NUM_CLASSES: 100
   NUM_INIT_CLS: 60
   NUM_INC_CLS: 5
