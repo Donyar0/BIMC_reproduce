@@ -39,6 +39,7 @@ def extend_cfg(cfg):
     cfg.DATASET.DESCRIPTION_SOURCE = 'label'  # label | image
     cfg.DATASET.IMAGE_DESCRIPTION_PATH = ''
     cfg.DATASET.IMAGE_DESCRIPTION_MAX_PER_CLASS = 5  # 0 means all support images
+    cfg.DATASET.IMAGE_DESCRIPTION_CAPTION_AWARE_SAMPLING = False
     cfg.DATASET.NUM_CLASSES   = -1
     cfg.DATASET.NUM_INIT_CLS  = -1
     cfg.DATASET.NUM_INC_CLS   = -1
