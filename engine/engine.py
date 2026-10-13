@@ -99,6 +99,14 @@ class Runner:
                                                              class_index=self.data_manager.class_index_in_task[i], 
                                                              calibrate_novel_vision_proto=self.cfg.TRAINER.BiMC.VISION_CALIBRATION,)
 
+            counts = current_state_dict.get('image_description_counts')
+            if counts is not None:
+                log_metrics({
+                    'text_calibration/image_caption_count_mean': sum(counts) / len(counts),
+                    'text_calibration/image_caption_count_min': min(counts),
+                    'text_calibration/image_caption_count_max': max(counts),
+                }, step=i)
+
             state_dict_list.append(current_state_dict)            
             merged_state_dict = self.merge_dicts(state_dict_list)
 
