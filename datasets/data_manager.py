@@ -1,4 +1,6 @@
 import numpy as np
+from pathlib import Path
+import re
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
@@ -18,6 +20,8 @@ class DatasetManager:
         self.num_inc_cls     = cfg.DATASET.NUM_INC_CLS
         self.num_base_shot   = cfg.DATASET.NUM_BASE_SHOT
         self.num_inc_shot    = cfg.DATASET.NUM_INC_SHOT
+        self.caption_aware_shot = getattr(cfg.DATASET, 'IMAGE_DESCRIPTION_CAPTION_AWARE_SAMPLING', False)
+        self.caption_index_cache = {}  # {global class ID: set(original train indices)}
         
         # training setting of data
         self.num_workers     = cfg.DATALOADER.NUM_WORKERS
@@ -149,6 +153,37 @@ class DatasetManager:
     
 
 
+    def _caption_covered_train_indices(self, class_id):
+        """IDs of TRAIN images with captions, read only for current novel class."""
+        class_id = int(class_id)
+        if class_id in self.caption_index_cache:
+            return self.caption_index_cache[class_id]
+        directory = Path(self.cfg.DATASET.IMAGE_DESCRIPTION_PATH)
+        if not directory.is_dir():
+            raise ValueError(
+                "Caption-aware sampling needs IMAGE_DESCRIPTION_PATH to be a "
+                "CIFAR100 per-class caption directory."
+            )
+        class_name = self.class_names[class_id].replace(" ", "_").replace("-", "_").replace("/", "_")
+        file = directory / (class_name + "_descriptions.txt")
+        if not file.is_file():
+            raise FileNotFoundError(f"Caption file missing: {file}")
+        ids = set()
+        with file.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                name = line.split("\t", 1)[0]
+                match = re.fullmatch(r"train_(\d{5})\.png", name.strip())
+                if match is not None:
+                    ids.add(int(match.group(1)))
+        if len(ids) < self.num_inc_shot:
+            raise ValueError(
+                f"Class {class_id} has only {len(ids)} caption-covered training images; "
+                f"need {self.num_inc_shot} for FSCIL."
+            )
+        self.caption_index_cache[class_id] = ids
+        return ids
+
+
     def _select_data_from_class_index(self, x, y, class_idx, shot, source):
         ret_x = []
         ret_y = []
@@ -157,6 +192,19 @@ class DatasetManager:
             x = np.array(x)
         for c in class_idx:
             idx_c = np.where(y == c)[0]
+            if self.caption_aware_shot and source == 'train':
+                if self.dataset_name.lower() != 'cifar100':
+                    raise ValueError('Caption-aware support sampling currently supports CIFAR100 only.')
+                if int(c) >= self.num_init_cls:
+                    # Change sampling population only for the current novel 5-shot class.
+                    # Base remains unchanged at up to 500 images.
+                    available = self._caption_covered_train_indices(c)
+                    idx_c = idx_c[np.isin(idx_c, list(available))]
+                    if len(idx_c) < shot:
+                        raise ValueError(
+                            f'Class {int(c)}: only {len(idx_c)} caption-covered '
+                            f'training images, need {shot}.'
+                        )
             
             if shot is not None and source == 'train':
                 # Random choosing index
