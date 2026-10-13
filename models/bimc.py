@@ -287,7 +287,8 @@ class BiMC(nn.Module):
                            description_proto,
                            description_features, description_targets,
                            text_features,
-                           beta, pga_basis=None, pga_centers=None):
+                           beta, pga_basis=None, pga_centers=None,
+                           return_pga_scores=False):
     
         def knn_similarity_scores(queries, support_features, support_labels):
             """
@@ -349,6 +350,7 @@ class BiMC(nn.Module):
         fused_proto = beta * ((1 - lambda_t) * text_features + lambda_t * description_proto) + (1 - beta) * image_proto        
         fused_proto = F.normalize(fused_proto, dim=-1)  
         logits_proto_fused = img_feat @ fused_proto.t()  # [B, C]
+        pga_scores = None  # Optional [B, C] scores before PGA_WEIGHT.
         if pga_basis is not None and pga_centers is not None:
             # img_feat [B,D], pga_basis [C,D,K], pga_centers [C,D]
             # pga_scores [B,C]: negative tangent-subspace reconstruction error.
@@ -373,7 +375,9 @@ class BiMC(nn.Module):
         inc_probs = ensemble_alpha * prob_fused_proto[:, NUM_BASE_CLS:] + (1 - ensemble_alpha) * prob_knn[:, NUM_BASE_CLS:]
 
         prob_fused = torch.cat([base_probs, inc_probs], dim=1)
-        logits = prob_fused
+        logits = prob_fused  # [B, C]
+        if return_pga_scores:
+            return logits, pga_scores  # [B, C], [B, C] or None
         return logits
 
 
