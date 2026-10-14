@@ -126,3 +126,58 @@ The older `DESCRIPTION_SOURCE: "fusion"` config remains an experimental
 ablation. It requires captions for every requested sampled support image
 and may fail when no annotation exists. The new dual mode is the recommended
 implementation for the original random-shot protocol.
+
+
+## Orthogonal semantic residual calibration (training-free)
+
+Experimental branch: `experiment/orthogonal-semantic-residual`.
+
+```bash
+python main.py --data_cfg configs/datasets/cifar100_orthogonal_residual.yaml --train_cfg configs/trainers/bimc.yaml --use_swanlab
+# Optional CUB configuration:
+python main.py --data_cfg configs/datasets/cub200_orthogonal_residual.yaml --train_cfg configs/trainers/bimc.yaml --use_swanlab
+# Geometry-only tests (CPU):
+python -m unittest discover -s tests -p 'test_semantic_residual.py'
+```
+
+The new `DESCRIPTION_SOURCE: "residual"` keeps the **original BiMC random-shot
+selection** and its original `BETA` (e.g. 0.65 for CIFAR100). It never
+resamples by caption availability, reads test captions, or uses captions of
+unselected training images. It does not change calibrated vision prototypes,
+covariance matching or the original description-KNN ensemble.
+
+For each class, `a` is the normalized prototype of original BiMC
+LLM-generated fine-grained category descriptions. Each selected training
+support image and *its own* available caption are encoded through frozen CLIP.
+After normalizing each feature, compute:
+
+```
+r_text   = text_caption - dot(text_caption, a)*a
+r_visual = image_feature - dot(image_feature, a)*a
+w_i      = max(0, cosine(r_text, r_visual))
+delta_c  = sum_i (w_i * r_text_i) / number_of_matched_support_captions
+text_bimc = (1 - lambda_t)*prompt_proto + lambda_t*label_description_proto
+text_new = text_bimc + RESIDUAL_ETA*delta_c
+final_proto = normalize(BETA*text_new + (1-BETA)*calibrated_visual_proto)
+```
+
+Near-zero residual norms are gated to zero using `RESIDUAL_MIN_NORM`.
+Negative residual alignment is also gated to zero. Corrections are **not**
+normalized before adding them to BiMC text, retaining the original
+text--visual fusion scale; `RESIDUAL_ETA: 0` exactly recovers the BiMC
+classifier under the same shot selection and otherwise unchanged configuration.
+
+Missing support captions simply yield a zero correction; the support images
+are unchanged. Partial caption coverage uses only matching selected images.
+On CIFAR100 most Novel classes currently have 20 annotated train examples
+out of 500, so few random 5-shots match the available captions. This means
+the residual experiment may behave nearly identically to BiMC on many
+Novel classes. Generate descriptions for the **five actually sampled**
+training supports to test this idea fully, without modifying the dataset split.
+
+SwanLab records caption support coverage, matched counts, positive residual
+alignment and average correction norm for each session. Use the same seed for
+the BiMC baseline, an unweighted-residual ablation and the default
+visual-evidence residual ablation. This is a research hypothesis, not a
+validated description hallucination detector; shared image/background bias
+may still yield positive residual alignment.
