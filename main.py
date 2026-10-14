@@ -36,13 +36,15 @@ def extend_cfg(cfg):
     cfg.DATASET.NAME = ''
     cfg.DATASET.ROOT = ''
     cfg.DATASET.GPT_PATH = ''
-    cfg.DATASET.DESCRIPTION_SOURCE = 'label'  # label | fusion | dual
+    cfg.DATASET.DESCRIPTION_SOURCE = 'label'  # label | fusion | dual | residual
     cfg.DATASET.DESCRIPTION_FUSION_ALPHA = 0.5
     cfg.DATASET.DUAL_TT_LOW = 0.2
     cfg.DATASET.DUAL_TT_HIGH = 0.8
     cfg.DATASET.DUAL_ALPHA_MAX = 0.1
     cfg.DATASET.DUAL_TV_CENTER = 0.3
     cfg.DATASET.DUAL_BETA_SHIFT = 0.1
+    cfg.DATASET.RESIDUAL_ETA = 0.1  # orthogonal correction strength
+    cfg.DATASET.RESIDUAL_MIN_NORM = 1e-4
     cfg.DATASET.IMAGE_DESCRIPTION_PATH = ''
     cfg.DATASET.IMAGE_DESCRIPTION_MAX_PER_CLASS = 5  # 0 means all support images
     cfg.DATASET.NUM_CLASSES   = -1
