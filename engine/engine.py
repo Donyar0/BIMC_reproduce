@@ -52,6 +52,14 @@ class Runner:
         for key in keys_to_merge:
             result[key] = torch.cat([d[key] for d in dict_list], dim=0)
 
+        # Per-class dual-consistency tensors follow task class order.
+        dual_keys = ('dual_alpha', 'dual_beta', 'dual_image_proto', 'dual_tt', 'dual_tv')
+        for key in dual_keys:
+            if all(d.get(key) is not None for d in dict_list):
+                result[key] = torch.cat([d[key] for d in dict_list], dim=0)
+            else:
+                result[key] = None
+
         # PGA tensors are class aligned: [C_task,D,K] and [C_task,D].
         # Concatenate per-task statistics into [C_all,D,K] and [C_all,D].
         if all(d.get('pga_basis') is not None for d in dict_list):
@@ -101,13 +109,22 @@ class Runner:
 
             counts = current_state_dict.get('image_description_counts')
             if counts is not None:
-                log_metrics({
+                diag = {
                     'text_calibration/image_caption_count_mean': sum(counts) / len(counts),
                     'text_calibration/image_caption_count_min': min(counts),
                     'text_calibration/image_caption_count_max': max(counts),
-                    'text_calibration/fusion_alpha': self.cfg.DATASET.DESCRIPTION_FUSION_ALPHA,
-                    'text_calibration/label_image_cosine_mean': current_state_dict['description_fusion_cosine'],
-                }, step=i)
+                    'text_calibration/image_caption_coverage': sum(n > 0 for n in counts) / len(counts),
+                }
+                if current_state_dict.get('dual_alpha') is not None:
+                    for key in ('dual_alpha', 'dual_beta', 'dual_tt', 'dual_tv'):
+                        vals = current_state_dict[key].float()
+                        diag['dual/' + key + '_mean'] = vals.mean().item()
+                        diag['dual/' + key + '_base_or_session_min'] = vals.min().item()
+                        diag['dual/' + key + '_base_or_session_max'] = vals.max().item()
+                else:
+                    diag['text_calibration/fusion_alpha'] = self.cfg.DATASET.DESCRIPTION_FUSION_ALPHA
+                    diag['text_calibration/label_image_cosine_mean'] = current_state_dict['description_fusion_cosine']
+                log_metrics(diag, step=i)
 
             state_dict_list.append(current_state_dict)            
             merged_state_dict = self.merge_dicts(state_dict_list)
@@ -174,7 +191,10 @@ class Runner:
                                                    beta=beta,
                                                    pga_basis=state_dict['pga_basis'],  # [C_all,D,K] or None
                                                    pga_centers=state_dict['pga_centers'],  # [C_all,D] or None
-                                                   return_pga_scores=True)
+                                                   return_pga_scores=True,
+                                                   dual_alpha=state_dict['dual_alpha'],
+                                                   dual_beta=state_dict['dual_beta'],
+                                                   dual_image_proto=state_dict['dual_image_proto'])
 
 
             # logits [B,C]; pga_scores [B,C] (or None); targets [B].
