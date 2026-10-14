@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import models.clip.clip as clip
 import json
 from pathlib import Path
+from models.semantic_residual import paired_orthogonal_residual
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -255,6 +256,90 @@ class BiMC(nn.Module):
 
 
     @torch.no_grad()
+    def inference_support_residual(self, class_names, loader, class_index,
+                                   anchors, img_features, img_labels):
+        """Return class-level corrections computed only from captioned selected supports."""
+        path = Path(self.cfg.DATASET.IMAGE_DESCRIPTION_PATH)
+        if not path.exists():
+            raise FileNotFoundError(f"Image description path not found: {path}")
+        ds = loader.dataset
+        if len(ds) != img_features.shape[0] or not hasattr(ds, "source_indices"):
+            raise ValueError("Missing aligned selected-support source indices")
+        if not torch.equal(torch.as_tensor(ds.labels, dtype=torch.long), img_labels.cpu().long()):
+            raise ValueError("Image feature order differs from support order")
+        if path.is_file():
+            if path.suffix.lower() != ".json":
+                raise ValueError("Caption mapping must be JSON or a directory")
+            with path.open(encoding="utf-8") as fp:
+                shared = json.load(fp)
+            if not isinstance(shared, dict):
+                raise ValueError("Caption JSON must be an ID-to-text dictionary")
+        else:
+            shared = None
+        deltas, counts, coverage, scores = [], [], [], []
+        max_count = int(self.cfg.DATASET.IMAGE_DESCRIPTION_MAX_PER_CLASS)
+        if max_count < 0:
+            raise ValueError("IMAGE_DESCRIPTION_MAX_PER_CLASS must be >= 0")
+        for cname, label, anchor in zip(class_names, class_index, anchors):
+            indices = [i for i, y in enumerate(ds.labels) if int(y) == int(label)]
+            if not indices:
+                raise ValueError(f"No support images for class {label}")
+            if shared is None:
+                safe = str(cname).replace(" ", "_").replace("-", "_").replace("/", "_")
+                candidate = path / f"{safe}_descriptions.txt"
+                matches = [candidate] if candidate.is_file() else sorted(
+                    path.glob(f"{int(label) + 1:03d}.*_descriptions.txt"))
+                if len(matches) != 1:
+                    raise FileNotFoundError(f"No unique description file for class {cname}")
+                mapping = {}
+                with matches[0].open(encoding="utf-8") as fp:
+                    for line in fp:
+                        if not line.strip():
+                            continue
+                        parts = line.rstrip("\n").split("\t", 1)
+                        if len(parts) != 2:
+                            raise ValueError(f"Invalid image caption in {matches[0]}")
+                        key = Path(parts[0]).name
+                        if key in mapping:
+                            raise ValueError(f"Duplicate caption image ID {key}")
+                        mapping[key] = parts[1].strip()
+            else:
+                mapping = shared
+            captions, local_ids = [], []
+            for i in indices:
+                if ds.use_path:
+                    image_id = Path(str(ds.images[i])).name
+                elif shared is None:
+                    image_id = f"train_{int(ds.source_indices[i]):05d}.png"
+                else:
+                    image_id = str(int(ds.source_indices[i]))
+                cap = mapping.get(image_id)
+                if isinstance(cap, str) and cap.strip():
+                    captions.append(cap.strip())
+                    local_ids.append(i)
+                    if max_count and len(captions) >= max_count:
+                        break
+            counts.append(len(captions))
+            coverage.append(len(indices))
+            if not captions:
+                deltas.append(torch.zeros_like(anchor, dtype=torch.float32))
+                scores.append(0.0)
+                continue
+            embedded = []
+            for j in range(0, len(captions), 32):
+                toks = clip.tokenize(captions[j:j + 32], truncate=True).to(self.device)
+                embedded.append(self.clip_model.encode_text(toks).float())
+            text_embed = torch.cat(embedded, dim=0)
+            visual_embed = img_features[local_ids].float()
+            delta, weights, cosine, _, _ = paired_orthogonal_residual(
+                anchor.float(), text_embed, visual_embed,
+                min_residual_norm=float(self.cfg.DATASET.RESIDUAL_MIN_NORM))
+            deltas.append(delta)
+            scores.append(weights.mean().item())
+        return torch.stack(deltas, dim=0), counts, coverage, scores
+
+
+    @torch.no_grad()
     def compute_attribute_basis(self, features, labels, K=8):
         """Compute per-class PGA-like tangent attribute bases from CLIP features.
 
@@ -380,7 +465,7 @@ class BiMC(nn.Module):
             print(f'Description fusion alpha={alpha:.2f}, '
                   f'caption counts={image_description_counts}, '
                   f'prototype cosine={fusion_cosine:.4f}')
-        elif source not in ('label', 'dual'):
+        elif source not in ('label', 'dual', 'residual'):
             raise ValueError(f'Unknown DESCRIPTION_SOURCE={source!r}; use label, fusion or dual')
 
         images_features, images_targets, images_proto = \
@@ -419,6 +504,18 @@ class BiMC(nn.Module):
             print(f'Dual consistency: caption coverage={image_description_counts}, '
                   f'alpha mean={dual_alpha.mean().item():.4f}, beta mean={dual_beta.mean().item():.4f}')
 
+        residual_correction = None
+        residual_counts = residual_possible = residual_scores = None
+        if source == 'residual':
+            if not self.cfg.TRAINER.BiMC.TEXT_CALIBRATION:
+                raise ValueError('Residual correction needs TEXT_CALIBRATION=True')
+            (residual_correction, residual_counts,
+             residual_possible, residual_scores) = self.inference_support_residual(
+                class_names, loader, class_index, description_proto,
+                images_features, images_targets)
+            print(f'Orthogonal residual counts={residual_counts}; '
+                  f'positive agreement={residual_scores}')
+
         # [C_task, D, K] attribute bases, [C_task, D] tangent-space centers.
         # Build from original normalized features BEFORE vision prototype calibration.
         use_pga = getattr(self.cfg.TRAINER.BiMC, 'USE_PGA', False)
@@ -452,6 +549,10 @@ class BiMC(nn.Module):
             'description_proto': description_proto,
             'image_description_counts': image_description_counts,  # [C_task] or None
             'description_fusion_cosine': fusion_cosine,
+            'residual_correction': residual_correction,
+            'residual_counts': residual_counts,
+            'residual_possible': residual_possible,
+            'residual_scores': residual_scores,
             'dual_alpha': dual_alpha,               # [C_task] or None
             'dual_beta': dual_beta,                 # [C_task] or None
             'dual_image_proto': dual_image_proto,   # [C_task,D] or None
@@ -483,7 +584,8 @@ class BiMC(nn.Module):
                            text_features,
                            beta, pga_basis=None, pga_centers=None,
                            return_pga_scores=False,
-                           dual_alpha=None, dual_beta=None, dual_image_proto=None):
+                           dual_alpha=None, dual_beta=None, dual_image_proto=None,
+                           residual_correction=None):
     
         def knn_similarity_scores(queries, support_features, support_labels):
             """
@@ -543,6 +645,12 @@ class BiMC(nn.Module):
         # Here we compute the classifier after modality calibration. 
         # Note that image_proto has already been calibrated in the `build_task_statistics` function.
         text_cal = (1 - lambda_t) * text_features + lambda_t * description_proto  # [C,D]
+        if residual_correction is not None:
+            eta = float(self.cfg.DATASET.RESIDUAL_ETA)
+            if eta < 0:
+                raise ValueError('RESIDUAL_ETA must be >= 0')
+            text_cal = text_cal + eta * residual_correction.to(
+                device=text_cal.device, dtype=text_cal.dtype)
         if dual_alpha is not None:
             if dual_image_proto is None or dual_beta is None:
                 raise ValueError('Dual consistency requires alpha, beta and image-caption prototypes')
