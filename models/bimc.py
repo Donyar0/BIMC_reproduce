@@ -131,7 +131,7 @@ class BiMC(nn.Module):
 
     @torch.no_grad()
     def inference_image_description_prototype(self, class_names, loader, class_index,
-                                              description_path, max_per_class=5):
+                                              description_path, max_per_class=5, allow_missing=False):
         """CLIP description prototypes using ONLY current-session training support.
 
         Inputs:
@@ -227,7 +227,7 @@ class BiMC(nn.Module):
                         break
                 else:
                     missing.append(image_id)
-            if len(captions) < needed:
+            if len(captions) < needed and not allow_missing:
                 raise ValueError(
                     f"Only {len(captions)}/{needed} support-image captions are available "
                     f"for class {global_label} ({class_name}); missing e.g. {missing[:5]}. "
@@ -237,6 +237,11 @@ class BiMC(nn.Module):
                     "unselected or test images to fill this gap."
                 )
 
+            if not captions:
+                # Unannotated selected support: neutral zero vector, gated out by alpha=0.
+                prototypes.append(torch.zeros(self.clip_model.text_projection.shape[1], device=self.device, dtype=torch.float32))
+                counts.append(0)
+                continue
             encoded = []
             for start in range(0, len(captions), 32):
                 # AREA image captions can exceed the CLIP 77-token limit.
@@ -375,11 +380,44 @@ class BiMC(nn.Module):
             print(f'Description fusion alpha={alpha:.2f}, '
                   f'caption counts={image_description_counts}, '
                   f'prototype cosine={fusion_cosine:.4f}')
-        elif source != 'label':
-            raise ValueError(f'Unknown DESCRIPTION_SOURCE={source!r}; use label or fusion')
+        elif source not in ('label', 'dual'):
+            raise ValueError(f'Unknown DESCRIPTION_SOURCE={source!r}; use label, fusion or dual')
 
         images_features, images_targets, images_proto = \
                                     self.inference_all_img_feature(loader, cls_begin_index)
+
+        # Dual consistency uses the original random support images: no caption-aware resampling.
+        # TT: label descriptions vs. selected-support caption prototype.
+        # TV: label descriptions vs. original selected-support visual prototype.
+        dual_alpha = dual_beta = dual_image_proto = None
+        dual_tt = dual_tv = None
+        if source == 'dual':
+            image_desc, image_description_counts = self.inference_image_description_prototype(
+                class_names=class_names, loader=loader, class_index=class_index,
+                description_path=self.cfg.DATASET.IMAGE_DESCRIPTION_PATH,
+                max_per_class=int(self.cfg.DATASET.IMAGE_DESCRIPTION_MAX_PER_CLASS),
+                allow_missing=True)
+            label = F.normalize(description_proto.float(), dim=-1)  # [C_task,D]
+            visual = F.normalize(images_proto.float(), dim=-1)  # [C_task,D]
+            has_caption = torch.tensor([n > 0 for n in image_description_counts],
+                                       device=label.device, dtype=torch.bool)  # [C_task]
+            image_desc = torch.where(has_caption[:, None], image_desc.float(), label)
+            dual_image_proto = image_desc.to(dtype=description_proto.dtype)  # [C_task,D]
+            dual_tt = F.cosine_similarity(label, image_desc, dim=-1)  # [C_task]
+            dual_tv = F.cosine_similarity(label, visual, dim=-1)  # [C_task]
+            # Conservative, bounded deterministic gates: never infer quality from missing captions.
+            lo = float(self.cfg.DATASET.DUAL_TT_LOW)
+            hi = float(self.cfg.DATASET.DUAL_TT_HIGH)
+            max_alpha = float(self.cfg.DATASET.DUAL_ALPHA_MAX)
+            beta_shift = float(self.cfg.DATASET.DUAL_BETA_SHIFT)
+            if not (-1 <= lo < hi <= 1 and 0 <= max_alpha <= 1 and beta_shift >= 0):
+                raise ValueError('Invalid dual consistency gate configuration')
+            dual_alpha = ((dual_tt - lo) / (hi - lo)).clamp(0, 1) * max_alpha
+            dual_alpha = torch.where(has_caption, dual_alpha, torch.zeros_like(dual_alpha))
+            beta0 = float(self.cfg.DATASET.BETA)
+            dual_beta = (beta0 + beta_shift * (dual_tv - float(self.cfg.DATASET.DUAL_TV_CENTER))).clamp(0, 1)
+            print(f'Dual consistency: caption coverage={image_description_counts}, '
+                  f'alpha mean={dual_alpha.mean().item():.4f}, beta mean={dual_beta.mean().item():.4f}')
 
         # [C_task, D, K] attribute bases, [C_task, D] tangent-space centers.
         # Build from original normalized features BEFORE vision prototype calibration.
@@ -414,6 +452,11 @@ class BiMC(nn.Module):
             'description_proto': description_proto,
             'image_description_counts': image_description_counts,  # [C_task] or None
             'description_fusion_cosine': fusion_cosine,
+            'dual_alpha': dual_alpha,               # [C_task] or None
+            'dual_beta': dual_beta,                 # [C_task] or None
+            'dual_image_proto': dual_image_proto,   # [C_task,D] or None
+            'dual_tt': dual_tt,                     # [C_task] or None
+            'dual_tv': dual_tv,                     # [C_task] or None
             'description_features': description_features,
             'description_targets': description_targets,
 
@@ -439,7 +482,8 @@ class BiMC(nn.Module):
                            description_features, description_targets,
                            text_features,
                            beta, pga_basis=None, pga_centers=None,
-                           return_pga_scores=False):
+                           return_pga_scores=False,
+                           dual_alpha=None, dual_beta=None, dual_image_proto=None):
     
         def knn_similarity_scores(queries, support_features, support_labels):
             """
@@ -498,7 +542,18 @@ class BiMC(nn.Module):
 
         # Here we compute the classifier after modality calibration. 
         # Note that image_proto has already been calibrated in the `build_task_statistics` function.
-        fused_proto = beta * ((1 - lambda_t) * text_features + lambda_t * description_proto) + (1 - beta) * image_proto        
+        text_cal = (1 - lambda_t) * text_features + lambda_t * description_proto  # [C,D]
+        if dual_alpha is not None:
+            if dual_image_proto is None or dual_beta is None:
+                raise ValueError('Dual consistency requires alpha, beta and image-caption prototypes')
+            # Stage 1: correct already-calibrated BiMC text representation.
+            a = dual_alpha.to(device=text_cal.device, dtype=text_cal.dtype)[:, None]  # [C,1]
+            text_cal = (1 - a) * text_cal + a * dual_image_proto.to(text_cal.dtype)  # [C,D]
+            # Stage 2: per-class text/vision weight, evaluated with support-only TV.
+            b = dual_beta.to(device=text_cal.device, dtype=text_cal.dtype)[:, None]  # [C,1]
+            fused_proto = b * text_cal + (1 - b) * image_proto  # [C,D]
+        else:
+            fused_proto = beta * text_cal + (1 - beta) * image_proto
         fused_proto = F.normalize(fused_proto, dim=-1)  
         logits_proto_fused = img_feat @ fused_proto.t()  # [B, C]
         pga_scores = None  # Optional [B, C] scores before PGA_WEIGHT.
