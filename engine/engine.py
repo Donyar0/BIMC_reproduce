@@ -52,6 +52,11 @@ class Runner:
         for key in keys_to_merge:
             result[key] = torch.cat([d[key] for d in dict_list], dim=0)
 
+        if all(d.get('residual_correction') is not None for d in dict_list):
+            result['residual_correction'] = torch.cat([d['residual_correction'] for d in dict_list], dim=0)
+        else:
+            result['residual_correction'] = None
+
         # Per-class dual-consistency tensors follow task class order.
         dual_keys = ('dual_alpha', 'dual_beta', 'dual_image_proto', 'dual_tt', 'dual_tv')
         for key in dual_keys:
@@ -126,6 +131,21 @@ class Runner:
                     diag['text_calibration/label_image_cosine_mean'] = current_state_dict['description_fusion_cosine']
                 log_metrics(diag, step=i)
 
+            if current_state_dict.get('residual_counts') is not None:
+                n = current_state_dict['residual_counts']
+                possible = current_state_dict['residual_possible']
+                scores = current_state_dict['residual_scores']
+                log_metrics({
+                    'residual/matched_support_count': sum(n),
+                    'residual/support_total': sum(possible),
+                    'residual/caption_coverage': sum(n) / max(sum(possible), 1),
+                    'residual/classes_with_captions': sum(x > 0 for x in n),
+                    'residual/positive_agreement_mean': sum(scores) / len(scores),
+                    'residual/correction_norm_mean':
+                        current_state_dict['residual_correction'].float().norm(dim=-1).mean().item(),
+                }, step=i)
+                print(f'Residual coverage task {i}: {sum(n)}/{sum(possible)} supports')
+
             state_dict_list.append(current_state_dict)            
             merged_state_dict = self.merge_dicts(state_dict_list)
 
@@ -194,7 +214,8 @@ class Runner:
                                                    return_pga_scores=True,
                                                    dual_alpha=state_dict['dual_alpha'],
                                                    dual_beta=state_dict['dual_beta'],
-                                                   dual_image_proto=state_dict['dual_image_proto'])
+                                                   dual_image_proto=state_dict['dual_image_proto'],
+                                                   residual_correction=state_dict['residual_correction'])
 
 
             # logits [B,C]; pga_scores [B,C] (or None); targets [B].
