@@ -61,36 +61,68 @@ In this repository, we build our code based on the following excellent open-sour
 
 
 
-## Label + training-image description fusion
+## Training-free dual consistency calibration (original BiMC 5-shot protocol)
 
-Set `DATASET.DESCRIPTION_SOURCE: "fusion"` and
-`DATASET.DESCRIPTION_FUSION_ALPHA: 0.5` to combine the original BIMC
-description prototype and the image-caption prototype:
+Run CIFAR100 with the original **random** 5-shot selection:
 
-```
-d_fused = normalize((1 - alpha) * d_label + alpha * d_image)
-t_calibrated = (1 - lambda_t) * t_template + lambda_t * d_fused
+```bash
+python main.py --data_cfg configs/datasets/cifar100_dual_consistency.yaml --train_cfg configs/trainers/bimc.yaml --use_swanlab
 ```
 
-The original `label` mode is preserved as the baseline. The old
-`image`-only mode has been removed; `alpha=1` provides the image-only
-endpoint for controlled ablations within the fusion formulation.
-`TEXT_CALIBRATION=True` is required for the fused prototype to affect
-the final class scores. The original label descriptions still support
-the separate description-matching ensemble branch.
+The new `DESCRIPTION_SOURCE: "dual"` implements two CLIP consistency gates,
+without training weights or changing BiMC's `np.random.choice` sampling:
 
-For CIFAR100, use
-`configs/datasets/cifar100_description_fusion.yaml` with existing
-`description/cifar100/*_descriptions.txt`. For CUB200, use
-`configs/datasets/cub200_description_fusion.yaml` with existing
-`description/CUB/*_descriptions.txt`. The text encoder remains frozen.
+- **TT**: cosine between the frozen CLIP representation of original
+  class-level fine-grained BIMC descriptions and the mean frozen-CLIP
+  representation of image captions belonging **only to sampled training
+  support images**. `alpha_c = DUAL_ALPHA_MAX * clamp((TT_c -
+  DUAL_TT_LOW)/(DUAL_TT_HIGH-DUAL_TT_LOW), 0, 1)`.
+- **TV**: cosine between original fine-grained BIMC description prototype
+  and the **uncalibrated** mean CLIP visual prototype built from the same
+  sampled support images. `beta_c = clamp(BETA + DUAL_BETA_SHIFT *
+  (TV_c - DUAL_TV_CENTER), 0, 1)`.
 
-Only captions of current-session training support images are used.
-CIFAR100 contains some classes with partial training-caption coverage.
-The provided fusion YAML selects novel 5-shot examples from
-caption-covered training images. This changes the sampling population:
-for a fair comparison, keep this option and the seed fixed in both
-`DESCRIPTION_SOURCE: label` and `fusion` runs.
+The final prototype per class is:
 
-SwanLab records caption counts, fusion weight and label/image
-description-prototype cosine similarity.
+```
+text_bimc = (1 - lambda_t)*text_template + lambda_t*label_description
+text_dual = (1 - alpha_c)*text_bimc + alpha_c*image_caption_prototype
+proto = normalize(beta_c*text_dual + (1 - beta_c)*calibrated_visual)
+```
+
+Only the **prototype classifier** is changed. The original label-description
+KNN ensemble, covariance branch, original BiMC visual calibration and optional
+PGA remain unchanged.
+
+### Missing annotations with the original shot split
+
+The CIFAR100 image-caption directory contains only 20 annotated TRAIN
+images for most classes, versus 500 possible TRAIN images per class.
+**The new branch never resamples training supports to match annotations**.
+If none of a class's 5 original random novel support images has a caption,
+`alpha_c=0` and the text component exactly falls back to original BiMC.
+TV is still computable because all five sampled images are available. If
+only some of the five supports have captions, TT uses only those matches;
+coverage is logged and should be reported. This ensures no unlabeled or
+unselected extra training images and no test image descriptions leak into
+the novel 5-shot classifier, but it also means TT often has no influence
+until captions for the **actual sampled supports** have been generated.
+
+For high-quality strict protocol experiments, generate the missing captions
+for the exact five support images chosen by the original seeded BiMC split.
+Do not replace the 5-shot data and do not average the other 15 annotated
+training images into the new class prototype.
+
+The original `DESCRIPTION_SOURCE: "label"` baseline uses the same
+unchanged BiMC shot sampling. Compare fixed `BETA`, TT-only
+(`DUAL_BETA_SHIFT: 0`), TV-only (`DUAL_ALPHA_MAX: 0`), and full dual
+consistency, with the same seed and support indices. SwanLab logs selected
+caption counts, class-level coverage, TT/TV means and alpha/beta means and
+ranges by session.
+
+### Earlier fixed-alpha fusion
+
+The older `DESCRIPTION_SOURCE: "fusion"` config remains an experimental
+ablation. It requires captions for every requested sampled support image
+and may fail when no annotation exists. The new dual mode is the recommended
+implementation for the original random-shot protocol.
