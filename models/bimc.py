@@ -127,6 +127,12 @@ class BiMC(nn.Module):
         return description_embeddings, all_targets, mean_embeddings
 
 
+    def fused_text_prototype(self, text_features, description_proto):
+        """Text-only part of the existing BIMC classifier, before visual fusion."""
+        weight = (self.cfg.TRAINER.BiMC.LAMBDA_T
+                  if self.cfg.TRAINER.BiMC.TEXT_CALIBRATION else 0.0)
+        return (1 - weight) * text_features + weight * description_proto
+
     def soft_calibration(self, base_protos, cur_protos):
         shift_weight = self.cfg.TRAINER.BiMC.LAMBDA_I
         tau = self.cfg.TRAINER.BiMC.TAU
@@ -188,6 +194,7 @@ class BiMC(nn.Module):
         print('finish loading covariance')
 
         return {
+            'text_proto': F.normalize(self.fused_text_prototype(text_features, description_proto), dim=-1),
             'description_proto': description_proto,
             'description_features': description_features,
             'description_targets': description_targets,
@@ -263,14 +270,8 @@ class BiMC(nn.Module):
         img_feat = self.extract_img_feature(images)
         img_feat = F.normalize(img_feat, dim=-1)
 
-        if self.cfg.TRAINER.BiMC.TEXT_CALIBRATION:
-            lambda_t = self.cfg.TRAINER.BiMC.LAMBDA_T
-        else:
-            lambda_t = 0.0
-
-        # Here we compute the classifier after modality calibration. 
-        # Note that image_proto has already been calibrated in the `build_task_statistics` function.
-        fused_proto = beta * ((1 - lambda_t) * text_features + lambda_t * description_proto) + (1 - beta) * image_proto        
+        # Keep the original unnormalized text mixture for BIMC's visual fusion.
+        fused_proto = beta * self.fused_text_prototype(text_features, description_proto) + (1 - beta) * image_proto
         fused_proto = F.normalize(fused_proto, dim=-1)  
         logits_proto_fused = img_feat @ fused_proto.t()
         prob_fused_proto = F.softmax(logits_proto_fused, dim=-1)

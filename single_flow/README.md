@@ -1,82 +1,86 @@
-# 单流文本原型 → 伪视觉原型（基类训练版）
+# 复用 BIMC 原型的单流文本 → 伪视觉原型
 
-基于 FlowComposer 改写 s1_flow.py，fm.py 保持原样。独立运行，不依赖原仓库的 dataset.py、Troika、Composer 或属性/物体分支。
-来源：https://github.com/HKUST-LongGroup/FlowComposer
-fm.py blob SHA: 9fb977d3131943928750a0deb9b92c6d18f3824b
-原训练脚本 blob SHA: 7b05248fea6e1b9e43e4b9ee15f9573c39268551
-附上游 MIT LICENSE。新脚本是任务适配实现，不代表作者原方法。
+Flow 直接读取 BIMC 已计算的原型，不再加载 CLIP、编码文本或重新融合描述。
+`fm.py` 来自 FlowComposer，保留上游 MIT LICENSE；训练脚本为任务适配实现。
+环境：Python 3.10+、PyTorch 2.6+；运行 BIMC 还需仓库原有依赖、数据和 CLIP 权重。
 
-## 环境
-Python 3.10+、PyTorch 2.6+。在你的服务器安装适配 CUDA 的 PyTorch；此包不包含 CLIP 权重、数据集或已训练权重。
+## 原型来源
 
-## 特征准备：始终冻结同一个 CLIP
-使用你现有的 CLIP 加载器和官方匹配的图像预处理。文件中的 encode_class_text(model, tokenize, class_names, descriptions) 和 encode_images(model, images) 会执行 eval、requires_grad_(False)、no_grad。
-前者兼容提供 encode_text 的 CLIP 和返回 token Tensor 的 tokenizer；其他库接口需包装。视觉描述过长时先拆成适合 CLIP 上下文长度的句子，不要静默截断。描述由类别语义提供，不能用测试图像生成。
+`models/bimc.py` 的 `fused_text_prototype()` 是 BIMC 原有的文本混合公式：
+`(1-LAMBDA_T)*text_features + LAMBDA_T*description_proto`。
+关闭 TEXT_CALIBRATION 时使用模板特征。build_task_statistics 将该混合向量
+归一化后保存为 `text_proto`。它仍是文本原型，不包含视觉特征。
+原 BIMC 分类中的 beta 图文融合继续使用未归一化的文本混合，保持原公式。
 
-文本融合：normalize(alpha * normalize(template) + (1-alpha) * normalize(mean(normalize(description_i))))。
-alpha 默认 0.5，训练后保存在 checkpoint，增量沿用。所有特征必须出自同一套冻结编码器、投影空间与图像预处理。
+`image_proto` 直接沿用 BIMC 的输出：基类为图像特征均值原型；增量类在
+VISION_CALIBRATION=True 时经 soft_calibration 校准。Flow 不重复计算或校准。
 
-示例缓存创建（在你的现有数据加载代码中）：
+## 导出缓存
 
-```python
-import torch
-from s1_flow import encode_class_text, encode_images
-# clip_model/tokenize/image_loader 由你的 CLIP 与数据集代码提供
-# class_ids 可不连续，但要用 Python int，且保持文本行的顺序一致。
-class_ids = [10, 23]
-names = ['apple', 'banana']
-descriptions = [['A round fruit with a short stem.'], ['An elongated fruit with a curved shape.']]
-template, description = encode_class_text(clip_model, tokenize, names, descriptions)
-image_features, image_labels = [], []
-for images, labels in base_train_loader:
-    image_features.append(encode_images(clip_model, images))
-    image_labels.append(labels.cpu().long())
-torch.save({
-    'stage': 'base', 'split': 'train',
-    'encoder_id': '你的CLIP架构-权重版本-预处理版本',
-    'class_ids': class_ids,
-    'template_features': template,       # [C,D]
-    'description_features': description, # [C,D]
-    'image_features': torch.cat(image_features), # [N,D] 基类训练图像
-    'image_labels': torch.cat(image_labels),     # [N] int64，全局 class_id
-}, 'base_train.pt')
+在使用的 trainer YAML 的 TRAINER.BiMC 下设置：
+
+```yaml
+PROTOTYPE_CACHE_DIR: "output/bimc_prototypes"
 ```
 
-阶段字段是校验，不会自动识别你错误标注的测试或增量数据。你必须按基类训练划分构建缓存。不能用测试集选 epoch、融合权重、深度或积分步数。
+然后从仓库根目录照常运行 BIMC，例如：
 
-## 基类训练
 ```bash
-python s1_flow.py train --cache base_train.pt --out output/base_flow.pt --target prototype --epochs 100 --blocks 24
+python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/trainers/bimc.yaml
 ```
-默认目标是归一化图像特征均值再归一化得到的类别视觉原型，每个类别每轮一对训练样本、随机一个时间；基类数少时每轮更新次数很少。--target sample 则以每个真实图像特征为终点，类别频次由样本数决定。
-输入 x0 是融合文本原型；x1 是视觉目标；xt=(1-t)x0+t*x1；监督速度 x1-x0。所有缓存都 detach，只训练一个速度网络。
-默认仅使用速度平方误差（维度求和、batch 求均值）。--ce-weight 0.1 可选加入新定义的视觉原型 CE：将估计终点归一化后与基类真实视觉原型计算温度缩放余弦分数。此项是可选实验，不是照搬作者的文本 CE。
-没有测试集评估或最佳测试指标选模，保存最后一轮权重和训练损失历史。默认参数只是起始设置，未经你的数据验证。hidden 默认特征维度，blocks 可调；保留原始 24 块可能较大。
 
-## 生成基类原型
+Runner 在每个任务 build_task_statistics 后导出 `session_0.pt`、`session_1.pt` 等。
+数据来自 source=train 的基类训练集/增量 support 集，不使用测试图像生成原型。
+这个命令仍运行原 BIMC 分类评估；Flow 的训练和分类由下面的独立命令完成。
+导出开关默认为空，不写缓存。每次实验应使用独立输出目录，以免覆盖旧缓存。
+
+缓存字段：
+- `class_ids`：按行排列的类别编号。
+- `text_prototypes`、`visual_prototypes`：已经生成的 [C,D] 原型。
+- `image_features`、`image_labels`：供可选 sample 模式使用。
+- `encoder_id`：包含 backbone、精度和数据配置；使用自定义 CLIP 权重时需自行补充权重版本。
+- `stage`：base 或 incremental；`split`：train。
+
+导出接口 `single_flow.bimc_cache.from_task_statistics()` 只复制张量，不编码或融合。
+它检查 class_index 与图像原型的排序一致。缓存中的阶段字段不能识别错误标注的数据来源。
+
+## 训练、生成与分类
+
+从仓库根目录运行：
+
 ```bash
-python s1_flow.py generate --checkpoint output/base_flow.pt --cache base_train.pt --out output/bank_base.pt --steps 8
+python -m single_flow.s1_flow train --cache output/bimc_prototypes/session_0.pt --out output/base_flow.pt --target prototype
+python -m single_flow.s1_flow generate --checkpoint output/base_flow.pt --cache output/bimc_prototypes/session_0.pt --out output/bank_base.pt
+python -m single_flow.s1_flow generate --checkpoint output/base_flow.pt --cache output/bimc_prototypes/session_1.pt --existing-bank output/bank_base.pt --out output/bank_session1.pt
+python -m single_flow.s1_flow classify --cache test.pt --bank output/bank_session1.pt --out output/predictions.pt
 ```
-这里只读取文本字段；无需图像即可生成。采用欧拉法，最后归一化；--steps 1 是单步。中间步不归一化，以保持与训练的欧氏直线路径一致。
 
-## 增量阶段：不训练
-为当前新增类别编码同样的两种文本，保存文本缓存，只需 encoder_id、class_ids、template_features、description_features 四个字段，不需要图像。
+默认 prototype 模式直接将基类 text_prototypes 作为 x0、visual_prototypes 作为 x1；
+这个模式只需要两种原型，不需要逐样本特征。--target sample 使用现有 image_features
+作为终点，并用现成的 visual_prototypes 作为可选 CE 的分类参照。
+训练 xt=(1-t)x0+t*x1，监督速度 x1-x0；仅训练速度网络。
+默认只有速度平方误差（维度求和、batch 求均值），--ce-weight 可开启视觉原型 CE。
+prototype 模式每类每轮仅一对数据，默认100轮、batch64、24块只是未经真实实验验证的起点。
+
+增量阶段不训练。generate 只读取 encoder_id、class_ids、text_prototypes；
+缓存中的校准视觉原型被保留供后续实验使用，但目前不参与生成、分类融合或网络更新。
+默认8步欧拉积分，最终归一化；每类一个确定性伪视觉原型。
+追加 bank 时旧类原型逐元素保留，重复类别编号报错；各阶段应使用同一模型与步数。
+模型/步数身份目前没有在 bank 中强制核对。
+
+test.pt 需要同一冻结 CLIP 的 image_features、encoder_id 和可选 image_labels。
+测试特征仍由现有图像提取流程准备；本次新增的是训练/support原型导出，不自动导出测试缓存。
+分类使用测试图像特征与全部已见类伪视觉原型的余弦相似度。
+
+旧版 template_features/description_features 缓存和 --alpha 参数已移除，请重新导出缓存并训练。
+融合设置由 BIMC 的 TEXT_CALIBRATION/LAMBDA_T 统一控制，所有阶段保持相同配置。
+不能用测试集选择这些超参数；真实分类精度与新类泛化尚未验证。
+
+## 验证
+
 ```bash
-python s1_flow.py generate --checkpoint output/base_flow.pt --cache session1_text.pt --existing-bank output/bank_base.pt --out output/bank_session1.pt --steps 8
+python -m unittest discover -s single_flow -v
 ```
-加载冻结基类 Flow，没有优化器或 backward。追加新类原型，旧类原型原样保留；重复 class_id 会报错。后续阶段继续传上一阶段 bank。所有阶段使用同一个 checkpoint 和生成设置。
-每类一个确定性原型；sample 模式也不是同文本随机生成多个样本。基类训练到新类的泛化需要实验，不能保证保留零样本性能或涨点。此版本不使用增量 support 图像；若要融合少样本视觉信息，那是额外机制。
 
-## 分类
-用冻结 CLIP 提取测试图像特征，另存 test.pt，字段 encoder_id、image_features，可选 image_labels。
-```bash
-python s1_flow.py classify --cache test.pt --bank output/bank_session1.pt --out output/predictions.pt
-```
-归一化测试特征与全部已见类伪视觉原型算余弦相似度，argmax 映射回全局 class_id。分类输出不会更新任何模型或原型。最终精度只用于报告。
-
-## 测试
-```bash
-python -m unittest test_single_flow.py
-```
-测试使用小维度合成特征，覆盖学习下降、推理不更新权重、旧类缓存保留、非连续标签与非法训练划分。不能替代真实数据集复现。
-
+5项 CPU 合成测试覆盖：原型直接输入、导出行序、增量拒绝训练、旧 bank 保留、
+非连续标签、sample/CE 路径，以及共用文本融合公式。未运行真实数据集或 GPU 训练。

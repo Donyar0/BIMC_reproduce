@@ -9,6 +9,7 @@ from utils.experiment_logger import log_metrics
 from models.bimc import BiMC
 import numpy as np
 import time
+from pathlib import Path
 
 
 class Runner:
@@ -90,6 +91,18 @@ class Runner:
                                                              class_index=self.data_manager.class_index_in_task[i], 
                                                              calibrate_novel_vision_proto=self.cfg.TRAINER.BiMC.VISION_CALIBRATION,)
 
+            export_dir = getattr(self.cfg.TRAINER.BiMC, 'PROTOTYPE_CACHE_DIR', '')
+            if export_dir:
+                from single_flow.bimc_cache import from_task_statistics
+                # Includes preprocessing configuration to distinguish feature spaces.
+                encoder_id = str((self.cfg.MODEL.BACKBONE.NAME,
+                                  self.cfg.TRAINER.BiMC.PREC,
+                                  str(self.cfg.DATASET)))
+                cache = from_task_statistics(current_state_dict, encoder_id, i)
+                destination = Path(export_dir)
+                destination.mkdir(parents=True, exist_ok=True)
+                torch.save(cache, destination / f'session_{i}.pt')
+
             state_dict_list.append(current_state_dict)            
             merged_state_dict = self.merge_dicts(state_dict_list)
 
@@ -169,3 +182,4 @@ class Runner:
         data = data.to(self.device)
         targets = targets.to(self.device)
         return data, targets
+

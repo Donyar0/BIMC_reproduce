@@ -22,6 +22,8 @@ TRAINER:
   BiMC:
     PREC: "fp16"  # fp16, fp32, amp
 
+    PROTOTYPE_CACHE_DIR: ""  # e.g. output/bimc_prototypes; export training/support statistics
+
     VISION_CALIBRATION: True
     LAMBDA_I: 0.1 
     TAU: 16        

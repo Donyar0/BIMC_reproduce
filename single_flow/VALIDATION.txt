@@ -1,1 +1,3 @@
-CPU synthetic tests: 3 unittest tests passed. CLI train/generate/classify serialization smoke test passed. No real CLIP dataset training performed.
+2026-10-27: 5 CPU synthetic unittest tests passed; compileall passed.
+Validated direct BIMC prototype caches, export order, base-only training, frozen generation, old bank preservation, sample/CE and shared text formula.
+No real dataset, CLIP-weight extraction, end-to-end BIMC run or GPU training performed.

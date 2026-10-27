@@ -6,7 +6,10 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
-from fm import DeepFlowMatchingNet
+if __package__:
+    from .fm import DeepFlowMatchingNet
+else:
+    from fm import DeepFlowMatchingNet
 
 
 def unit(x):
@@ -22,54 +25,18 @@ def ids_checked(ids):
     return ids
 
 
-def fuse_text(template, description, alpha=0.5):
-    if not 0 <= alpha <= 1:
-        raise ValueError('alpha must be in [0,1]')
-    if template.shape != description.shape:
-        raise ValueError('Template and description features must have identical shape')
-    return unit(alpha * unit(template) + (1-alpha) * unit(description))
-
-
-@torch.no_grad()
-def encode_class_text(clip_model, tokenize, class_names, descriptions):
-    """tokenize(list[str]) must return a token tensor for clip_model.encode_text.
-    Returns separate embeddings; fusion is done in fit/generate with saved alpha.
-    Descriptions: one nonempty list of strings per class. Long text must be split
-    into sentences fitting the chosen CLIP tokenizer (do not silently truncate).
-    """
-    clip_model.eval().requires_grad_(False)
-    device = next(clip_model.parameters()).device
-    if len(class_names) != len(descriptions):
-        raise ValueError('One description list per class is required')
-    templates = unit(clip_model.encode_text(tokenize(
-        [f'a photo of {name}' for name in class_names]).to(device)))
-    desc = []
-    for texts in descriptions:
-        if not isinstance(texts, list) or not texts or any(not isinstance(s, str) or not s.strip() for s in texts):
-            raise ValueError('Descriptions must be nonempty lists of nonempty strings')
-        desc.append(unit(unit(clip_model.encode_text(tokenize(texts).to(device))).mean(0, keepdim=True)))
-    return templates.cpu(), torch.cat(desc).cpu()
-
-
-@torch.no_grad()
-def encode_images(clip_model, images):
-    """images must already have the matching CLIP preprocessing applied."""
-    clip_model.eval().requires_grad_(False)
-    return unit(clip_model.encode_image(images.to(next(clip_model.parameters()).device))).cpu()
-
-
-def text_cache(cache, alpha):
+def text_cache(cache):
     ids = ids_checked(cache['class_ids'])
     if not isinstance(cache.get('encoder_id'), str) or not cache['encoder_id']:
-        raise ValueError('encoder_id must identify the exact frozen CLIP weights/preprocessing')
-    text = fuse_text(cache['template_features'], cache['description_features'], alpha).cpu()
+        raise ValueError('encoder_id must identify the frozen CLIP and preprocessing')
+    text = unit(cache['text_prototypes']).cpu()
     if text.shape[0] != len(ids):
         raise ValueError('Text rows must match class_ids order')
     return ids, text
 
 
 def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
-        blocks=24, hidden=None, alpha=0.5, target='prototype', ce_weight=0.0,
+        blocks=24, hidden=None, target='prototype', ce_weight=0.0,
         temperature=0.07, seed=0, device='cpu'):
     if cache.get('stage') != 'base' or cache.get('split') != 'train':
         raise ValueError('Training accepts only stage=base, split=train caches')
@@ -78,20 +45,22 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
     if target not in ('prototype', 'sample'):
         raise ValueError('target must be prototype or sample')
     torch.manual_seed(seed)
-    ids, text = text_cache(cache, alpha)
-    images = unit(cache['image_features']).cpu()
-    labels = cache['image_labels'].detach().cpu()
-    if labels.dtype != torch.long or labels.ndim != 1 or len(labels) != len(images):
-        raise ValueError('image_labels must be int64 [N]')
-    if images.shape[1] != text.shape[1] or set(labels.tolist()) != set(ids):
-        raise ValueError('Only listed base classes are allowed; each needs images; dimensions must match')
-    row = {c: i for i, c in enumerate(ids)}
-    y = torch.tensor([row[c] for c in labels.tolist()])
-    visual = unit(torch.stack([images[labels == c].mean(0) for c in ids]))
-    # Prototype mode gives each class equal weight, one pair per epoch.
+    ids, text = text_cache(cache)
+    visual = unit(cache['visual_prototypes']).cpu()
+    if visual.shape != text.shape:
+        raise ValueError('Visual prototype rows and dimensions must match text/class_ids')
+    # Consume BIMC prototypes directly; do not recompute means or calibration.
     if target == 'prototype':
         sources, targets, y = text, visual, torch.arange(len(ids))
     else:
+        images = unit(cache['image_features']).cpu()
+        labels = cache['image_labels'].detach().cpu()
+        if labels.dtype != torch.long or labels.ndim != 1 or len(labels) != len(images):
+            raise ValueError('image_labels must be int64 [N]')
+        if images.shape[1] != text.shape[1] or set(labels.tolist()) != set(ids):
+            raise ValueError('Only listed base classes are allowed; each needs images')
+        row = {c: i for i, c in enumerate(ids)}
+        y = torch.tensor([row[c] for c in labels.tolist()])
         sources, targets = text[y], images
     loader = DataLoader(TensorDataset(sources, targets, y), batch_size=batch_size,
                         shuffle=True, generator=torch.Generator().manual_seed(seed))
@@ -122,8 +91,8 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
             count += len(x0)
         history.append(total/count)
         print(f'epoch={epoch+1} loss={history[-1]:.6f}', flush=True)
-    return dict(format_version=1, state_dict={k:v.detach().cpu().clone() for k,v in model.state_dict().items()},
-                architecture=arch, alpha=alpha, encoder_id=cache['encoder_id'], base_class_ids=ids,
+    return dict(format_version=2, state_dict={k:v.detach().cpu().clone() for k,v in model.state_dict().items()},
+                architecture=arch, encoder_id=cache['encoder_id'], base_class_ids=ids,
                 training=dict(epochs=epochs, batch_size=batch_size, lr=lr, weight_decay=weight_decay,
                               target=target, ce_weight=ce_weight, temperature=temperature, seed=seed),
                 loss_history=history)
@@ -136,7 +105,7 @@ def generate(checkpoint, cache, steps=8, device='cpu', existing=None):
         raise ValueError('steps must be positive')
     if cache['encoder_id'] != checkpoint['encoder_id']:
         raise ValueError('Encoder mismatch')
-    ids, text = text_cache(cache, checkpoint['alpha'])
+    ids, text = text_cache(cache)
     model = DeepFlowMatchingNet(**checkpoint['architecture']).to(device)
     model.load_state_dict(checkpoint['state_dict'])
     model.eval().requires_grad_(False)
@@ -183,7 +152,7 @@ def main():
     train.add_argument('--out', required=True)
     for name, default, typ in [('epochs',100,int),('batch-size',64,int),('lr',2e-4,float),
                              ('weight-decay',1e-4,float),('blocks',24,int),('hidden',None,int),
-                             ('alpha',0.5,float),('ce-weight',0.,float),('temperature',0.07,float),('seed',0,int)]:
+                             ('ce-weight',0.,float),('temperature',0.07,float),('seed',0,int)]:
         train.add_argument('--'+name, default=default, type=typ)
     train.add_argument('--target', choices=['prototype','sample'], default='prototype')
     gen = sub.add_parser('generate', help='Frozen inference, including incremental sessions')
@@ -225,4 +194,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
