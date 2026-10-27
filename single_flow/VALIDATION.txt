@@ -1,0 +1,1 @@
+CPU synthetic tests: 3 unittest tests passed. CLI train/generate/classify serialization smoke test passed. No real CLIP dataset training performed.
