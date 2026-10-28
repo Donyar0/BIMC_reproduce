@@ -15,7 +15,69 @@ python main.py --data_cfg configs/datasets/miniimagenet.yaml --train_cfg configs
 
 可加原有 `--use_swanlab` 参数。结果在 `output/visual_to_text/<dataset>/<run>/`：
 `base_flow.pt` 为冻结 Flow；`bank_session*.pt` 为累计的**文本**候选库；
-`metrics.csv/json` 保存各阶段总准确率、基类/增量类/调和准确率，口径沿用 BIMC。
+`metrics.csv/json` 保存各阶段、各 α 的总准确率、基类/增量类/调和准确率，口径沿用 BIMC。
+
+## 实验一：复用已有权重，降低 Flow 更新强度
+
+不需要重新训练。将 `--flow_checkpoint` 设置为已有 `base_flow.pt`：
+
+```bash
+python main.py \
+  --data_cfg configs/datasets/cifar100.yaml \
+  --train_cfg configs/trainers/visual_to_text.yaml \
+  --flow_checkpoint /path/to/base_flow.pt \
+  --flow_alphas 0 0.1 0.2 0.5 1
+```
+
+如果旧版 PyTorch 加载**自己训练的可信权重**时出现
+`Weights only load failed / Unsupported operand 71`，再添加
+`--flow_trusted_checkpoint`，显式使用 `weights_only=False`。
+默认不自动回退到普通 pickle 加载；来源不可信的文件不要开启此选项。
+
+也可在 YAML 中设置 `FLOW.CHECKPOINT`、`FLOW.ALPHAS` 和
+`FLOW.TRUST_CHECKPOINT`。命令行参数覆盖 YAML。
+`CHECKPOINT` 非空时跳过训练，路径错误直接报错，不会偷偷重新训练；
+除非显式启用了 `PROTOTYPE_CACHE_DIR` 导出缓存，否则也不提取基类训练图像。
+`CHECKPOINT` 为空时保留原有训练流程：只训练一次，再用同一模型扫描所有 α。
+
+令 `v = normalize(CLIP(image))`，`f = normalize(Flow(v))`，使用
+`z_alpha = normalize((1-alpha)*v + alpha*f)` 与同一文本库计算余弦分数。
+两个端点先各自归一化，避免特征长度改变 α 的含义。
+每批图像只提取一次 CLIP 特征、积分一次完整 Flow；中间 α 共用该终点。
+α 不修改 Euler 步长、积分时间或训练损失。仅评估 α=0 时不执行 Flow 网络。
+
+| α | 含义 |
+|---|---|
+| 0 | 原始 CLIP 图像特征，对照组 |
+| 0.1、0.2 | 较弱更新 |
+| 0.5 | 两个归一化端点等权融合 |
+| 1 | 原来的完整 Flow 输出 |
+
+注意 α=0 仍沿用当前文本融合配置；若 `TEXT_CALIBRATION=True`，
+它是“CLIP 图像 + 融合文本”的对照，并非关闭描述融合的标准单模板 CLIP。
+复用权重时保持 CLIP、类别划分/随机种子、文本描述和融合配置与训练一致。
+程序检查方向、encoder_id、基类 ID、种子和特征维度；旧 checkpoint 没有记录完整的
+文本融合配置，无法自动验证这一部分。加载后以 checkpoint 中的网络结构和训练记录为准，
+修改 YAML 的 EPOCHS/BLOCKS/CE_WEIGHT 不会改变已训练的权重。
+
+输出仍在新的 `output/visual_to_text/<dataset>/<run>/`，不会覆盖旧权重：
+
+- `metrics.csv`：每行是一个 `(task_id, alpha)`；CIFAR100 的 9 个阶段 × 5 个 α 共 45 行。
+  `mean_acc / base_avg_acc / inc_avg_acc / harmonic_acc` 都是全部已见类别共同竞争的正式指标。
+- `novel_only_acc`：所有已见增量类样本，只在所有已见增量类候选中分类。
+  `current_only_acc`：当前新增类样本，只在当前新增类候选中分类。
+  这两项使用标签限制候选集合，仅供诊断，不能替代正式 FSCIL 指标。
+- `novel_to_base_pct`：全部已见新类样本预测为基类的百分比；
+  `current_to_base_pct`：当前新增类的同类统计。
+  `current_base_max_sim / current_novel_max_sim`：在当前新增类样本上的两组最大余弦分数均值。
+  `current_class_acc` 保存当前每类在全部已见候选中的准确率。
+- Task 0 或没有对应测试样本时，诊断准确率写为 JSON `null` / CSV 空值。
+- `metrics.json` 的 `by_alpha` 保存各 α 的最终与跨阶段平均准确率。
+  `evaluation.json` 保存来源 checkpoint、真实训练参数、结构、α 和推理配置。
+  `elapsed_time` 是该阶段所有 α 共用的总时间，不能把 5 行时间相加。
+
+优先比较 α=0 与 α=1，以及较小 α 的新类/基类/调和准确率和新类内部诊断。
+扫描用于分析；不要用增量测试集挑选 α 后再将最大值作为无偏的正式成绩，正式选参用验证集。
 
 ## 数据与训练方向
 
@@ -56,7 +118,7 @@ prototype 训练改用 `visual_prototypes [C,D]`，行序与 class_ids 一致。
 python -m single_flow.visual_to_text train --cache base.pt --out vtt.pt --source sample
 python -m single_flow.visual_to_text build-bank --checkpoint vtt.pt --cache base.pt --out text_base.pt
 python -m single_flow.visual_to_text build-bank --checkpoint vtt.pt --cache novel.pt --existing-bank text_base.pt --out text_seen.pt
-python -m single_flow.visual_to_text classify --checkpoint vtt.pt --cache test.pt --bank text_seen.pt --steps 1 --batch-size 256 --out predictions.pt
+python -m single_flow.visual_to_text classify --checkpoint vtt.pt --cache test.pt --bank text_seen.pt --steps 1 --alpha 0.1 --batch-size 256 --out predictions.pt
 ```
 
 novel.pt 只需 `encoder_id, class_ids, text_prototypes`；每次仅包含新增类。
@@ -72,6 +134,9 @@ python -m unittest discover -s single_flow -v
 ```
 
 合成测试检查学习方向、真实图像输入分类、单/多步推理、冻结权重、
-文本追加保留旧行、错误阶段/标签/权重拒绝、两阶段 runner、三个数据集配置。
+文本追加保留旧行、错误阶段/标签/权重拒绝、两阶段 runner、三个数据集配置；
+并检查 α 两端和中间混合、单次 Flow 共用、可信加载显式开关、复用权重跳过训练图像与训练、
+正式评估与新类内部诊断分离，以及多 α 结果持久化。
 没有运行真实数据集/GPU 实验，默认参数不是已验证的最优参数；
 基类到增量类的泛化和 sample/prototype 差异需实验验证。选参只使用基类验证数据。
+

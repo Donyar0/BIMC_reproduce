@@ -84,6 +84,9 @@ def extend_cfg(cfg):
     cfg.FLOW.CE_WEIGHT = 0.0
     cfg.FLOW.TEMPERATURE = 0.07
     cfg.FLOW.STEPS = 8
+    cfg.FLOW.ALPHAS = [1.0]
+    cfg.FLOW.CHECKPOINT = ''
+    cfg.FLOW.TRUST_CHECKPOINT = False
     cfg.FLOW.OUTPUT_DIR = 'output/single_flow'
 
 
@@ -111,6 +114,12 @@ def main():
 
     parser.add_argument('--data_cfg', type=str, help="Path to the data configuration file")
     parser.add_argument('--train_cfg', type=str, help="Path to the training configuration file")
+    parser.add_argument('--flow_checkpoint', type=str, default=None,
+                        help="Load an existing visual-to-text Flow and skip training")
+    parser.add_argument('--flow_alphas', type=float, nargs='+', default=None,
+                        help="Visual-to-text residual strengths, e.g. 0 0.1 0.2 0.5 1")
+    parser.add_argument('--flow_trusted_checkpoint', action='store_true',
+                        help="Allow pickle loading of your own trusted Flow checkpoint")
     parser.add_argument('--use_swanlab', action='store_true', help="Enable SwanLab experiment logging")
     parser.add_argument('--swanlab_project', type=str, default='BIMC_reproduce', help="SwanLab project name")
     parser.add_argument('--swanlab_experiment', type=str, default='', help="SwanLab experiment name")
@@ -123,6 +132,18 @@ def main():
     train_cfg = args.train_cfg
 
     cfg = setup_cfg(data_cfg, train_cfg)
+    if (args.flow_checkpoint is not None or args.flow_alphas is not None
+            or args.flow_trusted_checkpoint):
+        if cfg.METHOD.lower() != 'visual_to_text':
+            parser.error('--flow_* overrides require METHOD=visual_to_text')
+        cfg.defrost()
+        if args.flow_checkpoint is not None:
+            cfg.FLOW.CHECKPOINT = args.flow_checkpoint
+        if args.flow_alphas is not None:
+            cfg.FLOW.ALPHAS = args.flow_alphas
+        if args.flow_trusted_checkpoint:
+            cfg.FLOW.TRUST_CHECKPOINT = True
+        cfg.freeze()
     init_swanlab(cfg, args)
 
     # Set the random seed and GPU ID
@@ -147,5 +168,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 

@@ -2,6 +2,8 @@
 Uses the unchanged FlowComposer network in fm.py and BIMC text prototypes.
 """
 import argparse
+import math
+import pickle
 from pathlib import Path
 import torch
 import torch.nn.functional as F
@@ -82,6 +84,34 @@ def load_flow(checkpoint, device='cpu'):
     return model
 
 
+def load_checkpoint(path, trusted=False):
+    """Use unrestricted pickle only when explicitly trusting a local checkpoint."""
+    try:
+        return torch.load(path, map_location='cpu', weights_only=not trusted)
+    except pickle.UnpicklingError as exc:
+        raise ValueError(
+            'Checkpoint could not be read with weights_only=True. For your own '
+            'trusted checkpoint, use --flow_trusted_checkpoint (FLOW.TRUST_CHECKPOINT). '
+            'Do not enable this for an untrusted file.'
+        ) from exc
+
+
+def validate_alphas(alphas):
+    if not alphas:
+        raise ValueError('At least one Flow alpha is required')
+    result = []
+    for alpha in alphas:
+        if isinstance(alpha, bool) or not isinstance(alpha, (int, float)):
+            raise ValueError('Flow alpha must be a finite number in [0, 1]')
+        alpha = float(alpha)
+        if not math.isfinite(alpha) or not 0 <= alpha <= 1:
+            raise ValueError('Flow alpha must be a finite number in [0, 1]')
+        if alpha in result:
+            raise ValueError('Duplicate Flow alphas are not allowed')
+        result.append(alpha)
+    return result
+
+
 @torch.no_grad()
 def build_text_bank(checkpoint, cache, existing=None):
     """Append text candidates; no image features, Flow evaluation or training."""
@@ -124,16 +154,41 @@ def transform_images(model, image_features, steps=1):
 
 
 @torch.no_grad()
-def classify(model, image_features, bank, steps=1):
+def classify_alphas(model, image_features, bank, steps=1, alphas=(1.0,)):
+    """Share one full Flow endpoint across normalized residual mixtures.
+
+    alpha=0 is CLIP with the same text bank; alpha=1 is the original Flow.
+    Alpha does not rescale Euler velocities or change the integration horizon.
+    """
+    alphas = validate_alphas(alphas)
     if bank.get('kind') != 'text_candidates':
         raise ValueError('Expected text candidate bank, not pseudo-visual prototypes')
     ids = ids_checked(bank['class_ids'])
     text = unit(bank['prototypes'])
     if text.shape != (len(ids), model.in_channels):
         raise ValueError('Incompatible text bank dimensions')
-    transformed = transform_images(model, image_features, steps)
-    scores = transformed @ text.to(transformed.device).T
-    return torch.tensor(ids, device=scores.device)[scores.argmax(-1)], scores
+    original = unit(image_features).to(next(model.parameters()).device)
+    if original.shape[1] != model.in_channels:
+        raise ValueError('Feature dimension mismatch')
+    endpoint = transform_images(model, image_features, steps) if any(alphas) else None
+    text = text.to(original.device)
+    class_ids = torch.tensor(ids, device=original.device)
+    result = {}
+    for alpha in alphas:
+        if alpha == 0:
+            mixed = original
+        elif alpha == 1:
+            mixed = endpoint
+        else:
+            mixed = unit((1 - alpha) * original + alpha * endpoint)
+        scores = mixed @ text.T
+        result[alpha] = (class_ids[scores.argmax(-1)], scores)
+    return result
+
+
+@torch.no_grad()
+def classify(model, image_features, bank, steps=1, alpha=1.0):
+    return classify_alphas(model, image_features, bank, steps, [alpha])[alpha]
 
 
 def main():
@@ -152,6 +207,7 @@ def main():
     evaluate.add_argument('--checkpoint', required=True)
     evaluate.add_argument('--bank', required=True)
     evaluate.add_argument('--steps', type=int, default=1)
+    evaluate.add_argument('--alpha', type=float, default=1.0)
     evaluate.add_argument('--batch-size', type=int, default=256)
     for parser in (train, bank, evaluate):
         parser.add_argument('--cache', required=True)
@@ -176,11 +232,11 @@ def main():
             if args['batch_size'] < 1 or len(cache['image_features']) == 0:
                 raise ValueError('Positive batch size and nonempty images required')
             model = load_flow(checkpoint, args['device'])
-            outputs = [classify(model, batch, bank, args['steps'])
+            outputs = [classify(model, batch, bank, args['steps'], args['alpha'])
                        for batch in cache['image_features'].split(args['batch_size'])]
             pred = torch.cat([p.cpu() for p, _ in outputs])
             scores = torch.cat([s.cpu() for _, s in outputs])
-            result = dict(predictions=pred, scores=scores, class_ids=bank['class_ids'])
+            result = dict(predictions=pred, scores=scores, class_ids=bank['class_ids'], alpha=args['alpha'])
             if 'image_labels' in cache:
                 labels = cache['image_labels'].cpu()
                 if (labels.dtype != torch.long or labels.shape != pred.shape or
@@ -194,3 +250,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

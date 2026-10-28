@@ -10,11 +10,14 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace as NS
+from unittest.mock import patch
 
 import numpy as np
 import torch
 
-from single_flow.visual_to_text import fit, build_text_bank, load_flow, classify
+from single_flow.visual_to_text import (
+    fit, build_text_bank, load_flow, load_checkpoint, classify_alphas, validate_alphas,
+)
 from bimc_cache import from_task_statistics
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +43,9 @@ class RunnerTests(unittest.TestCase):
         namespace = dict(Runner=object, torch=torch, np=np, Path=Path, datetime=datetime,
                          time=time, csv=csv, json=json, tqdm=lambda x:x,
                          from_task_statistics=from_task_statistics, fit=checked_fit,
-                         build_text_bank=build_text_bank, load_flow=load_flow, classify=classify, log_metrics=lambda *a,**k:None)
+                         build_text_bank=build_text_bank, load_flow=load_flow,
+                         load_checkpoint=load_checkpoint, classify_alphas=classify_alphas,
+                         validate_alphas=validate_alphas, log_metrics=lambda *a,**k:None)
         runner_type = load_class(ROOT/'engine/visual_to_text_engine.py','VisualToTextRunner',namespace)
         eye = torch.eye(3)
         class Model(torch.nn.Module):
@@ -54,10 +59,13 @@ class RunnerTests(unittest.TestCase):
             def extract_img_feature(self,images):
                 return images
         class Data:
+            read_only = False
             class_index_in_task = [np.array([0,1]),np.array([2])]
             class_names = ['a','b','c']
             num_tasks = 2
             def get_dataloader(self,task_id,source,**kwargs):
+                if self.read_only and source == 'train':
+                    raise AssertionError('Checkpoint evaluation must skip training data')
                 if source == 'train' and task_id > 0:
                     raise AssertionError('Incremental support images must not be read')
                 ids = torch.arange(2 if task_id == 0 else 3)
@@ -89,6 +97,71 @@ class RunnerTests(unittest.TestCase):
             bank1=torch.load(result_path.parent/'bank_session1.pt',weights_only=True)
             self.assertTrue(torch.equal(bank0['prototypes'],bank1['prototypes'][:2]))
 
+            # Reuse exactly that checkpoint and scan all strengths in one pass.
+            runner.cfg.FLOW.CHECKPOINT = str(result_path.parent/'base_flow.pt')
+            runner.cfg.FLOW.ALPHAS = [0., 0.1, 0.2, 0.5, 1.]
+            runner.data_manager.read_only = True
+            before = load_checkpoint(runner.cfg.FLOW.CHECKPOINT)
+            from single_flow import visual_to_text as vtt
+            with patch.object(runner.model, 'extract_img_feature', wraps=runner.model.extract_img_feature) as extract, \
+                    patch.object(vtt, 'transform_images', wraps=vtt.transform_images) as transform, \
+                    contextlib.redirect_stdout(io.StringIO()) as stream:
+                runner.run()
+            self.assertIn('Training skipped', stream.getvalue())
+            self.assertEqual(training_calls, ['base'])
+            self.assertEqual(extract.call_count, 2)
+            self.assertEqual(transform.call_count, 2)
+            after = load_checkpoint(runner.cfg.FLOW.CHECKPOINT)
+            self.assertTrue(all(torch.equal(v, after['state_dict'][k]) for k, v in before['state_dict'].items()))
+            scanned_path = next(p for p in Path(directory).rglob('metrics.json') if p != result_path)
+            scanned = json.loads(scanned_path.read_text())
+            self.assertEqual(scanned['completed_sessions'], 2)
+            self.assertTrue(scanned['complete'])
+            self.assertEqual(len(scanned['by_alpha']), 5)
+            self.assertEqual(len(scanned['sessions']), 10)
+            self.assertNotIn('final_acc', scanned)  # no ambiguous combined accuracy
+            for alpha in ['0.0', '1.0']:
+                self.assertEqual(scanned['by_alpha'][alpha]['final_acc'], 100.)
+            with (scanned_path.parent/'metrics.csv').open() as handle:
+                self.assertEqual(len(list(csv.DictReader(handle))), 10)
+            task1 = next(r for r in scanned['sessions'] if r['task_id'] == 1 and r['alpha'] == 0)
+            self.assertEqual(task1['novel_only_acc'], 100.)
+            self.assertEqual(task1['current_only_acc'], 100.)
+            self.assertEqual(task1['novel_to_base_pct'], 0.)
+            self.assertFalse((scanned_path.parent/'base_flow.pt').exists())
+
+            # Missing checkpoint and incompatible split must fail, never retrain.
+            runner.cfg.SEED = 2
+            with self.assertRaisesRegex(ValueError, 'seed'), contextlib.redirect_stdout(io.StringIO()):
+                runner.run()
+            runner.cfg.SEED = 1
+            runner.cfg.FLOW.CHECKPOINT = str(Path(directory)/'missing.pt')
+            with self.assertRaises(FileNotFoundError), contextlib.redirect_stdout(io.StringIO()):
+                runner.run()
+            self.assertEqual(training_calls, ['base'])
+
+    def test_diagnostics_do_not_replace_all_seen_class_scores(self):
+        runner_type = load_class(ROOT/'engine/visual_to_text_engine.py', 'VisualToTextRunner',
+                                 dict(Runner=object, torch=torch))
+        runner = runner_type()
+        runner.data_manager = NS(class_index_in_task=[[0, 1], [2, 3], [4, 5]])
+        labels = torch.tensor([2, 3, 4, 5])
+        # Every novel example loses to a base score, but novel-only is perfect.
+        logits = torch.eye(6)[labels] * 0.8
+        logits[:, 0] = 0.95
+        acc = runner.novel_diagnostics(logits, labels, 2)
+        self.assertEqual(acc['novel_only_acc'], 100.)
+        self.assertEqual(acc['current_only_acc'], 100.)
+        self.assertEqual(acc['novel_samples'], 4)
+        self.assertEqual(acc['current_samples'], 2)
+        self.assertEqual(acc['novel_to_base_pct'], 100.)
+        self.assertTrue((logits.argmax(1) == 0).all())
+        self.assertEqual(acc['current_class_acc'], {'4': 0., '5': 0.})
+        empty = runner.novel_diagnostics(torch.ones(1, 6), torch.tensor([0]), 2)
+        self.assertIsNone(empty['novel_only_acc'])
+        self.assertIsNone(empty['current_only_acc'])
+        json.dumps(empty, allow_nan=False)
+
     def test_old_classes_compete_with_new_classes(self):
         evaluator=load_class(ROOT/'utils/evaluator.py','AccuracyEvaluator',{'torch':torch,'np':np})
         # A base example is predicted as the novel class: it must count as wrong.
@@ -113,8 +186,12 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(1+(cfg.DATASET.NUM_CLASSES-cfg.DATASET.NUM_INIT_CLS)//cfg.DATASET.NUM_INC_CLS,sessions)
                 if trainer=='single_flow':
                     self.assertEqual(cfg.METHOD,'single_flow')
+                if trainer=='visual_to_text':
+                    self.assertEqual(cfg.FLOW.ALPHAS, [0., 0.1, 0.2, 0.5, 1.])
+                    self.assertEqual(cfg.FLOW.CHECKPOINT, '')
 
 
 if __name__ == '__main__':
     unittest.main()
+
 

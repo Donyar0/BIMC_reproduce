@@ -1,5 +1,8 @@
 import contextlib
 import io
+import pickle
+import tempfile
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 import torch
@@ -46,6 +49,56 @@ class VisualToTextTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             vtt.load_flow(dict(self.ck,direction='text_to_visual'))
 
+    def test_alpha_endpoints_mixture_and_shared_integration(self):
+        model = vtt.load_flow(self.ck)
+        bank = vtt.build_text_bank(self.ck, self.cache)
+        images = 7 * self.cache['image_features']  # norm must not change alpha's meaning
+        original = vtt.unit(images)
+        text = vtt.unit(bank['prototypes'])
+        for steps in [1, 8]:
+            endpoint = vtt.transform_images(model, images, steps)
+            with patch.object(vtt, 'transform_images', wraps=vtt.transform_images) as transform:
+                outputs = vtt.classify_alphas(model, images, bank, steps, [0., 0.1, 0.2, 0.5, 1.])
+            self.assertEqual(transform.call_count, 1)
+            torch.testing.assert_close(outputs[0.][1], original @ text.T)
+            torch.testing.assert_close(outputs[1.][1], endpoint @ text.T)
+            for alpha in [0.1, 0.2, 0.5]:
+                expected = torch.nn.functional.normalize((1-alpha)*original + alpha*endpoint, dim=-1) @ text.T
+                torch.testing.assert_close(outputs[alpha][1], expected)
+            pred, scores = vtt.classify(model, images, bank, steps)
+            torch.testing.assert_close(scores, outputs[1.][1])
+            torch.testing.assert_close(pred, outputs[1.][0])
+        # alpha=0 must bypass the Flow, even if it would fail or return NaNs.
+        with patch.object(vtt, 'transform_images', side_effect=AssertionError('Flow called')):
+            _, scores = vtt.classify(model, images, bank, alpha=0.)
+        torch.testing.assert_close(scores, original @ text.T)
+
+    def test_invalid_alphas_and_degenerate_mixture(self):
+        for alphas in [[], [0., 0.], [-0.1], [1.1], [float('nan')], [float('inf')], [True], ['0.1']]:
+            with self.assertRaises(ValueError):
+                vtt.validate_alphas(alphas)
+        model = vtt.load_flow(self.ck)
+        bank = vtt.build_text_bank(self.ck, self.cache)
+        images = self.cache['image_features']
+        # Antipodal endpoints at alpha=.5 have no defined direction; fail explicitly.
+        with patch.object(vtt, 'transform_images', return_value=-images):
+            with self.assertRaisesRegex(ValueError, 'nonzero'):
+                vtt.classify(model, images, bank, alpha=0.5)
+
+    def test_checkpoint_loading_requires_explicit_trust(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'base_flow.pt'
+            torch.save(self.ck, path)
+            loaded = vtt.load_checkpoint(path)
+            self.assertEqual(loaded['direction'], 'visual_to_text')
+        with patch.object(vtt.torch, 'load', side_effect=pickle.UnpicklingError('Unsupported operand 71')) as load:
+            with self.assertRaisesRegex(ValueError, 'flow_trusted_checkpoint'):
+                vtt.load_checkpoint('old.pt')
+            load.assert_called_once_with('old.pt', map_location='cpu', weights_only=True)
+        with patch.object(vtt.torch, 'load', return_value=self.ck) as load:
+            self.assertIs(vtt.load_checkpoint('own.pt', trusted=True), self.ck)
+            load.assert_called_once_with('own.pt', map_location='cpu', weights_only=False)
+
     def test_training_pair_direction_and_ce_gradient(self):
         captured = []
         original = vtt.TensorDataset
@@ -83,3 +136,4 @@ class VisualToTextTests(unittest.TestCase):
 
 if __name__=='__main__':
     unittest.main()
+
