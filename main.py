@@ -62,6 +62,7 @@ def extend_cfg(cfg):
     cfg.TRAINER = CN()
     cfg.TRAINER.BiMC = CN()
     cfg.TRAINER.BiMC.PREC = ''
+    cfg.TRAINER.BiMC.PROTOTYPE_CACHE_DIR = ''
     cfg.TRAINER.BiMC.VISION_CALIBRATION = False
     cfg.TRAINER.BiMC.LAMBDA_I = -1.0
     cfg.TRAINER.BiMC.TAU = -1
@@ -70,6 +71,20 @@ def extend_cfg(cfg):
     cfg.TRAINER.BiMC.GAMMA_BASE = -1.0
     cfg.TRAINER.BiMC.GAMMA_INC = -1.0
     cfg.TRAINER.BiMC.USING_ENSEMBLE = False
+
+    cfg.FLOW = CN()
+    cfg.FLOW.EPOCHS = 100
+    cfg.FLOW.BATCH_SIZE = 64
+    cfg.FLOW.LR = 0.0002
+    cfg.FLOW.WEIGHT_DECAY = 0.0001
+    cfg.FLOW.BLOCKS = 24
+    cfg.FLOW.HIDDEN = 0
+    cfg.FLOW.TARGET = 'prototype'
+    cfg.FLOW.CE_WEIGHT = 0.0
+    cfg.FLOW.TEMPERATURE = 0.07
+    cfg.FLOW.STEPS = 8
+    cfg.FLOW.OUTPUT_DIR = 'output/single_flow'
+
 
 
 
@@ -114,7 +129,12 @@ def main():
     set_gpu(cfg.DEVICE.GPU_ID)
 
     # Import and run the trainer
-    from engine.engine import Runner
+    if cfg.METHOD.lower() == 'single_flow':
+        from engine.flow_engine import FlowRunner as Runner
+    elif cfg.METHOD.lower() in ('', 'bimc'):
+        from engine.engine import Runner
+    else:
+        raise ValueError(f'Unknown METHOD: {cfg.METHOD}')
     engine = Runner(cfg)
     try:
         engine.run()
@@ -124,3 +144,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

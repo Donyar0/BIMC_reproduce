@@ -4,6 +4,50 @@ Flow 直接读取 BIMC 已计算的原型，不再加载 CLIP、编码文本或�
 `fm.py` 来自 FlowComposer，保留上游 MIT LICENSE；训练脚本为任务适配实现。
 环境：Python 3.10+、PyTorch 2.6+；运行 BIMC 还需仓库原有依赖、数据和 CLIP 权重。
 
+## 推荐：像 BIMC 一样直接运行完整实验
+
+现在 `main.py` 可自动完成原型提取、仅基类训练 Flow、每阶段追加 bank、
+测试图像编码和全部已见类别评估，不需要手工准备 test.pt。
+先设置各 dataset YAML 的 ROOT 为实际数据路径，并准备原有依赖、描述和 CLIP 权重。
+从仓库根目录运行：
+
+```bash
+python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/trainers/single_flow.yaml
+python main.py --data_cfg configs/datasets/cub200.yaml --train_cfg configs/trainers/single_flow.yaml
+python main.py --data_cfg configs/datasets/miniimagenet.yaml --train_cfg configs/trainers/single_flow.yaml
+```
+
+一键依次运行三个数据集（失败即停止，终端日志分别保存）：
+
+```bash
+bash scripts/run_single_flow_all.sh
+# 可选 SwanLab：
+bash scripts/run_single_flow_all.sh --use_swanlab
+```
+
+CIFAR100 和 MiniImageNet 各9阶段，CUB200 共11阶段（依据当前默认划分）。
+每阶段输出 `Test acc mean`、`=> Task [i], Acc`、基类/增量类/调和准确率；
+最后输出 `Final acc:[...]`、`Task-wise acc`、最后阶段准确率和阶段平均准确率。
+所有准确率使用百分数，与原 BIMC 的 AccuracyEvaluator 完全共用。
+增量准确率沿用原实现：各已见增量任务准确率的算术平均；基类和增量分组
+均在全部已见类别竞争下统计。阶段0的增量/调和准确率按原实现记0。
+`Final acc` 是各阶段总准确率列表，不是只含最后一个数。
+
+结果自动保存至 `output/single_flow/<dataset>/seed_<seed>_<timestamp>/`：
+- `metrics.csv`、`metrics.json`：各阶段指标及完成状态（每阶段更新）。
+- `config.yaml`：完整实验配置。
+- `base_flow.pt`：仅基类训练得到的网络。
+- `bank_session*.pt`：每阶段全部已见类伪视觉原型。
+
+只保存 bank 和模型即可评估，默认不保存逐样本训练缓存。启用
+PROTOTYPE_CACHE_DIR 时，新 Flow runner 会按数据集/运行时间分目录导出缓存。
+当前仍不将增量视觉原型融合到分类器。Flow 分类只用生成的伪视觉原型。
+
+对比原 BIMC：同一 dataset YAML 改用 `configs/trainers/bimc.yaml` 即可。
+使用相同种子、CLIP、数据划分；Flow 训练的 torch RNG 单独隔离，不影响后续
+数据加载随机状态。结果需要在真实数据上运行，仓库没有预填实验准确率。
+默认超参数未经三个数据集验证，应使用基类验证数据选参。
+
 ## 原型来源
 
 `models/bimc.py` 的 `fused_text_prototype()` 是 BIMC 原有的文本混合公式：
@@ -82,5 +126,5 @@ test.pt 需要同一冻结 CLIP 的 image_features、encoder_id 和可选 image_
 python -m unittest discover -s single_flow -v
 ```
 
-5项 CPU 合成测试覆盖：原型直接输入、导出行序、增量拒绝训练、旧 bank 保留、
+8项测试覆盖三个数据集配置、两阶段完整合成流程、全部已见类别竞争，以及：原型直接输入、导出行序、增量拒绝训练、旧 bank 保留、
 非连续标签、sample/CE 路径，以及共用文本融合公式。未运行真实数据集或 GPU 训练。
