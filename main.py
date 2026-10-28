@@ -80,6 +80,7 @@ def extend_cfg(cfg):
     cfg.FLOW.BLOCKS = 24
     cfg.FLOW.HIDDEN = 0
     cfg.FLOW.TARGET = 'prototype'
+    cfg.FLOW.SOURCE = 'sample'
     cfg.FLOW.CE_WEIGHT = 0.0
     cfg.FLOW.TEMPERATURE = 0.07
     cfg.FLOW.STEPS = 8
@@ -131,6 +132,8 @@ def main():
     # Import and run the trainer
     if cfg.METHOD.lower() == 'single_flow':
         from engine.flow_engine import FlowRunner as Runner
+    elif cfg.METHOD.lower() == 'visual_to_text':
+        from engine.visual_to_text_engine import VisualToTextRunner as Runner
     elif cfg.METHOD.lower() in ('', 'bimc'):
         from engine.engine import Runner
     else:
@@ -144,4 +147,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 

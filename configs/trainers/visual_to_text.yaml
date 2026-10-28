@@ -1,0 +1,54 @@
+METHOD: "visual_to_text"
+SEED: 1
+
+DEVICE:
+  DEVICE_NAME: "cuda"
+  GPU_ID: "0;"
+
+DATALOADER:
+  TRAIN:
+    BATCH_SIZE_BASE: 64
+    BATCH_SIZE_INC: 64
+  TEST:
+    BATCH_SIZE: 100
+  NUM_WORKERS: 4
+
+
+MODEL:
+  BACKBONE:
+    NAME: "ViT-B/16"  #  RN50  RN101  ViT-B/32  ViT-B/16  ViT-L/14
+  
+
+TRAINER:
+  BiMC:
+    PREC: "fp16"  # fp16, fp32, amp
+
+    PROTOTYPE_CACHE_DIR: ""  # e.g. output/bimc_prototypes; export training/support statistics
+
+    VISION_CALIBRATION: False
+    LAMBDA_I: 0.1 
+    TAU: 16        
+
+    TEXT_CALIBRATION: True
+    LAMBDA_T: 0.5
+
+    GAMMA_BASE: 1.0
+    GAMMA_INC: 5.0
+
+    USING_ENSEMBLE: False
+
+
+# Starting values only; select hyperparameters using base validation data.
+FLOW:
+  EPOCHS: 100
+  BATCH_SIZE: 64
+  LR: 0.0002
+  WEIGHT_DECAY: 0.0001
+  BLOCKS: 24
+  HIDDEN: 0  # 0 uses CLIP feature dimension
+  SOURCE: "sample"  # sample images -> correct class text; optional prototype
+  CE_WEIGHT: 0.1  # 0 disables endpoint text CE
+  TEMPERATURE: 0.07
+  STEPS: 1  # Euler steps; 1 means z + v(z, 0)
+  OUTPUT_DIR: "output/visual_to_text"
+

@@ -1,5 +1,7 @@
 # 复用 BIMC 原型的单流文本 → 伪视觉原型
 
+新增独立方法：[单流视觉 → 文本](README_visual_to_text.md)，使用 `configs/trainers/visual_to_text.yaml`。
+
 Flow 直接读取 BIMC 已计算的原型，不再加载 CLIP、编码文本或重新融合描述。
 `fm.py` 来自 FlowComposer，保留上游 MIT LICENSE；训练脚本为任务适配实现。
 环境：Python 3.10+、PyTorch 2.6+；运行 BIMC 还需仓库原有依赖、数据和 CLIP 权重。
@@ -128,3 +130,4 @@ python -m unittest discover -s single_flow -v
 
 8项测试覆盖三个数据集配置、两阶段完整合成流程、全部已见类别竞争，以及：原型直接输入、导出行序、增量拒绝训练、旧 bank 保留、
 非连续标签、sample/CE 路径，以及共用文本融合公式。未运行真实数据集或 GPU 训练。
+
