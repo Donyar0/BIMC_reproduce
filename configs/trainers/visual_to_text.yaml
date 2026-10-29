@@ -56,3 +56,13 @@ FLOW:
   OUTPUT_DIR: "output/visual_to_text"
 
 
+
+  # Incremental stages only: new 5-shot support; CE over all seen classes.
+  INC:
+    ENABLED: True
+    EPOCHS: 10
+    BATCH_SIZE: 25
+    LR: 0.00001
+    WEIGHT_DECAY: 0.0
+    CE_WEIGHT: 0.1
+    TEMPERATURE: 0.07
