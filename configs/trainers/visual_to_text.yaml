@@ -57,6 +57,27 @@ FLOW:
 
 
 
+  # Episodic pseudo-incremental meta-learning from real base training features.
+  # On: base training uses disjoint 5-shot support and query episodes;
+  # off: original base fit() is unchanged. Never use --flow_checkpoint
+  # with META.ENABLED=true (the checkpoint would skip meta training).
+  META:
+    ENABLED: True
+    EPOCHS: 20
+    EPISODES_PER_EPOCH: 30
+    PSEUDO_NEW: 10
+    SHOT: 5
+    QUERY: 5
+    BASE_BATCH: 64
+    OLD_QUERY_BATCH: 64
+    INNER_STEPS: 1
+    INNER_LR: 0.0001
+    INNER_CE_WEIGHT: 0.1
+    LR: 0.0001
+    FM_WEIGHT: 1.0
+    OLD_CE_WEIGHT: 0.5
+    QUERY_CE_WEIGHT: 1.0
+
   # Incremental stages only: new 5-shot support; CE over all seen classes.
   INC:
     ENABLED: True
