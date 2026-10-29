@@ -88,6 +88,14 @@ def extend_cfg(cfg):
     cfg.FLOW.CHECKPOINT = ''
     cfg.FLOW.TRUST_CHECKPOINT = False
     cfg.FLOW.OUTPUT_DIR = 'output/single_flow'
+    cfg.FLOW.INC = CN()
+    cfg.FLOW.INC.ENABLED = False
+    cfg.FLOW.INC.EPOCHS = 10
+    cfg.FLOW.INC.BATCH_SIZE = 25
+    cfg.FLOW.INC.LR = 1e-5
+    cfg.FLOW.INC.WEIGHT_DECAY = 0.0
+    cfg.FLOW.INC.CE_WEIGHT = 0.1
+    cfg.FLOW.INC.TEMPERATURE = 0.07
 
 
 
