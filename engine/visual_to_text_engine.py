@@ -1,7 +1,6 @@
 """Base-only Flow training and shared-checkpoint residual-strength evaluation."""
 import csv
 import json
-import math
 import time
 from datetime import datetime
 from pathlib import Path
@@ -18,33 +17,6 @@ from single_flow.visual_to_text import (
 from utils.experiment_logger import log_metrics
 
 
-def validate_logit_gammas(values):
-    if not values:
-        raise ValueError('At least one logit gamma is required')
-    result = []
-    for value in values:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError('Logit gamma must be a finite nonnegative number')
-        gamma = float(value)
-        if not math.isfinite(gamma) or gamma < 0:
-            raise ValueError('Logit gamma must be a finite nonnegative number')
-        if gamma in result:
-            raise ValueError('Duplicate logit gammas are not allowed')
-        result.append(gamma)
-    return result
-
-
-def subtract_base_logit_bias(logits, base_count, gamma):
-    """Subtract a cosine-score offset from BASE columns, without modifying input."""
-    if logits.ndim != 2 or not 0 < base_count <= logits.shape[1]:
-        raise ValueError('Invalid logits or base-class count')
-    if gamma == 0:
-        return logits
-    adjusted = logits.clone()
-    adjusted[:, :base_count] -= gamma
-    return adjusted
-
-
 class VisualToTextRunner(Runner):
     @torch.no_grad()
     def run(self):
@@ -55,16 +27,12 @@ class VisualToTextRunner(Runner):
         meta_cfg = getattr(flow, 'META', None)
         meta_enabled = bool(getattr(meta_cfg, 'ENABLED', False))
         alphas = validate_alphas(getattr(flow, 'ALPHAS', [1.0]))
-        gammas = validate_logit_gammas(getattr(flow, 'LOGIT_GAMMAS', [0.0]))
-        eval_only = bool(getattr(flow, 'EVAL_ONLY', False))
-        if eval_only and not getattr(flow, 'CHECKPOINT', ''):
-            raise ValueError('FLOW.EVAL_ONLY requires --flow_checkpoint')
         model = self.model.module if self.is_distributed else self.model
         model.eval().requires_grad_(False)
         encoder_id = str((cfg.MODEL.BACKBONE.NAME, cfg.TRAINER.BiMC.PREC, str(cfg.DATASET)))
         checkpoint_path = getattr(flow, 'CHECKPOINT', '')
         checkpoint, bank = None, None
-        if meta_enabled and checkpoint_path and not eval_only:
+        if meta_enabled and checkpoint_path:
             raise ValueError('Episodic meta training must start from a fresh initialization; remove --flow_checkpoint')
         if checkpoint_path:
             print(f'Loading pretrained Flow: {checkpoint_path}')
@@ -94,8 +62,6 @@ class VisualToTextRunner(Runner):
         print(f'Method: visual_to_text | Dataset: {cfg.DATASET.NAME} | Seed: {cfg.SEED}')
         print(f'Results directory: {output}')
         print(f'Flow alphas: {alphas} (shared candidates per session)')
-        print(f'Base-class cosine adjustment gammas: {gammas}')
-        print(f'Evaluation only: {eval_only}')
         print(f'Incremental support adaptation: {inc_enabled}')
         print(f'Episodic pseudo-incremental meta training: {meta_enabled}')
         print(f'Start inferencing on all tasks: [0, {self.data_manager.num_tasks - 1}]')
@@ -113,7 +79,7 @@ class VisualToTextRunner(Runner):
                          text_prototypes=text.detach().float().cpu(),
                          stage='base' if task_id == 0 else 'incremental', split='train')
             if ((task_id == 0 and (checkpoint is None or cfg.TRAINER.BiMC.PROTOTYPE_CACHE_DIR))
-                    or (task_id > 0 and inc_enabled and not eval_only)):
+                    or (task_id > 0 and inc_enabled)):
                 loader = self.data_manager.get_dataloader(
                     task_id, source='train', mode='test', accumulate_past=False)
                 features, labels, visual = model.inference_all_img_feature(loader, class_ids[0])
@@ -163,14 +129,13 @@ class VisualToTextRunner(Runner):
                     alphas=alphas, steps=flow.STEPS,
                     text_calibration=cfg.TRAINER.BiMC.TEXT_CALIBRATION,
                     text_lambda=getattr(cfg.TRAINER.BiMC, 'LAMBDA_T', None),
-                    incremental_enabled=inc_enabled and not eval_only,
-                    logit_gammas=gammas, eval_only=eval_only,
+                    incremental_enabled=inc_enabled,
                     meta_enabled=meta_enabled,
                     meta_training=checkpoint.get('training', {}) if meta_enabled else None)
                 (output / 'evaluation.json').write_text(json.dumps(provenance, indent=2), encoding='utf-8')
             bank = build_text_bank(checkpoint, cache, existing=bank)
             inc_record = None
-            if task_id > 0 and inc_enabled and not eval_only:
+            if task_id > 0 and inc_enabled:
                 print(f'Fine-tuning on {len(cache["image_features"])} current-session support images')
                 devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
                 with torch.random.fork_rng(devices=devices), torch.enable_grad():
@@ -187,32 +152,24 @@ class VisualToTextRunner(Runner):
             del cache
             results = self.inference_task_flow(task_id, bank, model, velocity_model, alphas)
             elapsed = time.time() - start
-            reference_gamma = 0.0 if 0.0 in gammas else gammas[0]
-            reference = results[(reference_alpha, reference_gamma)] if len(gammas) > 1 else results[reference_alpha]
-            self.acc_list.append(reference['mean_acc'])
-            self.task_acc_list.append(reference['task_acc'])
+            self.acc_list.append(results[reference_alpha]['mean_acc'])
+            self.task_acc_list.append(results[reference_alpha]['task_acc'])
             logged = {}
-            for key, acc in results.items():
-                alpha, gamma = key if isinstance(key, tuple) else (key, 0.0)
-                rows.append(dict(task_id=task_id, alpha=alpha, gamma=gamma, seen_classes=len(bank['class_ids']),
+            for alpha, acc in results.items():
+                rows.append(dict(task_id=task_id, alpha=alpha, seen_classes=len(bank['class_ids']),
                                  inc_train_samples=inc_record['num_samples'] if inc_record else 0,
                                  **acc, elapsed_time=elapsed))
-                print(f'=> Task [{task_id}] alpha={alpha:g} gamma={gamma:g} | Acc: {acc["mean_acc"]:.2f} | '
+                print(f'=> Task [{task_id}] alpha={alpha:g} | Acc: {acc["mean_acc"]:.2f} | '
                       f'Base: {acc["base_avg_acc"]:.2f} | Incremental: {acc["inc_avg_acc"]:.2f} | '
                       f'Harmonic: {acc["harmonic_acc"]:.2f}')
-                logged.update({f'alpha_{alpha:g}/gamma_{gamma:g}/{k}': v for k, v in acc.items()
+                logged.update({f'alpha_{alpha:g}/{k}': v for k, v in acc.items()
                                if isinstance(v, (int, float))})
             log_metrics(logged, step=task_id)
             self.save_results(output, rows)
             print(f'+++++++++++ task {task_id}, shared time: {elapsed:.3f} ++++++++++++++++')
 
         for alpha in alphas:
-            for gamma in gammas:
-                selected = [r for r in rows if r['alpha'] == alpha and r['gamma'] == gamma]
-                print(f'alpha={alpha:g} gamma={gamma:g} Final acc: {[r["mean_acc"] for r in selected]}')
-                print(f'alpha={alpha:g} gamma={gamma:g} Final session Acc: {selected[-1]["mean_acc"]:.3f} | '
-                      f'Average session Acc: {sum(r["mean_acc"] for r in selected)/len(selected):.3f}')
-            selected = [r for r in rows if r['alpha'] == alpha and r['gamma'] == gammas[0]]
+            selected = [r for r in rows if r['alpha'] == alpha]
             print(f'alpha={alpha:g} Final acc: {[r["mean_acc"] for r in selected]}')
             print(f'alpha={alpha:g} Task-wise acc: {[r["task_acc"] for r in selected]}')
             print(f'alpha={alpha:g} Final session Acc: {selected[-1]["mean_acc"]:.3f} | '
@@ -242,22 +199,17 @@ class VisualToTextRunner(Runner):
             raise ValueError('Empty test loader')
         labels = torch.cat(targets)
         results = {}
-        gammas = validate_logit_gammas(getattr(self.cfg.FLOW, 'LOGIT_GAMMAS', [0.0]))
-        base_count = len(self.data_manager.class_index_in_task[0])
         for alpha in alphas:
             logits = torch.cat(scores[alpha])
-            for gamma in gammas:
-                adjusted = subtract_base_logit_bias(logits, base_count, gamma)
-                # All seen candidates remain; no labels used to adjust scores.
-                acc = self.evaluator.calc_accuracy(adjusted, labels, task_id)
-                acc.update(self.novel_diagnostics(adjusted, labels, task_id))
-                key = (alpha, gamma) if len(gammas) > 1 else alpha
-                results[key] = acc
-                if task_id > 0:
-                    print(f'alpha={alpha:g} gamma={gamma:g} diagnostic only: '
-                          f'novel-only={acc["novel_only_acc"]}, '
-                          f'current-only={acc["current_only_acc"]}, '
-                          f'novel -> base (%)={acc["novel_to_base_pct"]}')
+            # Formal FSCIL evaluation always uses every seen class.
+            acc = self.evaluator.calc_accuracy(logits, labels, task_id)
+            acc.update(self.novel_diagnostics(logits, labels, task_id))
+            results[alpha] = acc
+            if task_id > 0:
+                print(f'alpha={alpha:g} diagnostic only: novel-only={acc["novel_only_acc"]}, '
+                      f'current-only={acc["current_only_acc"]}, '
+                      f'novel -> base (%)={acc["novel_to_base_pct"]}')
+                print(f'alpha={alpha:g} current-class accuracy (%): {acc["current_class_acc"]}')
         return results
 
     def novel_diagnostics(self, logits, labels, task_id):
@@ -294,10 +246,9 @@ class VisualToTextRunner(Runner):
 
     def save_results(self, output, rows):
         by_alpha = {}
-        for alpha, gamma in dict.fromkeys((r['alpha'], r['gamma']) for r in rows):
-            selected = [r for r in rows if r['alpha'] == alpha and r['gamma'] == gamma]
-            key = str(alpha) if len(set(r['gamma'] for r in rows)) == 1 and gamma == 0.0 else f'{alpha}|gamma={gamma}'
-            by_alpha[key] = dict(
+        for alpha in dict.fromkeys(r['alpha'] for r in rows):
+            selected = [r for r in rows if r['alpha'] == alpha]
+            by_alpha[str(alpha)] = dict(
                 final_acc=selected[-1]['mean_acc'],
                 avg_acc=sum(r['mean_acc'] for r in selected) / len(selected),
                 final_base_acc=selected[-1]['base_avg_acc'],
@@ -308,9 +259,7 @@ class VisualToTextRunner(Runner):
                        accuracy_unit='percent', completed_sessions=completed,
                        total_sessions=self.data_manager.num_tasks,
                        complete=completed == self.data_manager.num_tasks,
-                       by_alpha=by_alpha, sessions=rows,
-                       logit_adjustment=dict(type='base_cosine_subtraction',
-                                             gammas=validate_logit_gammas(getattr(self.cfg.FLOW, 'LOGIT_GAMMAS', [0.0]))))
+                       by_alpha=by_alpha, sessions=rows)
         if len(by_alpha) == 1:
             summary.update(next(iter(by_alpha.values())))
         (output / 'metrics.json').write_text(json.dumps(summary, indent=2, allow_nan=False), encoding='utf-8')
