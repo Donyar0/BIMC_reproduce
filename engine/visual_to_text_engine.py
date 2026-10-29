@@ -296,7 +296,8 @@ class VisualToTextRunner(Runner):
         by_alpha = {}
         for alpha, gamma in dict.fromkeys((r['alpha'], r['gamma']) for r in rows):
             selected = [r for r in rows if r['alpha'] == alpha and r['gamma'] == gamma]
-            by_alpha[f'{alpha}|gamma={gamma}'] = dict(
+            key = str(alpha) if len(set(r['gamma'] for r in rows)) == 1 and gamma == 0.0 else f'{alpha}|gamma={gamma}'
+            by_alpha[key] = dict(
                 final_acc=selected[-1]['mean_acc'],
                 avg_acc=sum(r['mean_acc'] for r in selected) / len(selected),
                 final_base_acc=selected[-1]['base_avg_acc'],
