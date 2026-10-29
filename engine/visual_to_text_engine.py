@@ -10,6 +10,7 @@ import torch
 from tqdm import tqdm
 
 from engine.engine import Runner
+from single_flow.meta_visual_to_text import fit_meta
 from single_flow.visual_to_text import (
     fit, finetune_incremental, build_text_bank, load_flow, load_checkpoint, classify_alphas, validate_alphas,
 )
@@ -23,12 +24,16 @@ class VisualToTextRunner(Runner):
         flow = cfg.FLOW
         inc_cfg = getattr(flow, 'INC', None)
         inc_enabled = bool(getattr(inc_cfg, 'ENABLED', False))
+        meta_cfg = getattr(flow, 'META', None)
+        meta_enabled = bool(getattr(meta_cfg, 'ENABLED', False))
         alphas = validate_alphas(getattr(flow, 'ALPHAS', [1.0]))
         model = self.model.module if self.is_distributed else self.model
         model.eval().requires_grad_(False)
         encoder_id = str((cfg.MODEL.BACKBONE.NAME, cfg.TRAINER.BiMC.PREC, str(cfg.DATASET)))
         checkpoint_path = getattr(flow, 'CHECKPOINT', '')
         checkpoint, bank = None, None
+        if meta_enabled and checkpoint_path:
+            raise ValueError('Episodic meta training must start from a fresh initialization; remove --flow_checkpoint')
         if checkpoint_path:
             print(f'Loading pretrained Flow: {checkpoint_path}')
             checkpoint = load_checkpoint(
@@ -58,6 +63,7 @@ class VisualToTextRunner(Runner):
         print(f'Results directory: {output}')
         print(f'Flow alphas: {alphas} (shared candidates per session)')
         print(f'Incremental support adaptation: {inc_enabled}')
+        print(f'Episodic pseudo-incremental meta training: {meta_enabled}')
         print(f'Start inferencing on all tasks: [0, {self.data_manager.num_tasks - 1}]')
 
         for task_id in range(self.data_manager.num_tasks):
@@ -92,12 +98,26 @@ class VisualToTextRunner(Runner):
                 print('Training Flow on base classes only...')
                 devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
                 with torch.random.fork_rng(devices=devices), torch.enable_grad():
-                    checkpoint = fit(
+                    checkpoint = (fit_meta(
+                        cache, epochs=meta_cfg.EPOCHS,
+                        episodes_per_epoch=meta_cfg.EPISODES_PER_EPOCH,
+                        pseudo_new=meta_cfg.PSEUDO_NEW, shot=meta_cfg.SHOT,
+                        query=meta_cfg.QUERY, base_batch=meta_cfg.BASE_BATCH,
+                        old_query_batch=meta_cfg.OLD_QUERY_BATCH,
+                        inner_steps=meta_cfg.INNER_STEPS, inner_lr=meta_cfg.INNER_LR,
+                        inner_ce_weight=meta_cfg.INNER_CE_WEIGHT,
+                        meta_lr=meta_cfg.LR, weight_decay=flow.WEIGHT_DECAY,
+                        fm_weight=meta_cfg.FM_WEIGHT,
+                        old_ce_weight=meta_cfg.OLD_CE_WEIGHT,
+                        query_ce_weight=meta_cfg.QUERY_CE_WEIGHT,
+                        temperature=flow.TEMPERATURE, blocks=flow.BLOCKS,
+                        hidden=flow.HIDDEN or None, seed=cfg.SEED,
+                        device=self.device) if meta_enabled else fit(
                         cache, epochs=flow.EPOCHS, batch_size=flow.BATCH_SIZE,
                         lr=flow.LR, weight_decay=flow.WEIGHT_DECAY,
                         blocks=flow.BLOCKS, hidden=flow.HIDDEN or None,
                         source=flow.SOURCE, ce_weight=flow.CE_WEIGHT,
-                        temperature=flow.TEMPERATURE, seed=cfg.SEED, device=self.device)
+                        temperature=flow.TEMPERATURE, seed=cfg.SEED, device=self.device))
                 torch.save(checkpoint, output / 'base_flow.pt')
                 velocity_model = load_flow(checkpoint, self.device)
 
@@ -109,7 +129,9 @@ class VisualToTextRunner(Runner):
                     alphas=alphas, steps=flow.STEPS,
                     text_calibration=cfg.TRAINER.BiMC.TEXT_CALIBRATION,
                     text_lambda=getattr(cfg.TRAINER.BiMC, 'LAMBDA_T', None),
-                    incremental_enabled=inc_enabled)
+                    incremental_enabled=inc_enabled,
+                    meta_enabled=meta_enabled,
+                    meta_training=checkpoint.get('training', {}) if meta_enabled else None)
                 (output / 'evaluation.json').write_text(json.dumps(provenance, indent=2), encoding='utf-8')
             bank = build_text_bank(checkpoint, cache, existing=bank)
             inc_record = None
