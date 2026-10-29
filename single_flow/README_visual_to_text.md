@@ -1,4 +1,4 @@
-# 单流视觉 → 文本：基类训练，增量冻结
+# 单流视觉 → 文本：基类训练 + 可选增量微调
 
 这是独立的新方法，原 `single_flow` 文本 → 伪视觉原型方法保持不变。
 共享原版 `fm.py`，无需属性流、物体流或 Composer。
@@ -14,7 +14,7 @@ python main.py --data_cfg configs/datasets/miniimagenet.yaml --train_cfg configs
 ```
 
 可加原有 `--use_swanlab` 参数。结果在 `output/visual_to_text/<dataset>/<run>/`：
-`base_flow.pt` 为冻结 Flow；`bank_session*.pt` 为累计的**文本**候选库；
+`base_flow.pt` 为基类 Flow；开启增量训练后 `flow_sessionN.pt` 为各阶段 Flow；`bank_session*.pt` 为累计的**文本**候选库；
 `metrics.csv/json` 保存各阶段、各 α 的总准确率、基类/增量类/调和准确率，口径沿用 BIMC。
 
 ## 实验一：复用已有权重，降低 Flow 更新强度
@@ -140,3 +140,22 @@ python -m unittest discover -s single_flow -v
 没有运行真实数据集/GPU 实验，默认参数不是已验证的最优参数；
 基类到增量类的泛化和 sample/prototype 差异需实验验证。选参只使用基类验证数据。
 
+
+## 新增：每阶段 5-shot 增量训练
+
+默认 `FLOW.INC.ENABLED=True`。基类 Session 0 的训练完全保留；Session 1+
+只读取**当前新增类别**的训练 support，默认每类 5-shot。CLIP 冻结，
+以前一阶段 Flow 作为初始化，小学习率继续训练：
+`L_inc = L_FM(new support) + INC.CE_WEIGHT * L_seen_CE`。
+其中 FM 目标是当前类别 BiMC 融合文本原型；CE 比较的是
+**所有已见类别**的融合文本原型（基类、此前增量类和当前新类），
+不是仅当前 5 类。增量默认 EPOCHS=10，BATCH_SIZE=25，LR=1e-5，
+CE_WEIGHT=0.1。CUB200 每阶段为 10 类 × 5 张，因此有 50 张 support。
+每阶段微调结束保存 `flow_sessionN.pt`。不使用旧类别图像或测试图像，
+也暂未增加旧类蒸馏约束，故旧类遗忘仍可能发生。
+
+设置 `FLOW.INC.ENABLED=False` 恢复原来的增量冻结对照；
+`INC.CE_WEIGHT=0` 用于 FM-only 消融。可使用
+`--flow_checkpoint /path/to/base_flow.pt` 跳过基类训练、继续增量微调。
+正式分类始终在全部已见类别之间进行；请比较 Base/Incremental/
+Harmonic Acc 和 novel-to-base 比例，不用 current-only 代替正式指标。
