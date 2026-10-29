@@ -159,3 +159,52 @@ CE_WEIGHT=0.1。CUB200 每阶段为 10 类 × 5 张，因此有 50 张 support�
 `--flow_checkpoint /path/to/base_flow.pt` 跳过基类训练、继续增量微调。
 正式分类始终在全部已见类别之间进行；请比较 Base/Incremental/
 Harmonic Acc 和 novel-to-base 比例，不用 current-only 代替正式指标。
+
+## 方案二：伪增量 Episode 元训练（新增）
+
+在 `configs/trainers/visual_to_text.yaml` 中将 `FLOW.META.ENABLED: True`。
+这会**替换 Session 0 的普通 fit()**，从随机初始化开始，在真实基类训练集
+中反复构造伪增量 episode。不是在已经见过全部 60 类的旧基类 Flow 上
+划分伪新类；开启该模式时不能传 `--flow_checkpoint`。
+
+每个 episode 在真实的 60 个基类中随机选 10 个**伪新类**，
+剩下 50 个作为**伪基类**。每个伪新类严格分开
+5-shot Support 和 5 张 Query（均来自基类训练图像，不接触测试集）。
+伪基类抽样用于外层 FM 监督和旧类 Query，伪新类 Support 仅用于
+内层 1 步虚拟 FM+Seen-CE 更新。其外层优化是在**虚拟更新后的参数**
+上，计算新类 Query CE、旧类 Query CE，并组合初始参数上的伪基类 FM Loss：
+
+```
+inner = FM(pseudo-novel support) + inner_ce_weight * seen_CE(support)
+theta_fast = theta - inner_lr * grad(inner)  # 梯度截断的 first-order MAML
+outer = query_ce_weight * CE(theta_fast, novel query)
+      + old_ce_weight * CE(theta_fast, pseudo-base query)
+      + fm_weight * FM(theta, pseudo-base examples)
+```
+
+以上 Query 分类使用 t=0 更新后的图像特征，候选文本为本次
+真实基类中的所有类别（包含伪新类）。为节省计算量使用**一阶近似**，
+不计算二阶元梯度，因此它不是完整 MAML。所有 episode 每轮随机重选伪新类。
+`meta_history` 记录训练损失，最终生成 `base_flow.pt`。
+真实增量阶段依然执行原有的每阶段 5-shot FM+Seen-CE 微调
+（`FLOW.INC.ENABLED: True`），所有常规指标与 SwanLab 记录保持原样。
+
+**重要约束：** 新增的 Query 来自真实**基类训练集**，只在一个 episode 内
+作为独立查询；在整个 meta 训练中所有 60 个基类会轮换角色。因此，
+这些伪新类不是彻底留出的跨训练类别验证集，不能把它们的 Query ACC
+当作真正未见类别泛化成绩。严谨评估仍以真实 FSCIL 增量测试类别为准。
+
+运行（不要传旧的 `base_flow.pt`）：
+
+```bash
+python main.py --data_cfg configs/datasets/cifar100.yaml \
+  --train_cfg configs/trainers/visual_to_text.yaml \
+  --use_swanlab --swanlab_project BIMC_reproduce \
+  --swanlab_experiment pseudo_incremental_meta
+```
+
+用于对照：将 `FLOW.META.ENABLED: False` 恢复普通基类训练，
+同时保留 `FLOW.INC.ENABLED: True`。关闭增量微调则设
+`FLOW.INC.ENABLED: False`。建议先用 EPOCHS=2、
+EPISODES_PER_EPOCH=3 做短程冒烟测试；默认 20×30 episode，
+每个 episode 包含多次 Flow 前向及反向，计算显著高于普通基类 FM。
