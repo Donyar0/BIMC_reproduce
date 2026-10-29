@@ -208,3 +208,49 @@ python main.py --data_cfg configs/datasets/cifar100.yaml \
 `FLOW.INC.ENABLED: False`。建议先用 EPOCHS=2、
 EPISODES_PER_EPOCH=3 做短程冒烟测试；默认 20×30 episode，
 每个 episode 包含多次 Flow 前向及反向，计算显著高于普通基类 FM。
+
+
+## Logit Adjustment 诊断实验：仅基类分数校正，无需重新训练（新增）
+
+从已有 **base_flow.pt** 加载模型，冻结 CLIP 与 Flow，不进行 META / INC 训练。
+使用独立配置 `configs/trainers/visual_to_text_logit_adjust.yaml`：
+`FLOW.EVAL_ONLY=True`、`FLOW.META.ENABLED=False`、
+`FLOW.INC.ENABLED=False`。可在命令行指定多个 `--flow_logit_gammas`；
+每个 alpha 对应的原始余弦 logits 只推理一次，多个 gamma 复用同一结果。
+
+\[
+s'_c=\begin{cases}
+s_c-\gamma,& c\in\mathcal{C}_{base},\\
+s_c,& c\in\mathcal{C}_{novel}.
+\end{cases}
+\]
+
+所有已见类别同时参与评估；没有根据真实测试标签决定单个样本怎么校正。
+这属于基类组级余弦分数后处理，不等同于按类别频率先验的标准长尾 Logit Adjustment。
+默认扫 gamma = [0, 0.005, 0.01, 0.02, 0.03, 0.05, 0.1]。
+`gamma=0` 是原始无校正基线，Session 0 因为全部类别都是基类，
+减去统一常数不影响排序。**严禁用正式增量测试集上的最优 gamma 作为无偏成绩**，
+选择 gamma 应使用独立验证集或基类伪增量验证数据。
+
+运行：
+
+```bash
+python main.py \
+  --data_cfg configs/datasets/cifar100.yaml \
+  --train_cfg configs/trainers/visual_to_text_logit_adjust.yaml \
+  --flow_checkpoint /path/to/base_flow.pt \
+  --flow_alphas 0 0.1 0.2 0.5 1 \
+  --flow_logit_gammas 0 0.005 0.01 0.02 0.03 0.05 0.1 \
+  --use_swanlab \
+  --swanlab_project BIMC_reproduce \
+  --swanlab_experiment base_bias_gamma_sweep
+```
+
+输出仍保存在独立的 `output/visual_to_text/<dataset>/<run>/` 文件夹，
+`metrics.csv` 每行是 Session × alpha × gamma；`metrics.json` 的
+`by_alpha` 使用 `<alpha>|gamma=<gamma>` 键区分组合；SwanLab 的
+`alpha_<a>/gamma_<g>/...` 指标分开记录。
+每个结果仍提供 Base / Incremental / Harmonic ACC、
+novel_to_base_pct 和 novel_only_acc。若只有 gamma=0，沿用旧的
+`by_alpha` 简单 alpha 键。**此实验并不修改旧权重**，
+也不保存新的 Flow 训练权重。
