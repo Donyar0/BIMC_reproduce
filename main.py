@@ -85,6 +85,8 @@ def extend_cfg(cfg):
     cfg.FLOW.TEMPERATURE = 0.07
     cfg.FLOW.STEPS = 8
     cfg.FLOW.ALPHAS = [1.0]
+    cfg.FLOW.LOGIT_GAMMAS = [0.0]  # subtract gamma from base-class cosine scores
+    cfg.FLOW.EVAL_ONLY = False
     cfg.FLOW.CHECKPOINT = ''
     cfg.FLOW.TRUST_CHECKPOINT = False
     cfg.FLOW.OUTPUT_DIR = 'output/single_flow'
@@ -142,6 +144,8 @@ def main():
                         help="Load an existing visual-to-text Flow and skip training")
     parser.add_argument('--flow_alphas', type=float, nargs='+', default=None,
                         help="Visual-to-text residual strengths, e.g. 0 0.1 0.2 0.5 1")
+    parser.add_argument('--flow_logit_gammas', type=float, nargs='+', default=None,
+                        help='Base-class cosine subtraction strengths, e.g. 0 0.005 0.01 0.02 0.05 0.1')
     parser.add_argument('--flow_trusted_checkpoint', action='store_true',
                         help="Allow pickle loading of your own trusted Flow checkpoint")
     parser.add_argument('--use_swanlab', action='store_true', help="Enable SwanLab experiment logging")
@@ -157,7 +161,7 @@ def main():
 
     cfg = setup_cfg(data_cfg, train_cfg)
     if (args.flow_checkpoint is not None or args.flow_alphas is not None
-            or args.flow_trusted_checkpoint):
+            or args.flow_logit_gammas is not None or args.flow_trusted_checkpoint):
         if cfg.METHOD.lower() != 'visual_to_text':
             parser.error('--flow_* overrides require METHOD=visual_to_text')
         cfg.defrost()
@@ -165,6 +169,8 @@ def main():
             cfg.FLOW.CHECKPOINT = args.flow_checkpoint
         if args.flow_alphas is not None:
             cfg.FLOW.ALPHAS = args.flow_alphas
+        if args.flow_logit_gammas is not None:
+            cfg.FLOW.LOGIT_GAMMAS = args.flow_logit_gammas
         if args.flow_trusted_checkpoint:
             cfg.FLOW.TRUST_CHECKPOINT = True
         cfg.freeze()
