@@ -18,6 +18,8 @@ import torch
 from single_flow.visual_to_text import (
     fit, build_text_bank, load_flow, load_checkpoint, classify_alphas, validate_alphas,
 )
+from engine.visual_to_text_engine import validate_logit_gammas, subtract_base_logit_bias
+
 from bimc_cache import from_task_statistics
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,7 +47,10 @@ class RunnerTests(unittest.TestCase):
                          from_task_statistics=from_task_statistics, fit=checked_fit,
                          build_text_bank=build_text_bank, load_flow=load_flow,
                          load_checkpoint=load_checkpoint, classify_alphas=classify_alphas,
-                         validate_alphas=validate_alphas, log_metrics=lambda *a,**k:None)
+                         validate_alphas=validate_alphas,
+                         validate_logit_gammas=validate_logit_gammas,
+                         subtract_base_logit_bias=subtract_base_logit_bias,
+                         log_metrics=lambda *a,**k:None)
         runner_type = load_class(ROOT/'engine/visual_to_text_engine.py','VisualToTextRunner',namespace)
         eye = torch.eye(3)
         class Model(torch.nn.Module):
@@ -189,6 +194,7 @@ class RunnerTests(unittest.TestCase):
                 if trainer=='visual_to_text':
                     self.assertEqual(cfg.FLOW.ALPHAS, [0., 0.1, 0.2, 0.5, 1.])
                     self.assertEqual(cfg.FLOW.CHECKPOINT, '')
+                    self.assertEqual(cfg.FLOW.LOGIT_GAMMAS, [0.0])
 
 
 if __name__ == '__main__':
