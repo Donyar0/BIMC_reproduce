@@ -1,4 +1,4 @@
-"""Single visual -> text flow: base-only training and frozen image inference.
+"""Single visual -> text flow: base training and optional incremental support finetuning.
 Uses the unchanged FlowComposer network in fm.py and BIMC text prototypes.
 """
 import argparse
@@ -73,6 +73,106 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
                               source=source, ce_weight=ce_weight, temperature=temperature, seed=seed),
                 loss_history=history)
 
+
+
+
+def finetune_incremental(checkpoint, cache, bank, *, session_id,
+                         epochs=10, batch_size=25, lr=1e-5, weight_decay=0.,
+                         ce_weight=0.1, temperature=0.07, seed=0, device='cpu'):
+    """Continue the existing visual->text Flow on current-session 5-shot support.
+
+    FM target: correct novel-class text. Seen CE candidates: ALL seen class
+    text prototypes (base + historical novel + current novel). Never uses
+    previous session images or test images. Input checkpoint is not mutated.
+    """
+    if cache.get('stage') != 'incremental' or cache.get('split') != 'train':
+        raise ValueError('Incremental training requires stage=incremental, split=train')
+    if type(session_id) is not int or session_id < 1:
+        raise ValueError('session_id must be a positive integer')
+    if (type(epochs) is not int or epochs < 1 or type(batch_size) is not int or
+            batch_size < 1 or not (0 < lr < float('inf')) or
+            not (0 <= weight_decay < float('inf')) or
+            not (0 <= ce_weight < float('inf')) or
+            not (0 < temperature < float('inf'))):
+        raise ValueError('Invalid incremental hyperparameters')
+    if checkpoint.get('direction') != 'visual_to_text':
+        raise ValueError('Expected visual_to_text checkpoint')
+    if (cache.get('encoder_id') != checkpoint.get('encoder_id') or
+            bank.get('encoder_id') != checkpoint.get('encoder_id')):
+        raise ValueError('Incremental encoder mismatch')
+    if bank.get('kind') != 'text_candidates':
+        raise ValueError('Seen CE requires a text candidate bank')
+    current_ids, current_text = text_cache(cache)
+    all_ids = ids_checked(bank['class_ids'])
+    candidates = unit(bank['prototypes']).cpu()
+    dim = checkpoint['architecture']['in_channels']
+    if candidates.shape != (len(all_ids), dim) or current_text.shape[1] != dim:
+        raise ValueError('Text feature dimensions do not match')
+    if not set(current_ids).issubset(set(all_ids)) or set(current_ids) & set(checkpoint['base_class_ids']):
+        raise ValueError('Current incremental classes must be non-base classes in bank')
+    updates = checkpoint.get('incremental_updates', [])
+    if updates:
+        if updates[-1]['session_id'] + 1 != session_id:
+            raise ValueError('Sessions must be trained in chronological order')
+        if any(set(current_ids) & set(record['class_ids']) for record in updates):
+            raise ValueError('Classes from a previously learned session cannot be retrained')
+    elif session_id != 1:
+        raise ValueError('First incremental update must be session 1')
+    row = {cid: i for i, cid in enumerate(all_ids)}
+    for cid, text in zip(current_ids, current_text):
+        if not torch.allclose(candidates[row[cid]], text, atol=1e-6):
+            raise ValueError('Current text does not match candidate bank')
+
+    images = unit(cache['image_features']).cpu()
+    labels = cache['image_labels'].detach().cpu()
+    if labels.ndim != 1 or labels.dtype != torch.long or len(labels) != len(images):
+        raise ValueError('Support image_labels must be int64 [N]')
+    if images.shape[1] != dim or set(labels.tolist()) != set(current_ids):
+        raise ValueError('Support labels must contain only all current novel classes')
+    y = torch.tensor([row[int(cid)] for cid in labels.tolist()], dtype=torch.long)
+    targets = candidates[y]
+    loader = DataLoader(TensorDataset(images, targets, y), batch_size=batch_size,
+                        shuffle=True, generator=torch.Generator().manual_seed(seed + session_id))
+    model = load_flow(checkpoint, device).train().requires_grad_(True)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    candidates = candidates.to(device)
+    history = []
+    for epoch in range(epochs):
+        total, total_fm, total_ce, n = 0., 0., 0., 0
+        for x0, x1, label in loader:
+            x0, x1, label = x0.to(device), x1.to(device), label.to(device)
+            t = torch.rand(len(x0), 1, device=device)
+            xt = (1 - t) * x0 + t * x1
+            v = model(xt, t)
+            fm = ((v - (x1 - x0)) ** 2).sum(-1).mean()
+            endpoint = F.normalize(xt + (1 - t) * v, dim=-1)
+            seen_ce = F.cross_entropy(endpoint @ candidates.T / temperature, label)
+            loss = fm + ce_weight * seen_ce
+            if not torch.isfinite(loss):
+                raise RuntimeError('Nonfinite incremental training loss')
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            size = len(x0)
+            total += loss.item() * size
+            total_fm += fm.item() * size
+            total_ce += seen_ce.item() * size
+            n += size
+        record = dict(loss=total / n, fm=total_fm / n, seen_ce=total_ce / n)
+        history.append(record)
+        print(f'inc_session={session_id} epoch={epoch+1} loss={record["loss"]:.6f} '
+              f'fm={record["fm"]:.6f} seen_ce={record["seen_ce"]:.6f}', flush=True)
+
+    updated = dict(checkpoint)
+    updated['state_dict'] = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+    updated['incremental_updates'] = list(updates) + [dict(
+        session_id=session_id, class_ids=list(current_ids), num_samples=len(images),
+        num_seen_classes=len(all_ids), epochs=epochs, batch_size=batch_size,
+        lr=lr, weight_decay=weight_decay, ce_weight=ce_weight,
+        temperature=temperature, loss_history=history)]
+    updated['trained_through_session'] = session_id
+    model.eval().requires_grad_(False)
+    return updated
 
 
 def load_flow(checkpoint, device='cpu'):
