@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from engine.engine import Runner
 from single_flow.visual_to_text import (
-    fit, build_text_bank, load_flow, load_checkpoint, classify_alphas, validate_alphas,
+    fit, finetune_incremental, build_text_bank, load_flow, load_checkpoint, classify_alphas, validate_alphas,
 )
 from utils.experiment_logger import log_metrics
 
@@ -21,6 +21,8 @@ class VisualToTextRunner(Runner):
     def run(self):
         cfg = self.cfg
         flow = cfg.FLOW
+        inc_cfg = getattr(flow, 'INC', None)
+        inc_enabled = bool(getattr(inc_cfg, 'ENABLED', False))
         alphas = validate_alphas(getattr(flow, 'ALPHAS', [1.0]))
         model = self.model.module if self.is_distributed else self.model
         model.eval().requires_grad_(False)
@@ -31,6 +33,8 @@ class VisualToTextRunner(Runner):
             print(f'Loading pretrained Flow: {checkpoint_path}')
             checkpoint = load_checkpoint(
                 checkpoint_path, trusted=getattr(flow, 'TRUST_CHECKPOINT', False))
+            if checkpoint.get('trained_through_session', 0) != 0:
+                raise ValueError('Supply a base Flow checkpoint, not a session-adapted checkpoint')
             if checkpoint['encoder_id'] != encoder_id:
                 raise ValueError('CLIP encoder/data configuration mismatch')
             base_ids = [int(c) for c in self.data_manager.class_index_in_task[0]]
@@ -52,7 +56,8 @@ class VisualToTextRunner(Runner):
         self.acc_list, self.task_acc_list = [], []
         print(f'Method: visual_to_text | Dataset: {cfg.DATASET.NAME} | Seed: {cfg.SEED}')
         print(f'Results directory: {output}')
-        print(f'Flow alphas: {alphas} (shared checkpoint, features and text candidates)')
+        print(f'Flow alphas: {alphas} (shared candidates per session)')
+        print(f'Incremental support adaptation: {inc_enabled}')
         print(f'Start inferencing on all tasks: [0, {self.data_manager.num_tasks - 1}]')
 
         for task_id in range(self.data_manager.num_tasks):
@@ -67,7 +72,8 @@ class VisualToTextRunner(Runner):
             cache = dict(encoder_id=encoder_id, class_ids=[int(c) for c in class_ids],
                          text_prototypes=text.detach().float().cpu(),
                          stage='base' if task_id == 0 else 'incremental', split='train')
-            if task_id == 0 and (checkpoint is None or cfg.TRAINER.BiMC.PROTOTYPE_CACHE_DIR):
+            if ((task_id == 0 and (checkpoint is None or cfg.TRAINER.BiMC.PROTOTYPE_CACHE_DIR))
+                    or (task_id > 0 and inc_enabled)):
                 loader = self.data_manager.get_dataloader(
                     task_id, source='train', mode='test', accumulate_past=False)
                 features, labels, visual = model.inference_all_img_feature(loader, class_ids[0])
@@ -102,9 +108,24 @@ class VisualToTextRunner(Runner):
                     training=checkpoint.get('training', {}), architecture=checkpoint['architecture'],
                     alphas=alphas, steps=flow.STEPS,
                     text_calibration=cfg.TRAINER.BiMC.TEXT_CALIBRATION,
-                    text_lambda=getattr(cfg.TRAINER.BiMC, 'LAMBDA_T', None))
+                    text_lambda=getattr(cfg.TRAINER.BiMC, 'LAMBDA_T', None),
+                    incremental_enabled=inc_enabled)
                 (output / 'evaluation.json').write_text(json.dumps(provenance, indent=2), encoding='utf-8')
             bank = build_text_bank(checkpoint, cache, existing=bank)
+            inc_record = None
+            if task_id > 0 and inc_enabled:
+                print(f'Fine-tuning on {len(cache["image_features"])} current-session support images')
+                devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+                with torch.random.fork_rng(devices=devices), torch.enable_grad():
+                    checkpoint = finetune_incremental(
+                        checkpoint, cache, bank, session_id=task_id,
+                        epochs=inc_cfg.EPOCHS, batch_size=inc_cfg.BATCH_SIZE,
+                        lr=inc_cfg.LR, weight_decay=inc_cfg.WEIGHT_DECAY,
+                        ce_weight=inc_cfg.CE_WEIGHT, temperature=inc_cfg.TEMPERATURE,
+                        seed=cfg.SEED, device=self.device)
+                torch.save(checkpoint, output / f'flow_session{task_id}.pt')
+                velocity_model = load_flow(checkpoint, self.device)
+                inc_record = checkpoint['incremental_updates'][-1]
             torch.save(bank, output / f'bank_session{task_id}.pt')
             del cache
             results = self.inference_task_flow(task_id, bank, model, velocity_model, alphas)
@@ -114,6 +135,7 @@ class VisualToTextRunner(Runner):
             logged = {}
             for alpha, acc in results.items():
                 rows.append(dict(task_id=task_id, alpha=alpha, seen_classes=len(bank['class_ids']),
+                                 inc_train_samples=inc_record['num_samples'] if inc_record else 0,
                                  **acc, elapsed_time=elapsed))
                 print(f'=> Task [{task_id}] alpha={alpha:g} | Acc: {acc["mean_acc"]:.2f} | '
                       f'Base: {acc["base_avg_acc"]:.2f} | Incremental: {acc["inc_avg_acc"]:.2f} | '
