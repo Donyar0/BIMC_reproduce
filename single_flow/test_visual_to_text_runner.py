@@ -75,8 +75,8 @@ class RunnerTests(unittest.TestCase):
             runner.cfg = NS(SEED=1,DATASET=NS(NAME='synthetic'),MODEL=NS(BACKBONE=NS(NAME='synthetic')),
                 TRAINER=NS(BiMC=NS(PREC='fp32',TEXT_CALIBRATION=False,PROTOTYPE_CACHE_DIR='')),
                 FLOW=NS(OUTPUT_DIR=directory,EPOCHS=2,BATCH_SIZE=4,LR=0.001,
-                        WEIGHT_DECAY=0.,BLOCKS=1,HIDDEN=8,SOURCE='sample',CE_WEIGHT=0.,
-                        TEMPERATURE=0.07,STEPS=2),dump=lambda:'synthetic: true\n')
+                        WEIGHT_DECAY=0.,BLOCKS=1,HIDDEN=8,SOURCE='sample',
+                        STEPS=2),dump=lambda:'synthetic: true\n')
             runner.model=Model(); runner.device='cpu'; runner.is_distributed=False
             runner.data_manager=Data(); runner.evaluator=evaluator(Data.class_index_in_task)
             runner.acc_list=[]; runner.task_acc_list=[]
@@ -185,9 +185,6 @@ class RunnerTests(unittest.TestCase):
                     self.assertEqual(cfg.METHOD,'single_flow')
                 if trainer=='visual_to_text':
                     self.assertEqual(cfg.FLOW.ALPHAS, [1.0])
-                    self.assertFalse(cfg.FLOW.META.ENABLED)
-                    self.assertEqual(cfg.FLOW.CE_WEIGHT, 0.)
-                    self.assertEqual(cfg.FLOW.INC.CE_WEIGHT, 0.)
                     self.assertEqual(cfg.FLOW.CHECKPOINT, '')
 
 

@@ -4,7 +4,6 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 import torch
 from single_flow import visual_to_text as vtt
 
@@ -16,7 +15,7 @@ class VisualToTextTests(unittest.TestCase):
         text = torch.eye(4)
         cls.cache = dict(stage='base', split='train', encoder_id='synthetic',
                          class_ids=[10, 20, 30, 40], text_prototypes=text,
-                         image_features=text.roll(1, dims=1),
+                         image_features=0.55 * text.roll(1, dims=1) + 0.45 * text,
                          image_labels=torch.tensor([10, 20, 30, 40]))
         with contextlib.redirect_stdout(io.StringIO()):
             cls.ck = vtt.fit(cls.cache, epochs=150, blocks=1, hidden=32, lr=0.005)
@@ -37,13 +36,8 @@ class VisualToTextTests(unittest.TestCase):
         self.assertTrue(all(not p.requires_grad for p in model.parameters()))
         self.assertTrue(all(torch.equal(before[k], v) for k, v in model.state_dict().items()))
 
-    def test_no_ce_and_no_partial_alpha(self):
+    def test_reject_partial_alpha_and_invalid_dimensions(self):
         model = vtt.load_flow(self.ck)
-        with patch.object(vtt.F, 'cross_entropy', side_effect=AssertionError('CE called')):
-            with contextlib.redirect_stdout(io.StringIO()):
-                vtt.fit(self.cache, epochs=1, blocks=1, hidden=8, ce_weight=0)
-        with self.assertRaisesRegex(ValueError, 'CE'):
-            vtt.fit(self.cache, epochs=1, blocks=1, hidden=8, ce_weight=0.1)
         with self.assertRaisesRegex(ValueError, 'alpha'):
             vtt.classify_alphas(model, self.cache['image_features'],
                                 self.cache['text_prototypes'], alphas=[0.2])

@@ -2,7 +2,6 @@
 import contextlib
 import io
 import unittest
-from unittest.mock import patch
 import torch
 from single_flow import visual_to_text as vtt
 
@@ -15,18 +14,15 @@ class IncrementalFlowTests(unittest.TestCase):
                     image_features=torch.eye(4)[:2],
                     image_labels=torch.tensor([0, 1], dtype=torch.long))
         with contextlib.redirect_stdout(io.StringIO()):
-            ck = vtt.fit(base, epochs=2, blocks=1, hidden=8, ce_weight=0.)
+            ck = vtt.fit(base, epochs=2, blocks=1, hidden=8)
         inc = dict(stage='incremental', split='train', encoder_id='synthetic',
                    class_ids=[2, 3], text_prototypes=torch.eye(4)[2:],
-                   image_features=torch.eye(4)[2:],
+                   image_features=torch.eye(4)[2:].roll(1, dims=1),
                    image_labels=torch.tensor([2, 3], dtype=torch.long))
         snapshot = {k: value.clone() for k, value in ck['state_dict'].items()}
-        calls = []
-        with patch.object(vtt.F, 'cross_entropy', side_effect=AssertionError('CE must not be used')):
-            with contextlib.redirect_stdout(io.StringIO()):
-                result = vtt.finetune_incremental(
-                    ck, inc, session_id=1, epochs=2,
-                    batch_size=2, lr=1e-4)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = vtt.finetune_incremental(
+                ck, inc, session_id=1, epochs=2, batch_size=2, lr=1e-4)
         self.assertEqual(result['incremental_updates'][0]['loss_history'][0]['fm'],
                          result['incremental_updates'][0]['loss_history'][0]['loss'])
         self.assertEqual(result['trained_through_session'], 1)

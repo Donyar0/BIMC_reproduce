@@ -1,6 +1,6 @@
 # 单流视觉 → 文本：纯 FM 训练，完整 Flow 测试，无文本 Bank
 
-本分支的默认方案：**冻结 CLIP、仅训练 Flow Matching，完全关闭伪增量元训练和 CE**。Session 0 使用基类图像特征与 BiMC 融合文本原型训练；Session 1+ 使用当期 5-shot 支持图像与当期融合文本原型进行小学习率 FM 微调。
+本分支的默认方案：**冻结 CLIP、仅训练 Flow Matching**。Session 0 使用基类图像特征与 BiMC 融合文本原型训练；Session 1+ 使用当期 5-shot 支持图像与当期融合文本原型进行小学习率 FM 微调。
 
 ## 直接运行
 
@@ -10,7 +10,7 @@ python main.py --data_cfg configs/datasets/cub200.yaml --train_cfg configs/train
 python main.py --data_cfg configs/datasets/miniimagenet.yaml --train_cfg configs/trainers/visual_to_text.yaml
 ```
 
-配置默认值：`FLOW.META.ENABLED=False`、`FLOW.CE_WEIGHT=0`、`FLOW.INC.ENABLED=True`、`FLOW.INC.CE_WEIGHT=0`、`FLOW.ALPHAS=[1.0]`、`FLOW.STEPS=1`。**仅允许 alpha=1 的完整 Flow 输出**，不使用残差弱更新。若希望完整区间使用多个 Euler 积分步，可将 STEPS 改为 8。
+配置默认值：`FLOW.INC.ENABLED=True`、`FLOW.ALPHAS=[1.0]`、`FLOW.STEPS=1`。**仅允许 alpha=1 的完整 Flow 输出**，不使用残差弱更新。若希望完整区间使用多个 Euler 积分步，可将 STEPS 改为 8。
 
 ## 训练与推理
 
@@ -31,4 +31,4 @@ python -m single_flow.visual_to_text classify --checkpoint flow.pt --cache test.
 
 这里 `candidate-cache` 必须包含本阶段**全部已见类别**的 `class_ids`、`text_prototypes` 和 `encoder_id`，供独立 CLI 读取，不需要也不会输出 bank。主程序从 CLIP 即时计算候选原型，不依赖此 CLI 缓存接口。
 
-注意：修改代码或配置**不会使旧 CE 训练权重自动变成纯 FM 权重**。新实验请不要传旧 checkpoint，重新训练。实验结果与 CIFAR100/CUB/miniImageNet 的真实 GPU 精度尚未在这里执行验证。运行轻量测试：`python -m unittest discover -s single_flow -v`。
+从头运行实验时，使用默认的空 checkpoint 路径。实验结果与 CIFAR100/CUB/miniImageNet 的真实 GPU 精度尚未在这里执行验证。运行轻量测试：`python -m unittest discover -s single_flow -v`。

@@ -6,20 +6,16 @@ import math
 import pickle
 from pathlib import Path
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from .fm import DeepFlowMatchingNet
 from .s1_flow import unit, ids_checked, text_cache, load
 
 
 def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
-        blocks=24, hidden=None, source='sample', ce_weight=0.0,
-        temperature=0.07, seed=0, device='cpu'):
-    if ce_weight != 0:
-        raise ValueError('CE has been removed: ce_weight must be 0')
+        blocks=24, hidden=None, source='sample', seed=0, device='cpu'):
     if cache.get('stage') != 'base' or cache.get('split') != 'train':
         raise ValueError('Training accepts only stage=base, split=train caches')
-    if epochs < 1 or batch_size < 1 or blocks < 1 or lr <= 0 or weight_decay < 0 or ce_weight < 0 or temperature <= 0:
+    if epochs < 1 or batch_size < 1 or blocks < 1 or lr <= 0 or weight_decay < 0:
         raise ValueError('Invalid training hyperparameters')
     if source not in ('prototype', 'sample'):
         raise ValueError('source must be prototype or sample')
@@ -29,7 +25,7 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
         visual = unit(cache['visual_prototypes']).cpu()
         if visual.shape != text.shape:
             raise ValueError('Visual prototype rows/dimensions must match text')
-        sources, targets, y = visual, text, torch.arange(len(ids))
+        sources, targets = visual, text
     else:
         images = unit(cache['image_features']).cpu()
         labels = cache['image_labels'].detach().cpu()
@@ -40,7 +36,7 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
         row = {c: i for i, c in enumerate(ids)}
         y = torch.tensor([row[c] for c in labels.tolist()])
         sources, targets = images, text[y]
-    loader = DataLoader(TensorDataset(sources, targets, y), batch_size=batch_size,
+    loader = DataLoader(TensorDataset(sources, targets), batch_size=batch_size,
                         shuffle=True, generator=torch.Generator().manual_seed(seed))
     arch = dict(in_channels=text.shape[1], model_channels=hidden or text.shape[1],
                 out_channels=text.shape[1], num_res_blocks=blocks)
@@ -49,8 +45,8 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
     history = []
     for epoch in range(epochs):
         total, count = 0., 0
-        for x0, x1, label in loader:
-            x0, x1, label = x0.to(device), x1.to(device), label.to(device)
+        for x0, x1 in loader:
+            x0, x1 = x0.to(device), x1.to(device)
             t = torch.rand(len(x0), 1, device=device)
             xt = (1-t)*x0 + t*x1
             pred_v = model(xt, t)
@@ -67,7 +63,7 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
     return dict(format_version=1, direction="visual_to_text", state_dict={k:v.detach().cpu().clone() for k,v in model.state_dict().items()},
                 architecture=arch, encoder_id=cache['encoder_id'], base_class_ids=ids,
                 training=dict(epochs=epochs, batch_size=batch_size, lr=lr, weight_decay=weight_decay,
-                              source=source, ce_weight=ce_weight, temperature=temperature, seed=seed),
+                              source=source, seed=seed),
                 loss_history=history)
 
 
@@ -75,23 +71,19 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
 
 def finetune_incremental(checkpoint, cache, *, session_id,
                          epochs=10, batch_size=25, lr=1e-5, weight_decay=0.,
-                         ce_weight=0.0, temperature=0.07, seed=0, device='cpu'):
+                         seed=0, device='cpu'):
     """Continue the existing visual->text Flow on current-session 5-shot support.
 
     FM target: correct novel-class fused text. Only FM is optimized.
     Never uses previous session images or test images. Input checkpoint is not mutated.
     """
-    if ce_weight != 0:
-        raise ValueError('CE has been removed: ce_weight must be 0')
     if cache.get('stage') != 'incremental' or cache.get('split') != 'train':
         raise ValueError('Incremental training requires stage=incremental, split=train')
     if type(session_id) is not int or session_id < 1:
         raise ValueError('session_id must be a positive integer')
     if (type(epochs) is not int or epochs < 1 or type(batch_size) is not int or
             batch_size < 1 or not (0 < lr < float('inf')) or
-            not (0 <= weight_decay < float('inf')) or
-            not (0 <= ce_weight < float('inf')) or
-            not (0 < temperature < float('inf'))):
+            not (0 <= weight_decay < float('inf'))):
         raise ValueError('Invalid incremental hyperparameters')
     if checkpoint.get('direction') != 'visual_to_text':
         raise ValueError('Expected visual_to_text checkpoint')
@@ -125,15 +117,15 @@ def finetune_incremental(checkpoint, cache, *, session_id,
         raise ValueError('Support labels must contain only all current novel classes')
     y = torch.tensor([row[int(cid)] for cid in labels.tolist()], dtype=torch.long)
     targets = current_text[y]
-    loader = DataLoader(TensorDataset(images, targets, y), batch_size=batch_size,
+    loader = DataLoader(TensorDataset(images, targets), batch_size=batch_size,
                         shuffle=True, generator=torch.Generator().manual_seed(seed + session_id))
     model = load_flow(checkpoint, device).train().requires_grad_(True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     history = []
     for epoch in range(epochs):
         total, n = 0., 0
-        for x0, x1, label in loader:
-            x0, x1, label = x0.to(device), x1.to(device), label.to(device)
+        for x0, x1 in loader:
+            x0, x1 = x0.to(device), x1.to(device)
             t = torch.rand(len(x0), 1, device=device)
             xt = (1 - t) * x0 + t * x1
             v = model(xt, t)
@@ -156,8 +148,8 @@ def finetune_incremental(checkpoint, cache, *, session_id,
     updated['incremental_updates'] = list(updates) + [dict(
         session_id=session_id, class_ids=list(current_ids), num_samples=len(images),
         num_seen_classes=num_seen_classes, epochs=epochs, batch_size=batch_size,
-        lr=lr, weight_decay=weight_decay, ce_weight=ce_weight,
-        temperature=temperature, loss_history=history)]
+        lr=lr, weight_decay=weight_decay, 
+        loss_history=history)]
     updated['trained_through_session'] = session_id
     model.eval().requires_grad_(False)
     return updated
@@ -252,7 +244,7 @@ def main():
     train.add_argument('--source', choices=['sample', 'prototype'], default='sample')
     for name, default, typ in [('epochs',100,int),('batch-size',64,int),('lr',2e-4,float),
                                ('weight-decay',1e-4,float),('blocks',24,int),('hidden',None,int),
-                               ('ce-weight',0.0,float),('temperature',0.07,float),('seed',0,int)]:
+                               ('seed',0,int)]:
         train.add_argument('--'+name, default=default, type=typ)
     evaluate = sub.add_parser('classify')
     evaluate.add_argument('--checkpoint', required=True)

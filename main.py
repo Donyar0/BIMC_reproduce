@@ -81,36 +81,17 @@ def extend_cfg(cfg):
     cfg.FLOW.HIDDEN = 0
     cfg.FLOW.TARGET = 'prototype'
     cfg.FLOW.SOURCE = 'sample'
-    cfg.FLOW.CE_WEIGHT = 0.0
-    cfg.FLOW.TEMPERATURE = 0.07
     cfg.FLOW.STEPS = 8
     cfg.FLOW.ALPHAS = [1.0]
     cfg.FLOW.CHECKPOINT = ''
     cfg.FLOW.TRUST_CHECKPOINT = False
     cfg.FLOW.OUTPUT_DIR = 'output/single_flow'
-    cfg.FLOW.META = CN()
-    cfg.FLOW.META.ENABLED = False
-    cfg.FLOW.META.EPOCHS = 20
-    cfg.FLOW.META.EPISODES_PER_EPOCH = 30
-    cfg.FLOW.META.PSEUDO_NEW = 10
-    cfg.FLOW.META.SHOT = 5
-    cfg.FLOW.META.QUERY = 5
-    cfg.FLOW.META.BASE_BATCH = 64
-    cfg.FLOW.META.OLD_QUERY_BATCH = 64
-    cfg.FLOW.META.INNER_STEPS = 1
-    cfg.FLOW.META.INNER_LR = 0.0001
-    cfg.FLOW.META.BASE_FM_WEIGHT = 1.0
-    cfg.FLOW.META.LR = 0.0001
-    cfg.FLOW.META.OLD_FM_WEIGHT = 0.5
-    cfg.FLOW.META.NOVEL_FM_WEIGHT = 1.0
     cfg.FLOW.INC = CN()
     cfg.FLOW.INC.ENABLED = False
     cfg.FLOW.INC.EPOCHS = 10
     cfg.FLOW.INC.BATCH_SIZE = 25
     cfg.FLOW.INC.LR = 1e-5
     cfg.FLOW.INC.WEIGHT_DECAY = 0.0
-    cfg.FLOW.INC.CE_WEIGHT = 0.0
-    cfg.FLOW.INC.TEMPERATURE = 0.07
 
 
 
@@ -125,7 +106,12 @@ def setup_cfg(dataset_cfg_file, method_cfg_file):
     cfg.merge_from_file(dataset_cfg_file)
 
     # 2. From the method config file
-    cfg.merge_from_file(method_cfg_file)
+    with open(method_cfg_file, encoding='utf-8') as handle:
+        trainer = CN.load_cfg(handle)
+    if trainer.get('METHOD', '').lower() == 'single_flow':
+        cfg.FLOW.CE_WEIGHT = 0.0
+        cfg.FLOW.TEMPERATURE = 0.07
+    cfg.merge_from_other_cfg(trainer)
 
     cfg.freeze()
     return cfg
