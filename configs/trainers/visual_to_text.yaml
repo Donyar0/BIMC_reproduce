@@ -47,10 +47,10 @@ FLOW:
   BLOCKS: 24
   HIDDEN: 0  # 0 uses CLIP feature dimension
   SOURCE: "sample"  # sample images -> correct class text; optional prototype
-  CE_WEIGHT: 0.1  # 0 disables endpoint text CE
+  CE_WEIGHT: 0.0  # no CE loss
   TEMPERATURE: 0.07
   STEPS: 1  # Euler steps; 1 means z + v(z, 0)
-  ALPHAS: [0.0, 0.1, 0.2, 0.5, 1.0]  # normalize((1-alpha)*CLIP + alpha*Flow)
+  ALPHAS: [1.0]  # full Flow endpoint; no residual mixture
   CHECKPOINT: ""  # set path or --flow_checkpoint to reuse weights; empty trains once
   TRUST_CHECKPOINT: False  # only for your own trusted checkpoint on older PyTorch
   OUTPUT_DIR: "output/visual_to_text"
@@ -72,18 +72,17 @@ FLOW:
     OLD_QUERY_BATCH: 64
     INNER_STEPS: 1
     INNER_LR: 0.0001
-    INNER_CE_WEIGHT: 0.1
     LR: 0.0001
-    FM_WEIGHT: 1.0
-    OLD_CE_WEIGHT: 0.5
-    QUERY_CE_WEIGHT: 1.0
+    BASE_FM_WEIGHT: 1.0
+    OLD_FM_WEIGHT: 0.5
+    NOVEL_FM_WEIGHT: 1.0
 
-  # Incremental stages only: new 5-shot support; CE over all seen classes.
+  # Incremental stages only: FM on current new 5-shot support.
   INC:
     ENABLED: True
     EPOCHS: 10
     BATCH_SIZE: 25
     LR: 0.00001
     WEIGHT_DECAY: 0.0
-    CE_WEIGHT: 0.1
+    CE_WEIGHT: 0.0
     TEMPERATURE: 0.07
