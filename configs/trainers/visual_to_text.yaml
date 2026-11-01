@@ -57,12 +57,12 @@ FLOW:
 
 
 
-  # Episodic pseudo-incremental meta-learning from real base training features.
+  # Disabled: no pseudo-incremental meta-learning; regular base FM is used.
   # On: base training uses disjoint 5-shot support and query episodes;
   # off: original base fit() is unchanged. Never use --flow_checkpoint
   # with META.ENABLED=true (the checkpoint would skip meta training).
   META:
-    ENABLED: True
+    ENABLED: False
     EPOCHS: 20
     EPISODES_PER_EPOCH: 30
     PSEUDO_NEW: 10
