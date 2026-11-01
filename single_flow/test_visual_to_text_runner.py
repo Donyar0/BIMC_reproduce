@@ -16,7 +16,7 @@ import numpy as np
 import torch
 
 from single_flow.visual_to_text import (
-    fit, build_text_bank, load_flow, load_checkpoint, classify_alphas, validate_alphas,
+    fit, load_flow, load_checkpoint, classify_alphas, validate_alphas,
 )
 from bimc_cache import from_task_statistics
 
@@ -43,7 +43,7 @@ class RunnerTests(unittest.TestCase):
         namespace = dict(Runner=object, torch=torch, np=np, Path=Path, datetime=datetime,
                          time=time, csv=csv, json=json, tqdm=lambda x:x,
                          from_task_statistics=from_task_statistics, fit=checked_fit,
-                         build_text_bank=build_text_bank, load_flow=load_flow,
+                         load_flow=load_flow,
                          load_checkpoint=load_checkpoint, classify_alphas=classify_alphas,
                          validate_alphas=validate_alphas, log_metrics=lambda *a,**k:None)
         runner_type = load_class(ROOT/'engine/visual_to_text_engine.py','VisualToTextRunner',namespace)
@@ -93,13 +93,11 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(summary['final_acc'],100.)
             with (result_path.parent/'metrics.csv').open() as handle:
                 self.assertEqual(len(list(csv.DictReader(handle))),2)
-            bank0=torch.load(result_path.parent/'bank_session0.pt',weights_only=True)
-            bank1=torch.load(result_path.parent/'bank_session1.pt',weights_only=True)
-            self.assertTrue(torch.equal(bank0['prototypes'],bank1['prototypes'][:2]))
+            self.assertEqual(list(result_path.parent.glob('bank_session*.pt')), [])
 
-            # Reuse exactly that checkpoint and scan all strengths in one pass.
+            # Reuse the checkpoint for full-Flow inference, without training files.
             runner.cfg.FLOW.CHECKPOINT = str(result_path.parent/'base_flow.pt')
-            runner.cfg.FLOW.ALPHAS = [0., 0.1, 0.2, 0.5, 1.]
+            runner.cfg.FLOW.ALPHAS = [1.]
             runner.data_manager.read_only = True
             before = load_checkpoint(runner.cfg.FLOW.CHECKPOINT)
             from single_flow import visual_to_text as vtt
@@ -117,14 +115,13 @@ class RunnerTests(unittest.TestCase):
             scanned = json.loads(scanned_path.read_text())
             self.assertEqual(scanned['completed_sessions'], 2)
             self.assertTrue(scanned['complete'])
-            self.assertEqual(len(scanned['by_alpha']), 5)
-            self.assertEqual(len(scanned['sessions']), 10)
-            self.assertNotIn('final_acc', scanned)  # no ambiguous combined accuracy
-            for alpha in ['0.0', '1.0']:
-                self.assertEqual(scanned['by_alpha'][alpha]['final_acc'], 100.)
+            self.assertEqual(len(scanned['by_alpha']), 1)
+            self.assertEqual(len(scanned['sessions']), 2)
+            self.assertEqual(scanned['final_acc'], 100.)
+            self.assertEqual(scanned['by_alpha']['1.0']['final_acc'], 100.)
             with (scanned_path.parent/'metrics.csv').open() as handle:
-                self.assertEqual(len(list(csv.DictReader(handle))), 10)
-            task1 = next(r for r in scanned['sessions'] if r['task_id'] == 1 and r['alpha'] == 0)
+                self.assertEqual(len(list(csv.DictReader(handle))), 2)
+            task1 = next(r for r in scanned['sessions'] if r['task_id'] == 1 and r['alpha'] == 1)
             self.assertEqual(task1['novel_only_acc'], 100.)
             self.assertEqual(task1['current_only_acc'], 100.)
             self.assertEqual(task1['novel_to_base_pct'], 0.)
@@ -187,7 +184,10 @@ class RunnerTests(unittest.TestCase):
                 if trainer=='single_flow':
                     self.assertEqual(cfg.METHOD,'single_flow')
                 if trainer=='visual_to_text':
-                    self.assertEqual(cfg.FLOW.ALPHAS, [0., 0.1, 0.2, 0.5, 1.])
+                    self.assertEqual(cfg.FLOW.ALPHAS, [1.0])
+                    self.assertFalse(cfg.FLOW.META.ENABLED)
+                    self.assertEqual(cfg.FLOW.CE_WEIGHT, 0.)
+                    self.assertEqual(cfg.FLOW.INC.CE_WEIGHT, 0.)
                     self.assertEqual(cfg.FLOW.CHECKPOINT, '')
 
 
