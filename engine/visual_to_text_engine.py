@@ -57,11 +57,11 @@ class VisualToTextRunner(Runner):
         (output / 'config.yaml').write_text(cfg.dump(), encoding='utf-8')
         rows = []
         # Preserve the inherited summary lists for the original full-Flow setting.
-        reference_alpha = 1.0 if 1.0 in alphas else alphas[-1]
+        reference_alpha = 1.0
         self.acc_list, self.task_acc_list = [], []
         print(f'Method: visual_to_text | Dataset: {cfg.DATASET.NAME} | Seed: {cfg.SEED}')
         print(f'Results directory: {output}')
-        print(f'Flow alphas: {alphas} (shared candidates per session)')
+        print(f'Flow alphas: {alphas} (full Flow only; alpha=1)')
         print(f'Incremental support adaptation: {inc_enabled}')
         print(f'Episodic pseudo-incremental meta training: {meta_enabled}')
         print(f'Start inferencing on all tasks: [0, {self.data_manager.num_tasks - 1}]')
@@ -105,12 +105,10 @@ class VisualToTextRunner(Runner):
                         query=meta_cfg.QUERY, base_batch=meta_cfg.BASE_BATCH,
                         old_query_batch=meta_cfg.OLD_QUERY_BATCH,
                         inner_steps=meta_cfg.INNER_STEPS, inner_lr=meta_cfg.INNER_LR,
-                        inner_ce_weight=meta_cfg.INNER_CE_WEIGHT,
                         meta_lr=meta_cfg.LR, weight_decay=flow.WEIGHT_DECAY,
-                        fm_weight=meta_cfg.FM_WEIGHT,
-                        old_ce_weight=meta_cfg.OLD_CE_WEIGHT,
-                        query_ce_weight=meta_cfg.QUERY_CE_WEIGHT,
-                        temperature=flow.TEMPERATURE, blocks=flow.BLOCKS,
+                        base_fm_weight=meta_cfg.BASE_FM_WEIGHT,
+                        old_fm_weight=meta_cfg.OLD_FM_WEIGHT,
+                        novel_fm_weight=meta_cfg.NOVEL_FM_WEIGHT, blocks=flow.BLOCKS,
                         hidden=flow.HIDDEN or None, seed=cfg.SEED,
                         device=self.device) if meta_enabled else fit(
                         cache, epochs=flow.EPOCHS, batch_size=flow.BATCH_SIZE,
