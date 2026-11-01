@@ -3,13 +3,12 @@
 All images here are *training images from real base classes*. Inside each
 episode, class IDs are split into pseudo-base and pseudo-novel sets; support
 and query of pseudo-novel classes are disjoint. The first-order meta gradient
-is obtained from query classification AFTER virtual support adaptation. This
+is obtained from query FM supervision AFTER virtual support adaptation. This
 is NOT merely conventional supervised Flow training on random class splits.
 """
 import math
 
 import torch
-import torch.nn.functional as F
 
 from .fm import DeepFlowMatchingNet
 from .s1_flow import ids_checked, text_cache, unit
@@ -58,34 +57,33 @@ def sample_episode(class_ids, labels, *, pseudo_new=10, shot=5, query=5,
 
 def fit_meta(cache, *, epochs=20, episodes_per_epoch=30, pseudo_new=10,
              shot=5, query=5, base_batch=64, old_query_batch=64,
-             inner_steps=1, inner_lr=1e-4, inner_ce_weight=0.1,
-             meta_lr=1e-4, weight_decay=1e-4, fm_weight=1.0,
-             old_ce_weight=0.5, query_ce_weight=1.0, temperature=0.07,
+             inner_steps=1, inner_lr=1e-4,
+             meta_lr=1e-4, weight_decay=1e-4, base_fm_weight=1.0,
+             old_fm_weight=0.5, novel_fm_weight=1.0,
              blocks=24, hidden=None, seed=1, device='cpu'):
     """Train a meta-initialization from scratch, *without full-base pretraining*.
 
     In each episode:
       1. Reserve pseudo-novel class IDs; do base FM only on pseudo-base IDs.
       2. Take differentiable-in-parameters but first-order (no Hessian) inner
-         SGD steps on pseudo-novel 5-shot support with FM + seen-class CE.
-      3. Evaluate adapted Flow at t=0 on fresh pseudo-novel query and
-         pseudo-base old-query; apply their CE gradients to the original
-         initialization (first-order MAML), plus an initial base FM loss.
-    CE always scores all true base-class textual candidates.
+         SGD steps on pseudo-novel 5-shot support with only FM.
+      3. Evaluate adapted Flow on disjoint pseudo-novel query and pseudo-base
+         query using only FM; combine them with original-parameter base FM.
+    No cross-entropy, classification scores, or margin penalties are trained.
     """
     if cache.get('stage') != 'base' or cache.get('split') != 'train':
         raise ValueError('Meta episodes require base train cache, never incremental/test')
     if (type(epochs) is not int or epochs < 1 or type(episodes_per_epoch) is not int or
             episodes_per_epoch < 1 or type(inner_steps) is not int or inner_steps < 1):
         raise ValueError('epochs, episodes_per_epoch and inner_steps must be positive integers')
-    for value in (inner_lr, meta_lr, temperature):
+    for value in (inner_lr, meta_lr):
         if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise ValueError('Learning rates and temperature must be positive finite numbers')
-    for value in (inner_ce_weight, weight_decay, fm_weight, old_ce_weight, query_ce_weight):
+    for value in (weight_decay, base_fm_weight, old_fm_weight, novel_fm_weight):
         if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
             raise ValueError('Loss weights and decay must be nonnegative finite numbers')
-    if query_ce_weight == 0:
-        raise ValueError('Query CE must be active: otherwise this is not meta-learning')
+    if novel_fm_weight == 0:
+        raise ValueError('Novel query FM must be active for pseudo-incremental meta-learning')
     if type(blocks) is not int or blocks < 1:
         raise ValueError('blocks must be a positive integer')
     if not isinstance(hidden, (int, type(None))) or (hidden is not None and hidden < 1):
@@ -114,8 +112,8 @@ def fit_meta(cache, *, epochs=20, episodes_per_epoch=30, pseudo_new=10,
     y_all = torch.tensor([row[int(cid)] for cid in labels.tolist()], dtype=torch.long)
     records = []
     for epoch in range(epochs):
-        totals = dict(loss=0., query_novel_ce=0., query_old_ce=0.,
-                      base_fm=0., inner_support=0.)
+        totals = dict(loss=0., query_novel_fm=0., query_old_fm=0.,
+                      base_fm=0., inner_support_fm=0.)
         for _ in range(episodes_per_epoch):
             ep = sample_episode(ids, labels, pseudo_new=pseudo_new, shot=shot,
                                 query=query, base_batch=base_batch,
@@ -143,47 +141,48 @@ def fit_meta(cache, *, epochs=20, episodes_per_epoch=30, pseudo_new=10,
                 xt = (1 - t) * sx + t * text_device[sy]
                 predicted = functional_call(model, fast_params, (xt, t))
                 fm_support = ((predicted - (text_device[sy] - sx)) ** 2).sum(-1).mean()
-                endpoint = F.normalize(xt + (1 - t) * predicted, dim=-1)
-                ce_support = F.cross_entropy(endpoint @ text_device.T / temperature, sy)
-                inner_loss = fm_support + inner_ce_weight * ce_support
+                inner_loss = fm_support
                 gradients = torch.autograd.grad(inner_loss, tuple(fast_params.values()))
                 fast_params = {name: param - inner_lr * grad.detach()
                                for (name, param), grad in zip(fast_params.items(), gradients)}
                 # Creating a new graph at each step avoids second-order derivatives.
 
-            def adapted_ce(features, targets):
-                t0 = torch.zeros(len(features), 1, device=device)
-                v0 = functional_call(model, fast_params, (features, t0))
-                updated = F.normalize(features + v0, dim=-1)
-                return F.cross_entropy(updated @ text_device.T / temperature, targets)
+            def adapted_fm(features, targets):
+                # Same random-time velocity supervision as training, not CE on t=0 logits.
+                t = torch.rand(len(features), 1, device=device)
+                target_text = text_device[targets]
+                xt = (1 - t) * features + t * target_text
+                predicted = functional_call(model, fast_params, (xt, t))
+                return ((predicted - (target_text - features)) ** 2).sum(-1).mean()
 
-            query_novel_ce = adapted_ce(nx, ny)
-            query_old_ce = adapted_ce(ox, oy) if old_ce_weight else torch.zeros_like(query_novel_ce)
+            query_novel_fm = adapted_fm(nx, ny)
+            query_old_fm = (adapted_fm(ox, oy) if old_fm_weight
+                            else torch.zeros_like(query_novel_fm))
 
             # Outer base-only Flow loss: novel IDs are never in this term.
             t = torch.rand(len(bx), 1, device=device)
             xt = (1 - t) * bx + t * text_device[by]
             velocity = model(xt, t)
             base_fm = ((velocity - (text_device[by] - bx)) ** 2).sum(-1).mean()
-            total = (query_ce_weight * query_novel_ce +
-                     old_ce_weight * query_old_ce + fm_weight * base_fm)
+            total = (novel_fm_weight * query_novel_fm +
+                     old_fm_weight * query_old_fm + base_fm_weight * base_fm)
             if not torch.isfinite(total):
                 raise RuntimeError('Nonfinite episodic meta loss')
             optimizer.zero_grad(set_to_none=True)
             total.backward()
             optimizer.step()
             totals['loss'] += total.detach().item()
-            totals['query_novel_ce'] += query_novel_ce.detach().item()
-            totals['query_old_ce'] += query_old_ce.detach().item()
+            totals['query_novel_fm'] += query_novel_fm.detach().item()
+            totals['query_old_fm'] += query_old_fm.detach().item()
             totals['base_fm'] += base_fm.detach().item()
-            totals['inner_support'] += inner_loss.detach().item()
+            totals['inner_support_fm'] += inner_loss.detach().item()
         means = {k: value / episodes_per_epoch for k, value in totals.items()}
         records.append(means)
         print(f'meta_epoch={epoch+1} loss={means["loss"]:.6f} '
-              f'query_novel_ce={means["query_novel_ce"]:.6f} '
-              f'query_old_ce={means["query_old_ce"]:.6f} '
+              f'query_novel_fm={means["query_novel_fm"]:.6f} '
+              f'query_old_fm={means["query_old_fm"]:.6f} '
               f'base_fm={means["base_fm"]:.6f} '
-              f'inner_support={means["inner_support"]:.6f}', flush=True)
+              f'inner_support_fm={means["inner_support_fm"]:.6f}', flush=True)
 
     return dict(
         format_version=1, direction='visual_to_text',
@@ -195,9 +194,8 @@ def fit_meta(cache, *, epochs=20, episodes_per_epoch=30, pseudo_new=10,
                       pseudo_new=pseudo_new, shot=shot, query=query,
                       base_batch=base_batch, old_query_batch=old_query_batch,
                       inner_steps=inner_steps, inner_lr=inner_lr,
-                      inner_ce_weight=inner_ce_weight, meta_lr=meta_lr,
-                      weight_decay=weight_decay, fm_weight=fm_weight,
-                      old_ce_weight=old_ce_weight,
-                      query_ce_weight=query_ce_weight,
-                      temperature=temperature),
+                      objective='fm_only', meta_lr=meta_lr,
+                      weight_decay=weight_decay, base_fm_weight=base_fm_weight,
+                      old_fm_weight=old_fm_weight,
+                      novel_fm_weight=novel_fm_weight),
         meta_history=records)
