@@ -38,7 +38,7 @@ class MetaVisualToTextTests(unittest.TestCase):
         self.assertEqual(learned['training']['mode'], 'episodic_first_order_maml')
         self.assertEqual(len(learned['meta_history']), 2)
         self.assertTrue(all(torch.isfinite(v).all() for v in learned['state_dict'].values()))
-        self.assertGreater(learned['meta_history'][0]['query_novel_ce'], 0.)
+        self.assertGreater(learned['meta_history'][0]['query_novel_fm'], 0.)
         with self.assertRaises(ValueError):
             fit_meta(dict(base, split='test'), **kwargs)
         with self.assertRaises(ValueError):
