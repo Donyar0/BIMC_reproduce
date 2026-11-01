@@ -1,8 +1,8 @@
 # 2026-11-01：纯 Flow Matching + 完整 Flow 推理（当前分支）
 
-当前 `single-flow-visual-to-text` 分支已改为 **基类、伪增量元训练、真实增量微调均不使用 CE**：
+当前默认流程为 **普通基类 FM 训练 + 真实增量 FM 微调 + 完整 Flow 推理**，无 CE、无伪增量：
 
-- 配置 `FLOW.META.ENABLED: True`：每个 episode 把基类划分为 50 个伪旧类、10 个伪新类。内循环只用新类 5-shot Support 的 FM 更新临时参数；外循环只计算新类 Query FM、旧类 Query FM 和原始参数上的旧类 FM，权重分别为 `NOVEL_FM_WEIGHT=1`、`OLD_FM_WEIGHT=0.5`、`BASE_FM_WEIGHT=1`。采用一阶元梯度；它不是仅设置 CE 系数为零的旧代码。
+- 伪增量模式默认 **关闭**（`FLOW.META.ENABLED: False`），不会执行任何 episode。保留的实验性代码不参与当前训练。旧实验功能说明：每个 episode 把基类划分为 50 个伪旧类、10 个伪新类。内循环只用新类 5-shot Support 的 FM 更新临时参数；外循环只计算新类 Query FM、旧类 Query FM 和原始参数上的旧类 FM，权重分别为 `NOVEL_FM_WEIGHT=1`、`OLD_FM_WEIGHT=0.5`、`BASE_FM_WEIGHT=1`。采用一阶元梯度；它不是仅设置 CE 系数为零的旧代码。
 - 配置 `FLOW.META.ENABLED: False`：普通基类训练只用 FM；`FLOW.CE_WEIGHT` 必须为 0。
 - 配置 `FLOW.INC.ENABLED: True`：每个真实增量 session 仍使用当前 5-shot 图像和融合文本进行 FM 微调；`FLOW.INC.CE_WEIGHT` 必须为 0。如果希望增量不训练，请设为 `False`。
 - `FLOW.ALPHAS: [1.0]` 强制完整更新，不扫描或混合 alpha。默认 `FLOW.STEPS: 1`：`normalize(z + v_theta(z, 0))`；如需完整区间多步数值积分，可调整 `FLOW.STEPS` 为 8（仍是完整更新而非 0.1/0.2 的混合）。
