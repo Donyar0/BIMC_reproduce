@@ -73,7 +73,7 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
 
 
 
-def finetune_incremental(checkpoint, cache, bank, *, session_id,
+def finetune_incremental(checkpoint, cache, *, session_id,
                          epochs=10, batch_size=25, lr=1e-5, weight_decay=0.,
                          ce_weight=0.0, temperature=0.07, seed=0, device='cpu'):
     """Continue the existing visual->text Flow on current-session 5-shot support.
@@ -95,19 +95,14 @@ def finetune_incremental(checkpoint, cache, bank, *, session_id,
         raise ValueError('Invalid incremental hyperparameters')
     if checkpoint.get('direction') != 'visual_to_text':
         raise ValueError('Expected visual_to_text checkpoint')
-    if (cache.get('encoder_id') != checkpoint.get('encoder_id') or
-            bank.get('encoder_id') != checkpoint.get('encoder_id')):
+    if cache.get('encoder_id') != checkpoint.get('encoder_id'):
         raise ValueError('Incremental encoder mismatch')
-    if bank.get('kind') != 'text_candidates':
-        raise ValueError('Expected a text candidate bank')
     current_ids, current_text = text_cache(cache)
-    all_ids = ids_checked(bank['class_ids'])
-    candidates = unit(bank['prototypes']).cpu()
     dim = checkpoint['architecture']['in_channels']
-    if candidates.shape != (len(all_ids), dim) or current_text.shape[1] != dim:
+    if current_text.shape[1] != dim:
         raise ValueError('Text feature dimensions do not match')
-    if not set(current_ids).issubset(set(all_ids)) or set(current_ids) & set(checkpoint['base_class_ids']):
-        raise ValueError('Current incremental classes must be non-base classes in bank')
+    if set(current_ids) & set(checkpoint['base_class_ids']):
+        raise ValueError('Incremental classes must not overlap base classes')
     updates = checkpoint.get('incremental_updates', [])
     if updates:
         if updates[-1]['session_id'] + 1 != session_id:
@@ -116,10 +111,11 @@ def finetune_incremental(checkpoint, cache, bank, *, session_id,
             raise ValueError('Classes from a previously learned session cannot be retrained')
     elif session_id != 1:
         raise ValueError('First incremental update must be session 1')
-    row = {cid: i for i, cid in enumerate(all_ids)}
-    for cid, text in zip(current_ids, current_text):
-        if not torch.allclose(candidates[row[cid]], text, atol=1e-6):
-            raise ValueError('Current text does not match candidate bank')
+    prior_ids = [cid for record in updates for cid in record['class_ids']]
+    if len(set(prior_ids)) != len(prior_ids):
+        raise ValueError('Previous incremental class IDs contain duplicates')
+    num_seen_classes = len(checkpoint['base_class_ids']) + len(prior_ids) + len(current_ids)
+    row = {cid: i for i, cid in enumerate(current_ids)}
 
     images = unit(cache['image_features']).cpu()
     labels = cache['image_labels'].detach().cpu()
@@ -128,7 +124,7 @@ def finetune_incremental(checkpoint, cache, bank, *, session_id,
     if images.shape[1] != dim or set(labels.tolist()) != set(current_ids):
         raise ValueError('Support labels must contain only all current novel classes')
     y = torch.tensor([row[int(cid)] for cid in labels.tolist()], dtype=torch.long)
-    targets = candidates[y]
+    targets = current_text[y]
     loader = DataLoader(TensorDataset(images, targets, y), batch_size=batch_size,
                         shuffle=True, generator=torch.Generator().manual_seed(seed + session_id))
     model = load_flow(checkpoint, device).train().requires_grad_(True)
@@ -159,7 +155,7 @@ def finetune_incremental(checkpoint, cache, bank, *, session_id,
     updated['state_dict'] = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
     updated['incremental_updates'] = list(updates) + [dict(
         session_id=session_id, class_ids=list(current_ids), num_samples=len(images),
-        num_seen_classes=len(all_ids), epochs=epochs, batch_size=batch_size,
+        num_seen_classes=num_seen_classes, epochs=epochs, batch_size=batch_size,
         lr=lr, weight_decay=weight_decay, ce_weight=ce_weight,
         temperature=temperature, loss_history=history)]
     updated['trained_through_session'] = session_id
@@ -205,32 +201,6 @@ def validate_alphas(alphas):
 
 
 @torch.no_grad()
-def build_text_bank(checkpoint, cache, existing=None):
-    """Append text candidates; no image features, Flow evaluation or training."""
-    if checkpoint.get('direction') != 'visual_to_text':
-        raise ValueError('Expected visual_to_text checkpoint')
-    if cache['encoder_id'] != checkpoint['encoder_id']:
-        raise ValueError('Encoder mismatch')
-    ids, text = text_cache(cache)
-    if text.shape[1] != checkpoint['architecture']['in_channels']:
-        raise ValueError('Feature dimension mismatch')
-    result = dict(kind='text_candidates', class_ids=list(ids), prototypes=text,
-                  encoder_id=cache['encoder_id'])
-    if existing is not None:
-        old_ids = ids_checked(existing['class_ids'])
-        old = unit(existing['prototypes'])
-        if (existing.get('kind') != 'text_candidates' or
-                existing['encoder_id'] != result['encoder_id'] or
-                old.shape != (len(old_ids), text.shape[1])):
-            raise ValueError('Incompatible text bank')
-        if set(old_ids) & set(ids):
-            raise ValueError('Refusing to overwrite existing text candidates')
-        result['class_ids'] = old_ids + ids
-        result['prototypes'] = torch.cat([existing['prototypes'].cpu(), text])
-    return result
-
-
-@torch.no_grad()
 def transform_images(model, image_features, steps=1):
     """Euler integration from t=0 to 1; normalize only the input and endpoint."""
     if type(steps) is not int or steps < 1:
@@ -246,42 +216,34 @@ def transform_images(model, image_features, steps=1):
 
 
 @torch.no_grad()
-def classify_alphas(model, image_features, bank, steps=1, alphas=(1.0,)):
-    """Share one full Flow endpoint across normalized residual mixtures.
+def classify_alphas(model, image_features, candidate_text, steps=1,
+                    alphas=(1.0,), candidate_class_ids=None):
+    """Full visual->text Flow inference, with candidate text computed at runtime.
 
-    alpha=0 is CLIP with the same text bank; alpha=1 is the original Flow.
-    Alpha does not rescale Euler velocities or change the integration horizon.
+    No text bank is created, loaded, or saved. alpha=1 is mandatory.
     """
-    alphas = validate_alphas(alphas)
-    if bank.get('kind') != 'text_candidates':
-        raise ValueError('Expected text candidate bank, not pseudo-visual prototypes')
-    ids = ids_checked(bank['class_ids'])
-    text = unit(bank['prototypes'])
-    if text.shape != (len(ids), model.in_channels):
-        raise ValueError('Incompatible text bank dimensions')
-    original = unit(image_features).to(next(model.parameters()).device)
-    if original.shape[1] != model.in_channels:
-        raise ValueError('Feature dimension mismatch')
-    endpoint = transform_images(model, image_features, steps) if any(alphas) else None
-    text = text.to(original.device)
-    class_ids = torch.tensor(ids, device=original.device)
-    result = {}
-    for alpha in alphas:
-        if alpha == 0:
-            mixed = original
-        elif alpha == 1:
-            mixed = endpoint
-        else:
-            mixed = unit((1 - alpha) * original + alpha * endpoint)
-        scores = mixed @ text.T
-        result[alpha] = (class_ids[scores.argmax(-1)], scores)
-    return result
+    if validate_alphas(alphas) != [1.0]:
+        raise ValueError('Full Flow inference only: alpha must be 1')
+    if not isinstance(candidate_text, torch.Tensor) or candidate_text.ndim != 2:
+        raise ValueError('candidate_text must be a [num_seen_classes, dim] tensor')
+    if candidate_text.shape[0] == 0 or candidate_text.shape[1] != model.in_channels:
+        raise ValueError('Incompatible candidate text dimensions')
+    if candidate_class_ids is None:
+        candidate_class_ids = list(range(len(candidate_text)))
+    ids = ids_checked(candidate_class_ids)
+    if len(ids) != len(candidate_text):
+        raise ValueError('candidate_class_ids must match candidate_text rows')
+    endpoint = transform_images(model, image_features, steps=steps)
+    text = unit(candidate_text).to(endpoint.device)
+    scores = endpoint @ text.T
+    class_ids = torch.tensor(ids, dtype=torch.long, device=endpoint.device)
+    return {1.0: (class_ids[scores.argmax(-1)], scores)}
 
 
 @torch.no_grad()
-def classify(model, image_features, bank, steps=1, alpha=1.0):
-    return classify_alphas(model, image_features, bank, steps, [alpha])[alpha]
-
+def classify(model, image_features, candidate_text, steps=1, candidate_class_ids=None):
+    return classify_alphas(model, image_features, candidate_text,
+                           steps=steps, candidate_class_ids=candidate_class_ids)[1.0]
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -289,19 +251,16 @@ def main():
     train = sub.add_parser('train')
     train.add_argument('--source', choices=['sample', 'prototype'], default='sample')
     for name, default, typ in [('epochs',100,int),('batch-size',64,int),('lr',2e-4,float),
-                             ('weight-decay',1e-4,float),('blocks',24,int),('hidden',None,int),
-                             ('ce-weight',0.0,float),('temperature',0.07,float),('seed',0,int)]:
+                               ('weight-decay',1e-4,float),('blocks',24,int),('hidden',None,int),
+                               ('ce-weight',0.0,float),('temperature',0.07,float),('seed',0,int)]:
         train.add_argument('--'+name, default=default, type=typ)
-    bank = sub.add_parser('build-bank')
-    bank.add_argument('--checkpoint', required=True)
-    bank.add_argument('--existing-bank')
     evaluate = sub.add_parser('classify')
     evaluate.add_argument('--checkpoint', required=True)
-    evaluate.add_argument('--bank', required=True)
+    evaluate.add_argument('--candidate-cache', required=True,
+                          help='Existing cache containing all seen class_ids/text_prototypes; no bank')
     evaluate.add_argument('--steps', type=int, default=1)
-    evaluate.add_argument('--alpha', type=float, default=1.0)
     evaluate.add_argument('--batch-size', type=int, default=256)
-    for parser in (train, bank, evaluate):
+    for parser in (train, evaluate):
         parser.add_argument('--cache', required=True)
         parser.add_argument('--out', required=True)
         parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
@@ -311,35 +270,31 @@ def main():
     if command == 'train':
         result = fit(cache, **args)
     else:
-        checkpoint = load(args.pop('checkpoint'))
-        if cache['encoder_id'] != checkpoint['encoder_id']:
+        checkpoint = load_checkpoint(args['checkpoint'])
+        candidates = load(args['candidate_cache'])
+        if (cache.get('encoder_id') != checkpoint['encoder_id'] or
+                candidates.get('encoder_id') != checkpoint['encoder_id']):
             raise ValueError('Encoder mismatch')
-        if command == 'build-bank':
-            existing = args.pop('existing_bank')
-            result = build_text_bank(checkpoint, cache, load(existing) if existing else None)
-        else:
-            bank = load(args['bank'])
-            if bank['encoder_id'] != checkpoint['encoder_id']:
-                raise ValueError('Encoder mismatch')
-            if args['batch_size'] < 1 or len(cache['image_features']) == 0:
-                raise ValueError('Positive batch size and nonempty images required')
-            model = load_flow(checkpoint, args['device'])
-            outputs = [classify(model, batch, bank, args['steps'], args['alpha'])
-                       for batch in cache['image_features'].split(args['batch_size'])]
-            pred = torch.cat([p.cpu() for p, _ in outputs])
-            scores = torch.cat([s.cpu() for _, s in outputs])
-            result = dict(predictions=pred, scores=scores, class_ids=bank['class_ids'], alpha=args['alpha'])
-            if 'image_labels' in cache:
-                labels = cache['image_labels'].cpu()
-                if (labels.dtype != torch.long or labels.shape != pred.shape or
-                        not set(labels.tolist()).issubset(set(bank['class_ids']))):
-                    raise ValueError('Evaluation labels must be int64 [N] and belong to bank')
-                result['accuracy'] = (pred == labels).float().mean().item()
-                print('accuracy:', result['accuracy'])
+        ids, texts = text_cache(candidates)
+        if args['batch_size'] < 1 or len(cache['image_features']) == 0:
+            raise ValueError('Positive batch size and nonempty images required')
+        model = load_flow(checkpoint, args['device'])
+        outputs = [classify(model, batch, texts, steps=args['steps'],
+                            candidate_class_ids=ids)
+                   for batch in cache['image_features'].split(args['batch_size'])]
+        pred = torch.cat([p.cpu() for p, _ in outputs])
+        scores = torch.cat([s.cpu() for _, s in outputs])
+        result = dict(predictions=pred, scores=scores, class_ids=ids, alpha=1.0)
+        if 'image_labels' in cache:
+            labels = cache['image_labels'].cpu()
+            if (labels.dtype != torch.long or labels.shape != pred.shape or
+                    not set(labels.tolist()).issubset(set(ids))):
+                raise ValueError('Evaluation labels must be int64 [N] and belong to candidates')
+            result['accuracy'] = (pred == labels).float().mean().item()
+            print('accuracy:', result['accuracy'])
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     torch.save(result, out)
 
 
 if __name__ == '__main__':
     main()
-
