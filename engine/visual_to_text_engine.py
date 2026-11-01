@@ -12,7 +12,7 @@ from tqdm import tqdm
 from engine.engine import Runner
 from single_flow.meta_visual_to_text import fit_meta
 from single_flow.visual_to_text import (
-    fit, finetune_incremental, build_text_bank, load_flow, load_checkpoint, classify_alphas, validate_alphas,
+    fit, finetune_incremental, load_flow, load_checkpoint, classify_alphas, validate_alphas,
 )
 from utils.experiment_logger import log_metrics
 
@@ -33,7 +33,7 @@ class VisualToTextRunner(Runner):
         model.eval().requires_grad_(False)
         encoder_id = str((cfg.MODEL.BACKBONE.NAME, cfg.TRAINER.BiMC.PREC, str(cfg.DATASET)))
         checkpoint_path = getattr(flow, 'CHECKPOINT', '')
-        checkpoint, bank = None, None
+        checkpoint = None
         if meta_enabled and checkpoint_path:
             raise ValueError('Episodic meta training must start from a fresh initialization; remove --flow_checkpoint')
         if checkpoint_path:
@@ -133,14 +133,13 @@ class VisualToTextRunner(Runner):
                     meta_enabled=meta_enabled,
                     meta_training=checkpoint.get('training', {}) if meta_enabled else None)
                 (output / 'evaluation.json').write_text(json.dumps(provenance, indent=2), encoding='utf-8')
-            bank = build_text_bank(checkpoint, cache, existing=bank)
             inc_record = None
             if task_id > 0 and inc_enabled:
                 print(f'Fine-tuning on {len(cache["image_features"])} current-session support images')
                 devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
                 with torch.random.fork_rng(devices=devices), torch.enable_grad():
                     checkpoint = finetune_incremental(
-                        checkpoint, cache, bank, session_id=task_id,
+                        checkpoint, cache, session_id=task_id,
                         epochs=inc_cfg.EPOCHS, batch_size=inc_cfg.BATCH_SIZE,
                         lr=inc_cfg.LR, weight_decay=inc_cfg.WEIGHT_DECAY,
                         ce_weight=inc_cfg.CE_WEIGHT, temperature=inc_cfg.TEMPERATURE,
@@ -148,15 +147,26 @@ class VisualToTextRunner(Runner):
                 torch.save(checkpoint, output / f'flow_session{task_id}.pt')
                 velocity_model = load_flow(checkpoint, self.device)
                 inc_record = checkpoint['incremental_updates'][-1]
-            torch.save(bank, output / f'bank_session{task_id}.pt')
+            # Recompute all seen-category fused text features at this session.
+            # No persistent bank or bank_session*.pt is needed.
+            seen_ids = [int(c) for group in self.data_manager.class_index_in_task[:task_id + 1]
+                        for c in group]
+            seen_names = np.array(self.data_manager.class_names)[seen_ids]
+            candidate_text, _ = model.inference_text_feature(
+                seen_names, model.template, seen_ids[0])
+            if cfg.TRAINER.BiMC.TEXT_CALIBRATION:
+                _, _, seen_desc = model.inference_all_description_feature(
+                    seen_names, cfg.DATASET.GPT_PATH, seen_ids[0])
+                candidate_text = model.fused_text_prototype(candidate_text, seen_desc)
+            candidate_text = candidate_text.detach().float()
             del cache
-            results = self.inference_task_flow(task_id, bank, model, velocity_model, alphas)
+            results = self.inference_task_flow(task_id, candidate_text, model, velocity_model, alphas)
             elapsed = time.time() - start
             self.acc_list.append(results[reference_alpha]['mean_acc'])
             self.task_acc_list.append(results[reference_alpha]['task_acc'])
             logged = {}
             for alpha, acc in results.items():
-                rows.append(dict(task_id=task_id, alpha=alpha, seen_classes=len(bank['class_ids']),
+                rows.append(dict(task_id=task_id, alpha=alpha, seen_classes=len(seen_ids),
                                  inc_train_samples=inc_record['num_samples'] if inc_record else 0,
                                  **acc, elapsed_time=elapsed))
                 print(f'=> Task [{task_id}] alpha={alpha:g} | Acc: {acc["mean_acc"]:.2f} | '
@@ -177,21 +187,22 @@ class VisualToTextRunner(Runner):
         print(f'Results saved to: {output / "metrics.csv"}')
 
     @torch.no_grad()
-    def inference_task_flow(self, task_id, bank, model, velocity_model, alphas=None):
+    def inference_task_flow(self, task_id, candidate_text, model, velocity_model, alphas=None):
         # Score columns must remain global class IDs for the existing evaluator.
         expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1]
                     for c in group]
-        if bank['class_ids'] != expected or expected != list(range(len(expected))):
+        if expected != list(range(len(expected))) or len(candidate_text) != len(expected):
             raise ValueError('BIMC evaluator requires ordered, contiguous seen-class IDs')
         alphas = validate_alphas(alphas if alphas is not None else getattr(self.cfg.FLOW, 'ALPHAS', [1.0]))
         loader = self.data_manager.get_dataloader(task_id, source='test', mode='test')
         scores, targets = {alpha: [] for alpha in alphas}, []
-        device_bank = dict(bank, prototypes=bank['prototypes'].to(self.device))
+        candidate_text = candidate_text.to(self.device)
         for batch in tqdm(loader):
             images, labels = self.parse_batch(batch)
             features = model.extract_img_feature(images)
-            outputs = classify_alphas(velocity_model, features, device_bank,
-                                      steps=self.cfg.FLOW.STEPS, alphas=alphas)
+            outputs = classify_alphas(velocity_model, features, candidate_text,
+                                      steps=self.cfg.FLOW.STEPS, alphas=alphas,
+                                      candidate_class_ids=expected)
             for alpha, (_, logits) in outputs.items():
                 scores[alpha].append(logits.cpu())
             targets.append(labels.cpu())
