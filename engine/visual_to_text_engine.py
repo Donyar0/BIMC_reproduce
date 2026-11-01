@@ -27,6 +27,8 @@ class VisualToTextRunner(Runner):
         meta_cfg = getattr(flow, 'META', None)
         meta_enabled = bool(getattr(meta_cfg, 'ENABLED', False))
         alphas = validate_alphas(getattr(flow, 'ALPHAS', [1.0]))
+        if alphas != [1.0]:
+            raise ValueError('This FM-only experiment requires FLOW.ALPHAS: [1.0] (full Flow update)')
         model = self.model.module if self.is_distributed else self.model
         model.eval().requires_grad_(False)
         encoder_id = str((cfg.MODEL.BACKBONE.NAME, cfg.TRAINER.BiMC.PREC, str(cfg.DATASET)))
