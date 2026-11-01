@@ -13,8 +13,10 @@ from .s1_flow import unit, ids_checked, text_cache, load
 
 
 def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
-        blocks=24, hidden=None, source='sample', ce_weight=0.1,
+        blocks=24, hidden=None, source='sample', ce_weight=0.0,
         temperature=0.07, seed=0, device='cpu'):
+    if ce_weight != 0:
+        raise ValueError('CE has been removed: ce_weight must be 0')
     if cache.get('stage') != 'base' or cache.get('split') != 'train':
         raise ValueError('Training accepts only stage=base, split=train caches')
     if epochs < 1 or batch_size < 1 or blocks < 1 or lr <= 0 or weight_decay < 0 or ce_weight < 0 or temperature <= 0:
@@ -44,7 +46,6 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
                 out_channels=text.shape[1], num_res_blocks=blocks)
     model = DeepFlowMatchingNet(**arch).to(device).train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    candidates = text.to(device)
     history = []
     for epoch in range(epochs):
         total, count = 0., 0
@@ -54,10 +55,6 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
             xt = (1-t)*x0 + t*x1
             pred_v = model(xt, t)
             loss = ((pred_v - (x1-x0))**2).sum(-1).mean()
-            # Compare the estimated endpoint to all base-class text prototypes.
-            if ce_weight:
-                endpoint = F.normalize(xt + (1-t)*pred_v, dim=-1)
-                loss = loss + ce_weight*F.cross_entropy(endpoint @ candidates.T / temperature, label)
             if not torch.isfinite(loss):
                 raise RuntimeError('Nonfinite loss')
             optimizer.zero_grad(set_to_none=True)
@@ -78,13 +75,14 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
 
 def finetune_incremental(checkpoint, cache, bank, *, session_id,
                          epochs=10, batch_size=25, lr=1e-5, weight_decay=0.,
-                         ce_weight=0.1, temperature=0.07, seed=0, device='cpu'):
+                         ce_weight=0.0, temperature=0.07, seed=0, device='cpu'):
     """Continue the existing visual->text Flow on current-session 5-shot support.
 
-    FM target: correct novel-class text. Seen CE candidates: ALL seen class
-    text prototypes (base + historical novel + current novel). Never uses
-    previous session images or test images. Input checkpoint is not mutated.
+    FM target: correct novel-class fused text. Only FM is optimized.
+    Never uses previous session images or test images. Input checkpoint is not mutated.
     """
+    if ce_weight != 0:
+        raise ValueError('CE has been removed: ce_weight must be 0')
     if cache.get('stage') != 'incremental' or cache.get('split') != 'train':
         raise ValueError('Incremental training requires stage=incremental, split=train')
     if type(session_id) is not int or session_id < 1:
@@ -101,7 +99,7 @@ def finetune_incremental(checkpoint, cache, bank, *, session_id,
             bank.get('encoder_id') != checkpoint.get('encoder_id')):
         raise ValueError('Incremental encoder mismatch')
     if bank.get('kind') != 'text_candidates':
-        raise ValueError('Seen CE requires a text candidate bank')
+        raise ValueError('Expected a text candidate bank')
     current_ids, current_text = text_cache(cache)
     all_ids = ids_checked(bank['class_ids'])
     candidates = unit(bank['prototypes']).cpu()
@@ -135,19 +133,16 @@ def finetune_incremental(checkpoint, cache, bank, *, session_id,
                         shuffle=True, generator=torch.Generator().manual_seed(seed + session_id))
     model = load_flow(checkpoint, device).train().requires_grad_(True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    candidates = candidates.to(device)
     history = []
     for epoch in range(epochs):
-        total, total_fm, total_ce, n = 0., 0., 0., 0
+        total, n = 0., 0
         for x0, x1, label in loader:
             x0, x1, label = x0.to(device), x1.to(device), label.to(device)
             t = torch.rand(len(x0), 1, device=device)
             xt = (1 - t) * x0 + t * x1
             v = model(xt, t)
             fm = ((v - (x1 - x0)) ** 2).sum(-1).mean()
-            endpoint = F.normalize(xt + (1 - t) * v, dim=-1)
-            seen_ce = F.cross_entropy(endpoint @ candidates.T / temperature, label)
-            loss = fm + ce_weight * seen_ce
+            loss = fm
             if not torch.isfinite(loss):
                 raise RuntimeError('Nonfinite incremental training loss')
             optimizer.zero_grad(set_to_none=True)
@@ -155,13 +150,10 @@ def finetune_incremental(checkpoint, cache, bank, *, session_id,
             optimizer.step()
             size = len(x0)
             total += loss.item() * size
-            total_fm += fm.item() * size
-            total_ce += seen_ce.item() * size
             n += size
-        record = dict(loss=total / n, fm=total_fm / n, seen_ce=total_ce / n)
+        record = dict(loss=total / n, fm=total / n)
         history.append(record)
-        print(f'inc_session={session_id} epoch={epoch+1} loss={record["loss"]:.6f} '
-              f'fm={record["fm"]:.6f} seen_ce={record["seen_ce"]:.6f}', flush=True)
+        print(f'inc_session={session_id} epoch={epoch+1} fm={record["fm"]:.6f}', flush=True)
 
     updated = dict(checkpoint)
     updated['state_dict'] = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -298,7 +290,7 @@ def main():
     train.add_argument('--source', choices=['sample', 'prototype'], default='sample')
     for name, default, typ in [('epochs',100,int),('batch-size',64,int),('lr',2e-4,float),
                              ('weight-decay',1e-4,float),('blocks',24,int),('hidden',None,int),
-                             ('ce-weight',0.1,float),('temperature',0.07,float),('seed',0,int)]:
+                             ('ce-weight',0.0,float),('temperature',0.07,float),('seed',0,int)]:
         train.add_argument('--'+name, default=default, type=typ)
     bank = sub.add_parser('build-bank')
     bank.add_argument('--checkpoint', required=True)
