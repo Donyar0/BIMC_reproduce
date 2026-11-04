@@ -84,6 +84,12 @@ def extend_cfg(cfg):
     cfg.FLOW.TEMPERATURE = 0.07
     cfg.FLOW.STEPS = 8
     cfg.FLOW.OUTPUT_DIR = 'output/single_flow'
+    cfg.FLOW.ADAPT_STEPS = 100
+    cfg.FLOW.ADAPT_LR = 0.0002
+    cfg.FLOW.ALPHA = 0.15
+    cfg.FLOW.BETA_BASE = 0.1
+    cfg.FLOW.BETA_INC = 0.5
+    cfg.FLOW.GAMMA = 0.5
 
 
 
@@ -131,6 +137,8 @@ def main():
     # Import and run the trainer
     if cfg.METHOD.lower() == 'single_flow':
         from engine.flow_engine import FlowRunner as Runner
+    elif cfg.METHOD.lower() == 'unified_flow':
+        from engine.unified_flow_engine import UnifiedFlowRunner as Runner
     elif cfg.METHOD.lower() in ('', 'bimc'):
         from engine.engine import Runner
     else:

@@ -128,3 +128,15 @@ python -m unittest discover -s single_flow -v
 
 8项测试覆盖三个数据集配置、两阶段完整合成流程、全部已见类别竞争，以及：原型直接输入、导出行序、增量拒绝训练、旧 bank 保留、
 非连续标签、sample/CE 路径，以及共用文本融合公式。未运行真实数据集或 GPU 训练。
+
+## 双向共享 Flow 实验
+
+使用 `configs/trainers/unified_flow.yaml` 运行：
+
+```bash
+python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/trainers/unified_flow.yaml
+```
+
+此配置以基类单样本视觉特征训练共享速度场；增量阶段混合当前支持集样本与旧类文本/真实视觉均值原型重放，更新 Flow 后重新生成全部已见类原型。分类时将生成原型与真实视觉均值按基类和增量类的权重融合，同时对测试特征进行一次反向 Euler 校准，并加权融合视觉与文本余弦分数。每阶段保存 Flow 和原型 bank；仅保留历史类均值，不保存历史图像特征。
+
+`ADAPT_STEPS`、`ADAPT_LR`、`ALPHA`、`BETA_BASE`、`BETA_INC` 和 `GAMMA` 控制微调和融合，初值是实验起点，应使用验证数据选择。`ADAPT_STEPS: 0` 可关闭增量微调。实验需要 GPU、数据集、CLIP 权重及配置中的正确数据路径；该方法的效果需要真实数据验证。
