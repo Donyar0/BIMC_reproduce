@@ -1,7 +1,7 @@
 import unittest
 import torch
 from single_flow.s1_flow import fit
-from single_flow.unified_flow import adapt, build_bank, classify_bidirectional, load_model, real_means
+from single_flow.unified_flow import adapt, build_bank, classify_bidirectional, load_model, real_means, ensemble_scores
 
 
 class UnifiedFlowTests(unittest.TestCase):
@@ -30,6 +30,22 @@ class UnifiedFlowTests(unittest.TestCase):
         _, scores = classify_bidirectional(model, eye, bank, alpha=0.15, gamma=0.5)
         self.assertEqual(scores.shape, (3, 3))
         self.assertTrue(torch.isfinite(scores).all())
+
+    def test_ensemble_uses_base_covariance_and_incremental_knn(self):
+        bank = dict(class_ids=[0, 1], prototypes=torch.eye(2))
+        z = torch.tensor([[1., 0.]])
+        scores = torch.tensor([[0., 1.]])
+        desc = torch.eye(2)
+        labels = torch.tensor([0, 1])
+        result = ensemble_scores(scores, z, bank, torch.eye(2), desc, labels, 1, 0.5)
+        flow = torch.softmax(scores, dim=-1)
+        cov = torch.softmax(torch.tensor([[0., -2. / 512]]), dim=-1)
+        knn = torch.softmax(torch.tensor([[1., 0.]]), dim=-1)
+        expected = torch.stack([(flow[0, 0] + cov[0, 0]) / 2,
+                                (flow[0, 1] + knn[0, 1]) / 2]).unsqueeze(0)
+        self.assertTrue(torch.allclose(result, expected))
+        self.assertTrue(torch.allclose(ensemble_scores(scores, z, bank, torch.eye(2),
+                                                       desc, labels, 1, 1), flow))
 
 
 if __name__ == '__main__':

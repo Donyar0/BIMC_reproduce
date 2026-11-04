@@ -75,3 +75,28 @@ def classify_bidirectional(model, image_features, bank, *, alpha, gamma):
     scores = gamma * visual + (1-gamma) * semantic
     ids = torch.tensor(bank['class_ids'], device=z.device)
     return ids[scores.argmax(-1)], scores
+
+
+def ensemble_scores(scores, image_features, bank, covariance, description_features,
+                    description_labels, num_base, ensemble_alpha):
+    """Apply BiMC's base covariance / incremental description probability fusion."""
+    if not 0 <= ensemble_alpha <= 1:
+        raise ValueError('ensemble_alpha must be in [0, 1]')
+    z = unit(image_features)
+    proto = bank['prototypes'].to(z.device).float()
+    cov_inv = torch.linalg.pinv(covariance.to(z.device).float())
+    diff = z[:, None, :] - proto[None, :, :]
+    mahal = torch.einsum('ncd,de,nce->nc', diff, cov_inv, diff)
+    prob_cov = torch.softmax(-mahal / 512, dim=-1)
+    descriptions = description_features.to(z.device).float()
+    labels = description_labels.to(z.device).long()
+    similarities = z @ descriptions.T
+    if set(labels.tolist()) != set(bank['class_ids']):
+        raise ValueError('Description labels must cover the seen class IDs')
+    knn = torch.stack([similarities[:, labels == c].max(dim=1).values
+                       for c in bank['class_ids']], dim=1)
+    prob_knn = torch.softmax(knn, dim=-1)
+    prob_flow = torch.softmax(scores, dim=-1)
+    base = ensemble_alpha * prob_flow[:, :num_base] + (1-ensemble_alpha) * prob_cov[:, :num_base]
+    inc = ensemble_alpha * prob_flow[:, num_base:] + (1-ensemble_alpha) * prob_knn[:, num_base:]
+    return torch.cat([base, inc], dim=1)

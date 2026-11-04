@@ -140,3 +140,5 @@ python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/tra
 此配置以基类单样本视觉特征训练共享速度场；增量阶段混合当前支持集样本与旧类文本/真实视觉均值原型重放，更新 Flow 后重新生成全部已见类原型。分类时将生成原型与真实视觉均值按基类和增量类的权重融合，同时对测试特征进行一次反向 Euler 校准，并加权融合视觉与文本余弦分数。每阶段保存 Flow 和原型 bank；仅保留历史类均值，不保存历史图像特征。
 
 `ADAPT_STEPS`、`ADAPT_LR`、`ALPHA`、`BETA_BASE`、`BETA_INC` 和 `GAMMA` 控制微调和融合，初值是实验起点，应使用验证数据选择。`ADAPT_STEPS: 0` 可关闭增量微调。实验需要 GPU、数据集、CLIP 权重及配置中的正确数据路径；该方法的效果需要真实数据验证。
+
+双向余弦得分先在全部已见类别上做 softmax。启用 `TRAINER.BiMC.USING_ENSEMBLE` 时，沿用 BiMC 的融合方式：基类概率与马氏距离概率融合，增量类概率与描述特征 KNN 概率融合，权重为数据集配置的 `ENSEMBLE_ALPHA`。协方差来自各阶段真实训练/支持图像的 BiMC 收缩协方差，按阶段类别数加权；马氏距离使用双向 Flow 校准后的视觉原型。当前 Flow 对相同文本原型输出确定结果，重复生成不能提供可靠的类内协方差，因此不将重复伪原型用于估计协方差。

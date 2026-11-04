@@ -12,7 +12,7 @@ from tqdm import tqdm
 from engine.engine import Runner
 from single_flow.bimc_cache import from_task_statistics
 from single_flow.s1_flow import fit
-from single_flow.unified_flow import adapt, build_bank, classify_bidirectional, load_model, real_means
+from single_flow.unified_flow import adapt, build_bank, classify_bidirectional, load_model, real_means, ensemble_scores
 from utils.experiment_logger import log_metrics
 
 
@@ -30,6 +30,7 @@ class UnifiedFlowRunner(Runner):
         encoder_id = str((cfg.MODEL.BACKBONE.NAME, cfg.TRAINER.BiMC.PREC, str(cfg.DATASET)))
         rows, checkpoint, bank = [], None, None
         memory = None
+        ensemble_stats = []
         num_base = len(self.data_manager.class_index_in_task[0])
         print(f'Method: unified_flow | Dataset: {cfg.DATASET.NAME} | Seed: {cfg.SEED}')
         print(f'Results directory: {output}')
@@ -45,6 +46,10 @@ class UnifiedFlowRunner(Runner):
                 names, loader, class_index=class_ids,
                 calibrate_novel_vision_proto=cfg.TRAINER.BiMC.VISION_CALIBRATION)
             cache = from_task_statistics(stats, encoder_id, task_id)
+            if cfg.TRAINER.BiMC.USING_ENSEMBLE:
+                ensemble_stats.append(dict(cov=stats['cov_image'].detach().cpu(),
+                    count=len(class_ids), descriptions=stats['description_features'].detach().cpu(),
+                    labels=stats['description_targets'].detach().cpu()))
             if cfg.TRAINER.BiMC.PROTOTYPE_CACHE_DIR:
                 cache_dir = Path(cfg.TRAINER.BiMC.PROTOTYPE_CACHE_DIR) / cfg.DATASET.NAME.lower() / run_name
                 cache_dir.mkdir(parents=True, exist_ok=True)
@@ -85,6 +90,7 @@ class UnifiedFlowRunner(Runner):
             torch.save(bank, output / f'bank_session{task_id}.pt')
             del stats, cache, loader
             self._checkpoint = checkpoint
+            self._ensemble_stats = ensemble_stats
             acc = self.inference_task_flow(task_id, bank, model)
             elapsed = time.time() - start
             self.acc_list.append(acc['mean_acc'])
@@ -121,11 +127,22 @@ class UnifiedFlowRunner(Runner):
         scores, targets = [], []
         velocity = load_model(checkpoint=self._checkpoint, device=self.device).eval()
         device_bank = dict(bank, prototypes=bank['prototypes'].to(self.device), text=bank['text'].to(self.device))
+        if self.cfg.TRAINER.BiMC.USING_ENSEMBLE:
+            total = sum(item['count'] for item in self._ensemble_stats)
+            covariance = sum(item['cov'] * (item['count'] / total) for item in self._ensemble_stats)
+            descriptions = torch.cat([item['descriptions'] for item in self._ensemble_stats])
+            description_labels = torch.cat([item['labels'] for item in self._ensemble_stats])
         for batch in tqdm(loader):
             images, labels = self.parse_batch(batch)
             features = model.extract_img_feature(images)
             _, logits = classify_bidirectional(velocity, features, device_bank,
                                                alpha=self.cfg.FLOW.ALPHA, gamma=self.cfg.FLOW.GAMMA)
+            if self.cfg.TRAINER.BiMC.USING_ENSEMBLE:
+                logits = ensemble_scores(logits, features, device_bank, covariance, descriptions,
+                                         description_labels, len(self.data_manager.class_index_in_task[0]),
+                                         self.cfg.DATASET.ENSEMBLE_ALPHA)
+            else:
+                logits = torch.softmax(logits, dim=-1)
             scores.append(logits.cpu())
             targets.append(labels.cpu())
         if not scores:
