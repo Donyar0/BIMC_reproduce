@@ -119,6 +119,77 @@ class UnifiedFlowRunner(Runner):
         log_metrics({'final_acc': self.acc_list[-1], 'avg_acc': average})
 
     @torch.no_grad()
+    def evaluate_saved(self, run_dir):
+        """Re-evaluate saved session weights and banks without optimizer steps."""
+        from yacs.config import CfgNode
+        run_dir = Path(run_dir)
+        with (run_dir / 'config.yaml').open() as handle:
+            original = CfgNode.load_cfg(handle)
+        cfg = self.cfg
+        # Refuse mismatched training/data settings; only scoring and logging may differ.
+        for name in ('SEED', 'DATASET', 'MODEL', 'DATALOADER', 'DEVICE'):
+            if getattr(original, name) != getattr(cfg, name):
+                raise ValueError(f'Saved run {name} differs from current configuration')
+        for name in ('PREC', 'VISION_CALIBRATION', 'LAMBDA_I', 'TAU', 'TEXT_CALIBRATION', 'LAMBDA_T', 'GAMMA_BASE', 'GAMMA_INC'):
+            if getattr(original.TRAINER.BiMC, name) != getattr(cfg.TRAINER.BiMC, name):
+                raise ValueError(f'Saved run BiMC.{name} differs from current configuration')
+        if original.FLOW.STEPS != cfg.FLOW.STEPS:
+            raise ValueError('FLOW.STEPS must match the saved run')
+        if not np.isfinite(cfg.FLOW.LOGIT_SCALE) or cfg.FLOW.LOGIT_SCALE <= 0:
+            raise ValueError('FLOW.LOGIT_SCALE must be finite and positive')
+        output = Path(cfg.FLOW.OUTPUT_DIR) / cfg.DATASET.NAME.lower() / (
+            'eval_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+        output.mkdir(parents=True, exist_ok=False)
+        (output / 'config.yaml').write_text(cfg.dump(), encoding='utf-8')
+        (output / 'source_run.txt').write_text(str(run_dir.resolve()) + '\n', encoding='utf-8')
+        model = self.model.module if self.is_distributed else self.model
+        model.eval().requires_grad_(False)
+        self._ensemble_stats = []
+        rows = []
+        num_base = len(self.data_manager.class_index_in_task[0])
+        for task_id in range(self.data_manager.num_tasks):
+            start = time.time()
+            # Only load trusted checkpoints created by this project.
+            checkpoint = torch.load(run_dir / f'flow_session{task_id}.pt', map_location='cpu', weights_only=True)
+            saved = torch.load(run_dir / f'bank_session{task_id}.pt', map_location='cpu', weights_only=True)
+            expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1] for c in group]
+            if saved['class_ids'] != expected or saved['encoder_id'] != checkpoint['encoder_id']:
+                raise ValueError('Saved checkpoint and bank are incompatible with dataset')
+            # Stored generated/text/real vectors allow all beta values without training.
+            beta = torch.full((len(expected), 1), cfg.FLOW.BETA_INC)
+            beta[:num_base] = cfg.FLOW.BETA_BASE
+            if not (0 <= cfg.FLOW.BETA_BASE <= 1 and 0 <= cfg.FLOW.BETA_INC <= 1):
+                raise ValueError('Beta values must be between 0 and 1')
+            bank = dict(saved, prototypes=torch.nn.functional.normalize(
+                (1-beta)*saved['real'].float() + beta*saved['generated'].float(), dim=-1))
+            if cfg.TRAINER.BiMC.USING_ENSEMBLE:
+                ids = self.data_manager.class_index_in_task[task_id]
+                names = np.array(self.data_manager.class_names)[ids]
+                loader = self.data_manager.get_dataloader(task_id, source='train', mode='test', accumulate_past=False)
+                stats = model.build_task_statistics(names, loader, class_index=ids,
+                    calibrate_novel_vision_proto=cfg.TRAINER.BiMC.VISION_CALIBRATION)
+                cache = from_task_statistics(stats, checkpoint['encoder_id'], task_id)
+                n = len(ids)
+                if not torch.allclose(real_means(cache), saved['real'][-n:].float(), atol=1e-4, rtol=1e-4):
+                    raise ValueError('Recomputed support prototypes differ from saved bank; cannot reproduce ensemble safely')
+                self._ensemble_stats.append(dict(cov=stats['cov_image'].detach().cpu(), count=n,
+                    descriptions=stats['description_features'].detach().cpu(), labels=stats['description_targets'].detach().cpu()))
+            self._checkpoint = checkpoint
+            acc = self.inference_task_flow(task_id, bank, model)
+            self.acc_list.append(acc['mean_acc'])
+            self.task_acc_list.append(acc['task_acc'])
+            row = dict(task_id=task_id, seen_classes=len(expected), **acc, elapsed_time=time.time()-start)
+            rows.append(row)
+            log_metrics({k:v for k,v in row.items() if k != 'task_acc'}, step=task_id)
+            self.save_results(output, rows)
+        print(f'Final acc:{self.acc_list}')
+        print('Task-wise acc:')
+        for i, task_acc in enumerate(self.task_acc_list):
+            print(f'task {i:2d}, acc:{task_acc}')
+        print(f'Results saved to: {output / "metrics.csv"}')
+        log_metrics({'final_acc': self.acc_list[-1], 'avg_acc': sum(self.acc_list)/len(self.acc_list)})
+
+    @torch.no_grad()
     def inference_task_flow(self, task_id, bank, model):
         # The existing evaluator interprets score column index as global class ID.
         expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1]

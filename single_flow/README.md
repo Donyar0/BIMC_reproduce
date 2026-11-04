@@ -161,3 +161,14 @@ python main.py --data_cfg configs/datasets/cifar100.yaml \\
 SwanLab 配置中自动保存全部 YAML 配置、数据集和训练配置路径，以及 `git.git_branch`、`git.git_commit`、`git.git_dirty`、`git.git_remote_url` 和 `git.git_commit_url`。其中 GitHub 链接仅在 origin 为 GitHub 仓库时构建，避免记录包含凭证的远程 URL。每阶段的准确率、基类和增量类指标以及最终准确率由 `log_metrics` 上传；本地仍保存 `config.yaml`、`metrics.csv`、`metrics.json`。
 
 运行前建议 `git status --short` 确认工作区干净，并在 SwanLab 配置里核对 `git.git_commit`。不要在运行中途更新分支，否则同一次实验中的代码版本可能变化。
+
+### 不重新训练地评估已有权重
+
+训练结果目录必须包含原始 `config.yaml` 以及每阶段的 `flow_session*.pt`、`bank_session*.pt`。在原训练配置的副本中修改 `ALPHA`、`GAMMA`、`BETA_BASE`、`BETA_INC` 或 `LOGIT_SCALE`（也可以切换 `USING_ENSEMBLE`），然后运行：
+
+```bash
+python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/trainers/unified_flow.yaml \
+  --eval_run output/unified_flow/cifar100/原训练目录
+```
+
+可添加原有的 `--use_swanlab` 等参数。该入口不会训练或修改原结果，另建 `eval_...` 结果目录及 `source_run.txt`。它重新读取测试数据并提取特征；启用 Ensemble 时还会重新提取训练/支持集统计，并与已保存的真实原型核对。须使用训练时相同的数据、随机种子、配置与 CLIP 权重。结果仍然是测试集结果；严格选参需要独立验证集，当前入口没有验证集支持。只加载可信来源的权重文件。

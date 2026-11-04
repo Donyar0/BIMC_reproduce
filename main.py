@@ -117,6 +117,7 @@ def main():
 
     parser.add_argument('--data_cfg', type=str, help="Path to the data configuration file")
     parser.add_argument('--train_cfg', type=str, help="Path to the training configuration file")
+    parser.add_argument('--eval_run', default='', help='Evaluate saved Flow checkpoints from this run directory without training')
     parser.add_argument('--use_swanlab', action='store_true', help="Enable SwanLab experiment logging")
     parser.add_argument('--swanlab_project', type=str, default='BIMC_reproduce', help="SwanLab project name")
     parser.add_argument('--swanlab_experiment', type=str, default='', help="SwanLab experiment name")
@@ -146,7 +147,12 @@ def main():
         raise ValueError(f'Unknown METHOD: {cfg.METHOD}')
     engine = Runner(cfg)
     try:
-        engine.run()
+        if args.eval_run:
+            if cfg.METHOD.lower() != 'unified_flow':
+                raise ValueError('--eval_run requires METHOD unified_flow')
+            engine.evaluate_saved(args.eval_run)
+        else:
+            engine.run()
     finally:
         finish()
 
