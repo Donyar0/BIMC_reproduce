@@ -172,3 +172,5 @@ python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/tra
 ```
 
 可添加原有的 `--use_swanlab` 等参数。该入口不会训练或修改原结果，另建 `eval_...` 结果目录及 `source_run.txt`。它重新读取测试数据并提取特征；启用 Ensemble 时还会重新提取训练/支持集统计，并与已保存的真实原型核对。须使用训练时相同的数据、随机种子、配置与 CLIP 权重。结果仍然是测试集结果；严格选参需要独立验证集，当前入口没有验证集支持。只加载可信来源的权重文件。
+
+如果旧版 PyTorch 的安全加载器无法读取自己训练的 checkpoint，可在上述命令添加 `--trusted_checkpoints`。该选项允许 pickle 执行代码，仅对来源可信的权重使用，不要用于下载的不明文件。

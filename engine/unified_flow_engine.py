@@ -119,7 +119,7 @@ class UnifiedFlowRunner(Runner):
         log_metrics({'final_acc': self.acc_list[-1], 'avg_acc': average})
 
     @torch.no_grad()
-    def evaluate_saved(self, run_dir):
+    def evaluate_saved(self, run_dir, trusted_checkpoints=False):
         """Re-evaluate saved session weights and banks without optimizer steps."""
         from yacs.config import CfgNode
         run_dir = Path(run_dir)
@@ -150,8 +150,8 @@ class UnifiedFlowRunner(Runner):
         for task_id in range(self.data_manager.num_tasks):
             start = time.time()
             # Only load trusted checkpoints created by this project.
-            checkpoint = torch.load(run_dir / f'flow_session{task_id}.pt', map_location='cpu', weights_only=True)
-            saved = torch.load(run_dir / f'bank_session{task_id}.pt', map_location='cpu', weights_only=True)
+            checkpoint = torch.load(run_dir / f'flow_session{task_id}.pt', map_location='cpu', weights_only=not trusted_checkpoints)
+            saved = torch.load(run_dir / f'bank_session{task_id}.pt', map_location='cpu', weights_only=not trusted_checkpoints)
             expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1] for c in group]
             if saved['class_ids'] != expected or saved['encoder_id'] != checkpoint['encoder_id']:
                 raise ValueError('Saved checkpoint and bank are incompatible with dataset')
