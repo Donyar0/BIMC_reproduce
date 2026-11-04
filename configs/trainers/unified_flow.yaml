@@ -58,3 +58,7 @@ FLOW:
   BETA_INC: 0.5  # validation search: 0.3 to 0.6
   GAMMA: 0.5  # validation search: 0.4 to 0.7
   LOGIT_SCALE: 1.0  # multiplier before softmax; tune on validation data
+
+  INC_ENSEMBLE_MODE: "knn"  # knn, mahalanobis, or blend
+  INC_COV_WEIGHT: 0.5  # covariance fraction of auxiliary score in blend mode
+  MAHA_TEMPERATURE: 512.0  # divisor applied to Mahalanobis logits

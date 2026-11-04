@@ -174,3 +174,7 @@ python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/tra
 可添加原有的 `--use_swanlab` 等参数。该入口不会训练或修改原结果，另建 `eval_...` 结果目录及 `source_run.txt`。它重新读取测试数据并提取特征；启用 Ensemble 时还会重新提取训练/支持集统计，并与已保存的真实原型核对。须使用训练时相同的数据、随机种子、配置与 CLIP 权重。结果仍然是测试集结果；严格选参需要独立验证集，当前入口没有验证集支持。只加载可信来源的权重文件。
 
 如果旧版 PyTorch 的安全加载器无法读取自己训练的 checkpoint，可在上述命令添加 `--trusted_checkpoints`。该选项允许 pickle 执行代码，仅对来源可信的权重使用，不要用于下载的不明文件。
+
+### 增量类马氏距离融合
+
+启用 `USING_ENSEMBLE` 后，`FLOW.INC_ENSEMBLE_MODE` 可设为 `knn`（默认，原 BiMC 描述近邻）、`mahalanobis`（增量类使用共享协方差马氏距离），或 `blend`（两种辅助概率加权）。`INC_COV_WEIGHT` 控制 blend 中马氏概率比例；`MAHA_TEMPERATURE` 是所有类别马氏 logits 的正数除数，默认 512，调整它同时影响基类。三条分支先各自在所有已见类上 softmax，再按类组融合。协方差使用真实图像统计而非伪原型估计。改变这些评分设置可使用 `--eval_run` 重评已有权重；该入口仍使用测试集，应在独立验证集选参。
