@@ -21,6 +21,8 @@ class UnifiedFlowRunner(Runner):
     def run(self):
         cfg = self.cfg
         flow = cfg.FLOW
+        if not np.isfinite(flow.LOGIT_SCALE) or flow.LOGIT_SCALE <= 0:
+            raise ValueError('FLOW.LOGIT_SCALE must be finite and positive')
         model = self.model.module if self.is_distributed else self.model
         model.eval().requires_grad_(False)
         run_name = f'seed_{cfg.SEED}_{datetime.now().strftime("%Y%m%d_%H%M%S_%f")}'
@@ -140,9 +142,9 @@ class UnifiedFlowRunner(Runner):
             if self.cfg.TRAINER.BiMC.USING_ENSEMBLE:
                 logits = ensemble_scores(logits, features, device_bank, covariance, descriptions,
                                          description_labels, len(self.data_manager.class_index_in_task[0]),
-                                         self.cfg.DATASET.ENSEMBLE_ALPHA)
+                                         self.cfg.DATASET.ENSEMBLE_ALPHA, self.cfg.FLOW.LOGIT_SCALE)
             else:
-                logits = torch.softmax(logits, dim=-1)
+                logits = torch.softmax(logits * self.cfg.FLOW.LOGIT_SCALE, dim=-1)
             scores.append(logits.cpu())
             targets.append(labels.cpu())
         if not scores:

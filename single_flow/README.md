@@ -142,3 +142,5 @@ python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/tra
 `ADAPT_STEPS`、`ADAPT_LR`、`ALPHA`、`BETA_BASE`、`BETA_INC` 和 `GAMMA` 控制微调和融合，初值是实验起点，应使用验证数据选择。`ADAPT_STEPS: 0` 可关闭增量微调。实验需要 GPU、数据集、CLIP 权重及配置中的正确数据路径；该方法的效果需要真实数据验证。
 
 双向余弦得分先在全部已见类别上做 softmax。启用 `TRAINER.BiMC.USING_ENSEMBLE` 时，沿用 BiMC 的融合方式：基类概率与马氏距离概率融合，增量类概率与描述特征 KNN 概率融合，权重为数据集配置的 `ENSEMBLE_ALPHA`。协方差来自各阶段真实训练/支持图像的 BiMC 收缩协方差，按阶段类别数加权；马氏距离使用双向 Flow 校准后的视觉原型。当前 Flow 对相同文本原型输出确定结果，重复生成不能提供可靠的类内协方差，因此不将重复伪原型用于估计协方差。
+
+`FLOW.LOGIT_SCALE` 是双向余弦得分 softmax 前的正数乘数，默认 1 保持原行为；它与训练损失中的 `FLOW.TEMPERATURE` 相互独立。可在验证集比较 1、5、10 等值，并联合搜索 `FLOW.GAMMA`（例如 0.4、0.5、0.6、0.7）和 `FLOW.BETA_INC`（例如 0.3、0.4、0.5、0.6）。无 Ensemble 时正数缩放不改变 argmax；启用 Ensemble 时会改变 Flow 分支与协方差、KNN 概率的相对影响。softmax 温度不能保证各分支校准一致，需在验证集检查基类和增量类准确率。不要用测试阶段结果选择参数。

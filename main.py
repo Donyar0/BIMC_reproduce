@@ -90,6 +90,7 @@ def extend_cfg(cfg):
     cfg.FLOW.BETA_BASE = 0.1
     cfg.FLOW.BETA_INC = 0.5
     cfg.FLOW.GAMMA = 0.5
+    cfg.FLOW.LOGIT_SCALE = 1.0
 
 
 

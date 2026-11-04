@@ -78,8 +78,10 @@ def classify_bidirectional(model, image_features, bank, *, alpha, gamma):
 
 
 def ensemble_scores(scores, image_features, bank, covariance, description_features,
-                    description_labels, num_base, ensemble_alpha):
+                    description_labels, num_base, ensemble_alpha, logit_scale=1.0):
     """Apply BiMC's base covariance / incremental description probability fusion."""
+    if logit_scale <= 0:
+        raise ValueError('logit_scale must be positive')
     if not 0 <= ensemble_alpha <= 1:
         raise ValueError('ensemble_alpha must be in [0, 1]')
     z = unit(image_features)
@@ -96,7 +98,7 @@ def ensemble_scores(scores, image_features, bank, covariance, description_featur
     knn = torch.stack([similarities[:, labels == c].max(dim=1).values
                        for c in bank['class_ids']], dim=1)
     prob_knn = torch.softmax(knn, dim=-1)
-    prob_flow = torch.softmax(scores, dim=-1)
+    prob_flow = torch.softmax(scores * logit_scale, dim=-1)
     base = ensemble_alpha * prob_flow[:, :num_base] + (1-ensemble_alpha) * prob_cov[:, :num_base]
     inc = ensemble_alpha * prob_flow[:, num_base:] + (1-ensemble_alpha) * prob_knn[:, num_base:]
     return torch.cat([base, inc], dim=1)

@@ -44,6 +44,10 @@ class UnifiedFlowTests(unittest.TestCase):
         expected = torch.stack([(flow[0, 0] + cov[0, 0]) / 2,
                                 (flow[0, 1] + knn[0, 1]) / 2]).unsqueeze(0)
         self.assertTrue(torch.allclose(result, expected))
+        scaled = ensemble_scores(scores, z, bank, torch.eye(2), desc, labels, 1, 1, 5.0)
+        self.assertTrue(torch.allclose(scaled, torch.softmax(scores * 5, dim=-1)))
+        with self.assertRaises(ValueError):
+            ensemble_scores(scores, z, bank, torch.eye(2), desc, labels, 1, 1, 0)
         self.assertTrue(torch.allclose(ensemble_scores(scores, z, bank, torch.eye(2),
                                                        desc, labels, 1, 1), flow))
 

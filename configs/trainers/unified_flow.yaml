@@ -55,5 +55,6 @@ FLOW:
   ADAPT_LR: 0.0002
   ALPHA: 0.15
   BETA_BASE: 0.1
-  BETA_INC: 0.5
-  GAMMA: 0.5
+  BETA_INC: 0.5  # validation search: 0.3 to 0.6
+  GAMMA: 0.5  # validation search: 0.4 to 0.7
+  LOGIT_SCALE: 1.0  # multiplier before softmax; tune on validation data
