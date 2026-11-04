@@ -12,7 +12,7 @@ from tqdm import tqdm
 from engine.engine import Runner
 from single_flow.bimc_cache import from_task_statistics
 from single_flow.s1_flow import fit
-from single_flow.unified_flow import adapt, build_bank, classify_bidirectional, load_model, real_means, ensemble_scores
+from single_flow.unified_flow import adapt, build_bank, classify_bidirectional, load_model, real_means, ensemble_scores, prepare_ensemble
 from utils.experiment_logger import log_metrics
 
 
@@ -134,15 +134,18 @@ class UnifiedFlowRunner(Runner):
             covariance = sum(item['cov'] * (item['count'] / total) for item in self._ensemble_stats)
             descriptions = torch.cat([item['descriptions'] for item in self._ensemble_stats])
             description_labels = torch.cat([item['labels'] for item in self._ensemble_stats])
+            prepared_ensemble = prepare_ensemble(
+                device_bank, covariance, descriptions, description_labels, self.device)
         for batch in tqdm(loader):
             images, labels = self.parse_batch(batch)
             features = model.extract_img_feature(images)
             _, logits = classify_bidirectional(velocity, features, device_bank,
                                                alpha=self.cfg.FLOW.ALPHA, gamma=self.cfg.FLOW.GAMMA)
             if self.cfg.TRAINER.BiMC.USING_ENSEMBLE:
-                logits = ensemble_scores(logits, features, device_bank, covariance, descriptions,
-                                         description_labels, len(self.data_manager.class_index_in_task[0]),
-                                         self.cfg.DATASET.ENSEMBLE_ALPHA, self.cfg.FLOW.LOGIT_SCALE)
+                logits = ensemble_scores(
+                    logits, features, prepared_ensemble,
+                    len(self.data_manager.class_index_in_task[0]),
+                    self.cfg.DATASET.ENSEMBLE_ALPHA, self.cfg.FLOW.LOGIT_SCALE)
             else:
                 logits = torch.softmax(logits * self.cfg.FLOW.LOGIT_SCALE, dim=-1)
             scores.append(logits.cpu())
