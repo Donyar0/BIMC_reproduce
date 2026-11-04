@@ -77,24 +77,56 @@ def classify_bidirectional(model, image_features, bank, *, alpha, gamma):
     return ids[scores.argmax(-1)], scores
 
 
-def ensemble_scores(scores, image_features, bank, covariance, description_features,
-                    description_labels, num_base, ensemble_alpha):
-    """Apply BiMC's base covariance / incremental description probability fusion."""
+@torch.no_grad()
+def prepare_ensemble(bank, covariance, description_features, description_labels, device):
+    """Cache session-constant covariance terms and description class indices."""
+    prototypes = unit(bank['prototypes']).to(device)
+    count, dim = prototypes.shape
+    cov = covariance.to(device=device, dtype=torch.float32)
+    if cov.shape != (dim, dim):
+        raise ValueError('Covariance shape must match the prototype dimension')
+    precision = torch.linalg.pinv(cov)
+    projected = prototypes @ precision
+    # In the class-wise softmax, the query-only Mahalanobis term cancels.
+    weighted_prototypes = projected.T.contiguous()
+    prototype_quadratic = (prototypes * projected).sum(dim=-1)
+
+    descriptions = description_features.to(device=device, dtype=torch.float32)
+    labels = description_labels.detach().cpu().long()
+    if (descriptions.ndim != 2 or descriptions.shape[1] != dim or
+            labels.ndim != 1 or len(labels) != len(descriptions) or
+            set(labels.tolist()) != set(bank['class_ids'])):
+        raise ValueError('Description features/labels must cover exactly the seen classes')
+    description_indices = tuple(
+        torch.where(labels == class_id)[0].to(device) for class_id in bank['class_ids']
+    )
+    return dict(weighted_prototypes=weighted_prototypes,
+                prototype_quadratic=prototype_quadratic,
+                descriptions_t=descriptions.T.contiguous(),
+                description_indices=description_indices,
+                num_classes=count)
+
+
+def ensemble_scores(scores, image_features, prepared, num_base, ensemble_alpha):
+    """BiMC-style probability fusion with cached, exact Mahalanobis softmax."""
     if not 0 <= ensemble_alpha <= 1:
         raise ValueError('ensemble_alpha must be in [0, 1]')
     z = unit(image_features)
-    proto = bank['prototypes'].to(z.device).float()
-    cov_inv = torch.linalg.pinv(covariance.to(z.device).float())
-    diff = z[:, None, :] - proto[None, :, :]
-    mahal = torch.einsum('ncd,de,nce->nc', diff, cov_inv, diff)
-    prob_cov = torch.softmax(-mahal / 512, dim=-1)
-    descriptions = description_features.to(z.device).float()
-    labels = description_labels.to(z.device).long()
-    similarities = z @ descriptions.T
-    if set(labels.tolist()) != set(bank['class_ids']):
-        raise ValueError('Description labels must cover the seen class IDs')
-    knn = torch.stack([similarities[:, labels == c].max(dim=1).values
-                       for c in bank['class_ids']], dim=1)
+    n, classes = z.shape[0], prepared['num_classes']
+    if scores.shape != (n, classes) or not 0 <= num_base <= classes:
+        raise ValueError('Score dimensions or number of base classes are invalid')
+
+    cov_logits = (
+        2 * (z @ prepared['weighted_prototypes'])
+        - prepared['prototype_quadratic'][None, :]
+    ) / 512.0
+    prob_cov = torch.softmax(cov_logits, dim=-1)
+
+    similarities = z @ prepared['descriptions_t']
+    knn = torch.stack([
+        similarities[:, indices].max(dim=1).values
+        for indices in prepared['description_indices']
+    ], dim=1)
     prob_knn = torch.softmax(knn, dim=-1)
     prob_flow = torch.softmax(scores, dim=-1)
     base = ensemble_alpha * prob_flow[:, :num_base] + (1-ensemble_alpha) * prob_cov[:, :num_base]

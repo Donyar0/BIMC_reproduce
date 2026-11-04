@@ -1,4 +1,6 @@
 import subprocess
+from urllib.parse import urlparse
+import re
 
 
 _SWANLAB_RUN = None
@@ -21,11 +23,32 @@ def _git_value(args):
         return ""
 
 
+def _public_github_remote():
+    """Never send credentials from a configured Git remote to experiment logs."""
+    remote = _git_value(["git", "remote", "get-url", "origin"])
+    if remote.startswith("git@github.com:"):
+        path = remote.split(":", 1)[1]
+    else:
+        parsed = urlparse(remote)
+        if parsed.hostname != "github.com":
+            return ""
+        path = parsed.path.lstrip("/")
+    path = path.removesuffix(".git").strip("/")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", path):
+        return ""
+    return "https://github.com/" + path
+
+
 def collect_git_info():
+    branch = _git_value(["git", "branch", "--show-current"])
+    commit = _git_value(["git", "rev-parse", "HEAD"])
+    remote = _public_github_remote()
     return {
-        "git_branch": _git_value(["git", "branch", "--show-current"]),
-        "git_commit": _git_value(["git", "rev-parse", "HEAD"]),
+        "git_branch": branch,
+        "git_commit": commit,
         "git_dirty": bool(_git_value(["git", "status", "--short"])),
+        "git_remote_url": remote,
+        "git_commit_url": f"{remote}/commit/{commit}" if remote and commit else "",
     }
 
 
@@ -47,6 +70,7 @@ def init_swanlab(cfg, args):
         "train_cfg": args.train_cfg,
     }
     config["git"] = collect_git_info()
+    print("SwanLab Git:", config["git"])
 
     experiment_name = args.swanlab_experiment
     if not experiment_name:

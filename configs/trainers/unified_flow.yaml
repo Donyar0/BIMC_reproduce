@@ -35,7 +35,7 @@ TRAINER:
     GAMMA_BASE: 1.0
     GAMMA_INC: 5.0
 
-    USING_ENSEMBLE: False
+    USING_ENSEMBLE: True  # enable BiMC covariance/KNN score fusion
 
 
 # Starting values only; select hyperparameters using base validation data.

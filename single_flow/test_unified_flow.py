@@ -1,7 +1,7 @@
 import unittest
 import torch
 from single_flow.s1_flow import fit
-from single_flow.unified_flow import adapt, build_bank, classify_bidirectional, load_model, real_means, ensemble_scores
+from single_flow.unified_flow import adapt, build_bank, classify_bidirectional, load_model, real_means, ensemble_scores, prepare_ensemble
 
 
 class UnifiedFlowTests(unittest.TestCase):
@@ -37,15 +37,42 @@ class UnifiedFlowTests(unittest.TestCase):
         scores = torch.tensor([[0., 1.]])
         desc = torch.eye(2)
         labels = torch.tensor([0, 1])
-        result = ensemble_scores(scores, z, bank, torch.eye(2), desc, labels, 1, 0.5)
+        prepared = prepare_ensemble(bank, torch.eye(2), desc, labels, 'cpu')
+        result = ensemble_scores(scores, z, prepared, 1, 0.5)
         flow = torch.softmax(scores, dim=-1)
         cov = torch.softmax(torch.tensor([[0., -2. / 512]]), dim=-1)
         knn = torch.softmax(torch.tensor([[1., 0.]]), dim=-1)
         expected = torch.stack([(flow[0, 0] + cov[0, 0]) / 2,
                                 (flow[0, 1] + knn[0, 1]) / 2]).unsqueeze(0)
         self.assertTrue(torch.allclose(result, expected))
-        self.assertTrue(torch.allclose(ensemble_scores(scores, z, bank, torch.eye(2),
-                                                       desc, labels, 1, 1), flow))
+        self.assertTrue(torch.allclose(
+            ensemble_scores(scores, z, prepared, 1, 1), flow))
+
+    def test_cached_covariance_equals_original_mahalanobis(self):
+        torch.manual_seed(11)
+        z = torch.nn.functional.normalize(torch.randn(5, 8), dim=-1)
+        proto = torch.nn.functional.normalize(torch.randn(4, 8), dim=-1)
+        raw = torch.randn(8, 8)
+        covariance = raw @ raw.T + 0.1 * torch.eye(8)
+        desc = proto.clone()
+        labels = torch.arange(4)
+        bank = dict(class_ids=list(range(4)), prototypes=proto)
+        prepared = prepare_ensemble(bank, covariance, desc, labels, 'cpu')
+        scores = torch.randn(5, 4)
+        actual = ensemble_scores(scores, z, prepared, 2, 0.3)
+
+        inverse = torch.linalg.pinv(covariance)
+        diff = z[:, None, :] - proto[None, :, :]
+        mahal = torch.einsum('ncd,de,nce->nc', diff, inverse, diff)
+        cov_prob = torch.softmax(-mahal / 512, dim=-1)
+        sims = z @ desc.T
+        knn_prob = torch.softmax(sims, dim=-1)
+        flow_prob = torch.softmax(scores, dim=-1)
+        expected = torch.cat((
+            0.3 * flow_prob[:, :2] + 0.7 * cov_prob[:, :2],
+            0.3 * flow_prob[:, 2:] + 0.7 * knn_prob[:, 2:],
+        ), dim=-1)
+        self.assertTrue(torch.allclose(actual, expected, atol=1e-6, rtol=1e-6))
 
 
 if __name__ == '__main__':
