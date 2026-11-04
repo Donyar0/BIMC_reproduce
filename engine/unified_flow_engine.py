@@ -216,9 +216,7 @@ class UnifiedFlowRunner(Runner):
                 logits = ensemble_scores(
                     logits, features, prepared_ensemble,
                     len(self.data_manager.class_index_in_task[0]),
-                    self.cfg.DATASET.ENSEMBLE_ALPHA, self.cfg.FLOW.LOGIT_SCALE,
-                    self.cfg.FLOW.INC_ENSEMBLE_MODE, self.cfg.FLOW.INC_COV_WEIGHT,
-                    self.cfg.FLOW.MAHA_TEMPERATURE)
+                    self.cfg.DATASET.ENSEMBLE_ALPHA, self.cfg.FLOW.LOGIT_SCALE)
             else:
                 logits = torch.softmax(logits * self.cfg.FLOW.LOGIT_SCALE, dim=-1)
             scores.append(logits.cpu())

@@ -45,16 +45,6 @@ class UnifiedFlowTests(unittest.TestCase):
         expected = torch.stack([(flow[0, 0] + cov[0, 0]) / 2,
                                 (flow[0, 1] + knn[0, 1]) / 2]).unsqueeze(0)
         self.assertTrue(torch.allclose(result, expected))
-        mahal = ensemble_scores(scores, z, prepared, 1, 0.5, inc_mode='mahalanobis')
-        self.assertTrue(torch.allclose(mahal, 0.5 * flow + 0.5 * cov))
-        mixed = ensemble_scores(scores, z, prepared, 1, 0.5, inc_mode='blend', inc_cov_weight=0.25)
-        self.assertTrue(torch.allclose(mixed[:, :1], mahal[:, :1]))
-        self.assertTrue(torch.allclose(mixed[:, 1:], 0.5 * flow[:, 1:] +
-                                       0.5 * (0.25 * cov[:, 1:] + 0.75 * knn[:, 1:])))
-        with self.assertRaises(ValueError):
-            ensemble_scores(scores, z, prepared, 1, 0.5, inc_mode='invalid')
-        with self.assertRaises(ValueError):
-            ensemble_scores(scores, z, prepared, 1, 0.5, maha_temperature=0)
         scaled = ensemble_scores(scores, z, prepared, 1, 1, 5.0)
         self.assertTrue(torch.allclose(scaled, torch.softmax(scores * 5, dim=-1)))
         with self.assertRaises(ValueError):

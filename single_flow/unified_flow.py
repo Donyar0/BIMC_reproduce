@@ -107,17 +107,10 @@ def prepare_ensemble(bank, covariance, description_features, description_labels,
                 num_classes=count)
 
 
-def ensemble_scores(scores, image_features, prepared, num_base, ensemble_alpha, logit_scale=1.0,
-                    inc_mode="knn", inc_cov_weight=0.5, maha_temperature=512.0):
+def ensemble_scores(scores, image_features, prepared, num_base, ensemble_alpha, logit_scale=1.0):
     """BiMC-style probability fusion with cached, exact Mahalanobis softmax."""
     if not torch.isfinite(torch.tensor(logit_scale)) or logit_scale <= 0:
         raise ValueError('logit_scale must be finite and positive')
-    if inc_mode not in ('knn', 'mahalanobis', 'blend'):
-        raise ValueError('inc_mode must be knn, mahalanobis, or blend')
-    if not 0 <= inc_cov_weight <= 1:
-        raise ValueError('inc_cov_weight must be in [0, 1]')
-    if not torch.isfinite(torch.tensor(maha_temperature)) or maha_temperature <= 0:
-        raise ValueError('maha_temperature must be finite and positive')
     if not 0 <= ensemble_alpha <= 1:
         raise ValueError('ensemble_alpha must be in [0, 1]')
     z = unit(image_features)
@@ -128,7 +121,7 @@ def ensemble_scores(scores, image_features, prepared, num_base, ensemble_alpha, 
     cov_logits = (
         2 * (z @ prepared['weighted_prototypes'])
         - prepared['prototype_quadratic'][None, :]
-    ) / maha_temperature
+    ) / 512.0
     prob_cov = torch.softmax(cov_logits, dim=-1)
 
     similarities = z @ prepared['descriptions_t']
@@ -139,7 +132,5 @@ def ensemble_scores(scores, image_features, prepared, num_base, ensemble_alpha, 
     prob_knn = torch.softmax(knn, dim=-1)
     prob_flow = torch.softmax(scores * logit_scale, dim=-1)
     base = ensemble_alpha * prob_flow[:, :num_base] + (1-ensemble_alpha) * prob_cov[:, :num_base]
-    auxiliary = {"knn": prob_knn, "mahalanobis": prob_cov,
-                 "blend": inc_cov_weight * prob_cov + (1-inc_cov_weight) * prob_knn}[inc_mode]
-    inc = ensemble_alpha * prob_flow[:, num_base:] + (1-ensemble_alpha) * auxiliary[:, num_base:]
+    inc = ensemble_alpha * prob_flow[:, num_base:] + (1-ensemble_alpha) * prob_knn[:, num_base:]
     return torch.cat([base, inc], dim=1)

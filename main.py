@@ -91,9 +91,6 @@ def extend_cfg(cfg):
     cfg.FLOW.BETA_INC = 0.5
     cfg.FLOW.GAMMA = 0.5
     cfg.FLOW.LOGIT_SCALE = 1.0
-    cfg.FLOW.INC_ENSEMBLE_MODE = "knn"
-    cfg.FLOW.INC_COV_WEIGHT = 0.5
-    cfg.FLOW.MAHA_TEMPERATURE = 512.0
 
 
 
