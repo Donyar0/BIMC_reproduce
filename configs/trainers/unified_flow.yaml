@@ -58,3 +58,4 @@ FLOW:
   BETA_INC: 0.5  # validation search: 0.3 to 0.6
   GAMMA: 0.5  # validation search: 0.4 to 0.7
   LOGIT_SCALE: 1.0  # multiplier before softmax; tune on validation data
+  BASE_MARGIN: 0.0  # subtract from base-class scores in incremental sessions
