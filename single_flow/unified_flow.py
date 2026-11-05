@@ -47,9 +47,20 @@ def adapt(checkpoint, cache, memory, *, steps, batch_size, lr, weight_decay, dev
 
 
 @torch.no_grad()
-def build_bank(checkpoint, memory, *, steps, num_base, beta_base, beta_inc, device):
+def build_bank(checkpoint, memory, *, steps, num_base, beta_base, beta_inc, device,
+               previous_bank=None):
+    """Generate prototypes for current classes and append a frozen prior bank."""
     if steps < 1 or not all(0 <= x <= 1 for x in (beta_base, beta_inc)):
         raise ValueError('Invalid generation parameters')
+    if not 0 <= num_base <= len(memory['class_ids']):
+        raise ValueError('Invalid number of base classes')
+    if memory['encoder_id'] != checkpoint['encoder_id']:
+        raise ValueError('Encoder mismatch')
+    if previous_bank is not None:
+        if previous_bank['encoder_id'] != checkpoint['encoder_id']:
+            raise ValueError('Encoder mismatch')
+        if set(previous_bank['class_ids']) & set(memory['class_ids']):
+            raise ValueError('Current classes must not overlap previous bank')
     model = load_model(checkpoint, device).eval()
     x = memory['text'].to(device)
     for k in range(steps):
@@ -58,8 +69,16 @@ def build_bank(checkpoint, memory, *, steps, num_base, beta_base, beta_inc, devi
     beta = torch.full((len(x), 1), beta_inc, device=device)
     beta[:num_base] = beta_base
     visual = F.normalize((1-beta)*memory['real'].to(device) + beta*generated, dim=-1)
-    return dict(class_ids=memory['class_ids'], text=memory['text'].clone(),
-                real=memory['real'].clone(), generated=generated.cpu(), prototypes=visual.cpu(),
+    current = dict(class_ids=list(memory['class_ids']), text=memory['text'].cpu().clone(),
+                   real=memory['real'].cpu().clone(), generated=generated.cpu(),
+                   prototypes=visual.cpu(), encoder_id=checkpoint['encoder_id'])
+    if previous_bank is None:
+        return current
+    return dict(class_ids=list(previous_bank['class_ids']) + current['class_ids'],
+                text=torch.cat([previous_bank['text'], current['text']]),
+                real=torch.cat([previous_bank['real'], current['real']]),
+                generated=torch.cat([previous_bank['generated'], current['generated']]),
+                prototypes=torch.cat([previous_bank['prototypes'], current['prototypes']]),
                 encoder_id=checkpoint['encoder_id'])
 
 

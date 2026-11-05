@@ -79,15 +79,20 @@ class UnifiedFlowRunner(Runner):
                                        batch_size=flow.BATCH_SIZE, lr=flow.ADAPT_LR,
                                        weight_decay=flow.WEIGHT_DECAY, device=self.device)
             current = dict(class_ids=cache['class_ids'], text=cache['text_prototypes'].float(),
-                           real=real_means(cache))
+                           real=real_means(cache), encoder_id=checkpoint['encoder_id'])
             if memory is None:
                 memory = current
             else:
                 memory = dict(class_ids=memory['class_ids'] + current['class_ids'],
                               text=torch.cat([memory['text'], current['text']]),
-                              real=torch.cat([memory['real'], current['real']]))
-            bank = build_bank(checkpoint, memory, steps=flow.STEPS, num_base=num_base,
-                              beta_base=flow.BETA_BASE, beta_inc=flow.BETA_INC, device=self.device)
+                              real=torch.cat([memory['real'], current['real']]),
+                              encoder_id=checkpoint['encoder_id'])
+            # Generate only the classes introduced in this session. Keep previous
+            # generated and fused prototypes unchanged across later adaptations.
+            bank = build_bank(checkpoint, current, steps=flow.STEPS,
+                              num_base=num_base if task_id == 0 else 0,
+                              beta_base=flow.BETA_BASE, beta_inc=flow.BETA_INC,
+                              device=self.device, previous_bank=bank)
             torch.save(checkpoint, output / f'flow_session{task_id}.pt')
             torch.save(bank, output / f'bank_session{task_id}.pt')
             del stats, cache, loader
