@@ -2,6 +2,7 @@
 CLIP stays outside the optimizer; only base training images may enter fit().
 """
 import argparse
+import math
 from pathlib import Path
 import torch
 import torch.nn.functional as F
@@ -17,6 +18,19 @@ def unit(x):
     if x.ndim != 2 or not torch.isfinite(x).all() or (x.norm(dim=-1) < 1e-8).any():
         raise ValueError('Features must be finite, nonzero [N,D] tensors')
     return F.normalize(x, dim=-1)
+
+
+def text_cycle_loss(model, text):
+    """One-step text -> visual -> text directional reconstruction loss.
+
+    F.normalize preserves gradients; unit() detaches and must not be used here.
+    This is a training regularizer, not an exact inverse of multi-step inference.
+    """
+    t0 = text.new_zeros((len(text), 1))
+    t1 = text.new_ones((len(text), 1))
+    visual = F.normalize(text + model(text, t0), dim=-1)
+    reconstructed = F.normalize(visual - model(visual, t1), dim=-1)
+    return (reconstructed - text).square().sum(-1).mean()
 
 
 def ids_checked(ids):
@@ -37,11 +51,13 @@ def text_cache(cache):
 
 def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
         blocks=24, hidden=None, target='prototype', ce_weight=0.0,
-        temperature=0.07, seed=0, device='cpu'):
+        temperature=0.07, seed=0, device='cpu', cycle_weight=0.0):
     if cache.get('stage') != 'base' or cache.get('split') != 'train':
         raise ValueError('Training accepts only stage=base, split=train caches')
     if epochs < 1 or batch_size < 1 or blocks < 1 or lr <= 0 or weight_decay < 0 or ce_weight < 0 or temperature <= 0:
         raise ValueError('Invalid training hyperparameters')
+    if not math.isfinite(cycle_weight) or cycle_weight < 0:
+        raise ValueError('cycle_weight must be finite and non-negative')
     if target not in ('prototype', 'sample'):
         raise ValueError('target must be prototype or sample')
     torch.manual_seed(seed)
@@ -71,13 +87,17 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
     candidates = visual.to(device)
     history = []
     for epoch in range(epochs):
-        total, count = 0., 0
+        total, fm_total, cycle_total, count = 0., 0., 0., 0
         for x0, x1, label in loader:
             x0, x1, label = x0.to(device), x1.to(device), label.to(device)
             t = torch.rand(len(x0), 1, device=device)
             xt = (1-t)*x0 + t*x1
             pred_v = model(xt, t)
-            loss = ((pred_v - (x1-x0))**2).sum(-1).mean()
+            fm_loss = ((pred_v - (x1-x0))**2).sum(-1).mean()
+            loss = fm_loss
+            cycle_loss = text_cycle_loss(model, x0) if cycle_weight else None
+            if cycle_loss is not None:
+                loss = loss + cycle_weight * cycle_loss
             # Optional NEW visual-prototype CE, not the author's text CE.
             if ce_weight:
                 endpoint = F.normalize(xt + (1-t)*pred_v, dim=-1)
@@ -88,13 +108,18 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
             loss.backward()
             optimizer.step()
             total += loss.item()*len(x0)
+            fm_total += fm_loss.item()*len(x0)
+            if cycle_loss is not None:
+                cycle_total += cycle_loss.item()*len(x0)
             count += len(x0)
         history.append(total/count)
-        print(f'epoch={epoch+1} loss={history[-1]:.6f}', flush=True)
+        print(f'epoch={epoch+1} loss={history[-1]:.6f} '
+              f'fm_loss={fm_total/count:.6f} cycle_loss={cycle_total/count:.6f}', flush=True)
     return dict(format_version=2, state_dict={k:v.detach().cpu().clone() for k,v in model.state_dict().items()},
                 architecture=arch, encoder_id=cache['encoder_id'], base_class_ids=ids,
                 training=dict(epochs=epochs, batch_size=batch_size, lr=lr, weight_decay=weight_decay,
-                              target=target, ce_weight=ce_weight, temperature=temperature, seed=seed),
+                              target=target, ce_weight=ce_weight, temperature=temperature, seed=seed,
+                              cycle_weight=cycle_weight),
                 loss_history=history)
 
 

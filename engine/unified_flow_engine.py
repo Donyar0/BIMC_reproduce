@@ -68,7 +68,8 @@ class UnifiedFlowRunner(Runner):
                         lr=flow.LR, weight_decay=flow.WEIGHT_DECAY,
                         blocks=flow.BLOCKS, hidden=flow.HIDDEN or None,
                         target=flow.TARGET, ce_weight=flow.CE_WEIGHT,
-                        temperature=flow.TEMPERATURE, seed=cfg.SEED, device=self.device)
+                        temperature=flow.TEMPERATURE, seed=cfg.SEED, device=self.device,
+                        cycle_weight=flow.CYCLE_WEIGHT)
                 torch.save(checkpoint, output / 'base_flow.pt')
 
             if task_id > 0:
@@ -77,7 +78,8 @@ class UnifiedFlowRunner(Runner):
                     torch.manual_seed(cfg.SEED + task_id)
                     checkpoint = adapt(checkpoint, cache, memory, steps=flow.ADAPT_STEPS,
                                        batch_size=flow.BATCH_SIZE, lr=flow.ADAPT_LR,
-                                       weight_decay=flow.WEIGHT_DECAY, device=self.device)
+                                       weight_decay=flow.WEIGHT_DECAY, device=self.device,
+                                       cycle_weight=flow.CYCLE_WEIGHT)
             current = dict(class_ids=cache['class_ids'], text=cache['text_prototypes'].float(),
                            real=real_means(cache), encoder_id=checkpoint['encoder_id'])
             if memory is None:
