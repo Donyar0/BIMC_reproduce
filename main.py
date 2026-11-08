@@ -93,6 +93,11 @@ def extend_cfg(cfg):
     cfg.FLOW.GAMMA = 0.5
     cfg.FLOW.LOGIT_SCALE = 1.0
     cfg.FLOW.BASE_MARGIN = 0.0
+    # Original-direction VSC: text -> visual semantic context calibrates
+    # visual prototypes. Zero recovers original Unified Flow exactly.
+    cfg.FLOW.VSC_VISUAL_STRENGTH = 0.0
+    cfg.FLOW.VSC_ATTENTION_TEMPERATURE = 16.0
+    cfg.FLOW.VSC_TOPK = 5
 
 
 
