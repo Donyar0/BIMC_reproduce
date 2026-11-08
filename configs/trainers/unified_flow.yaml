@@ -47,11 +47,14 @@ FLOW:
   BLOCKS: 24
   HIDDEN: 0  # 0 uses CLIP feature dimension
   TARGET: "sample"
-  CE_WEIGHT: 0.0
+  CE_WEIGHT: 0.0  # legacy endpoint CE; keep off
+  VISUAL_CE_WEIGHT: 0.1  # new real-image vs generated-class visual CE (base training)
+  VISUAL_CE_STEPS: 1  # differentiable Euler steps; 1 is cheaper than 8
+  TEXT_PROTO_CALIBRATION: 0.1  # weak visual-support-guided text calibration (inference)
   CYCLE_WEIGHT: 0.0  # text -> one-step visual -> text regularizer; 0 disables
   TEMPERATURE: 0.07
   STEPS: 8
-  OUTPUT_DIR: "output/unified_flow"
+  OUTPUT_DIR: "output/unified_flow_vsc_ce"
   ADAPT_STEPS: 100
   ADAPT_LR: 0.0002
   ALPHA: 0.15
