@@ -124,9 +124,9 @@ def vsc_calibrate_visual_prototypes(bank, *, strength, temperature=16.0,
     if strength == 0:
         return (original, {}) if return_stats else original
 
-    real = unit(bank['real'])
-    generated = unit(bank['generated'])
     mixed = unit(original)
+    real = unit(bank['real']).to(mixed.device)
+    generated = unit(bank['generated']).to(mixed.device)
     if real.shape != generated.shape or real.shape != mixed.shape:
         raise ValueError('real/generated/prototypes banks must all have [classes, dim]')
     classes = len(real)
