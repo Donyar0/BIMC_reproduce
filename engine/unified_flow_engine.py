@@ -12,7 +12,7 @@ from tqdm import tqdm
 from engine.engine import Runner
 from single_flow.bimc_cache import from_task_statistics
 from single_flow.s1_flow import fit
-from single_flow.unified_flow import adapt, build_bank, classify_bidirectional, load_model, real_means, ensemble_scores, prepare_ensemble
+from single_flow.unified_flow import adapt, build_bank, classify_bidirectional, load_model, real_means, ensemble_scores, prepare_ensemble, vsc_calibrate_visual_prototypes
 from utils.experiment_logger import log_metrics
 
 
@@ -105,7 +105,7 @@ class UnifiedFlowRunner(Runner):
             self.acc_list.append(acc['mean_acc'])
             self.task_acc_list.append(acc['task_acc'])
             row = dict(task_id=task_id, seen_classes=len(bank['class_ids']),
-                       **acc, elapsed_time=elapsed)
+                       **acc, elapsed_time=elapsed, **self._vsc_stats)
             rows.append(row)
             print(f'=> Task [{task_id}], Acc: {acc["mean_acc"]:.3f}')
             print(f'Base Acc: {acc["base_avg_acc"]:.2f} | '
@@ -185,7 +185,8 @@ class UnifiedFlowRunner(Runner):
             acc = self.inference_task_flow(task_id, bank, model)
             self.acc_list.append(acc['mean_acc'])
             self.task_acc_list.append(acc['task_acc'])
-            row = dict(task_id=task_id, seen_classes=len(expected), **acc, elapsed_time=time.time()-start)
+            row = dict(task_id=task_id, seen_classes=len(expected), **acc,
+                       elapsed_time=time.time()-start, **self._vsc_stats)
             rows.append(row)
             log_metrics({k:v for k,v in row.items() if k != 'task_acc'}, step=task_id)
             self.save_results(output, rows)
@@ -210,7 +211,24 @@ class UnifiedFlowRunner(Runner):
         loader = self.data_manager.get_dataloader(task_id, source='test', mode='test')
         scores, targets = [], []
         velocity = load_model(checkpoint=self._checkpoint, device=self.device).eval()
-        device_bank = dict(bank, prototypes=bank['prototypes'].to(self.device), text=bank['text'].to(self.device))
+        # Original VSC direction: Text -> Flow-generated semantic visual
+        # representations, which guide calibration of support VISUAL prototypes.
+        # The visual->text query branch stays unchanged. Recomputing the
+        # context across all currently-seen classes changes no stored bank.
+        calibrated_visual, diagnostics = vsc_calibrate_visual_prototypes(
+            bank,
+            strength=self.cfg.FLOW.VSC_VISUAL_STRENGTH,
+            temperature=self.cfg.FLOW.VSC_ATTENTION_TEMPERATURE,
+            topk=self.cfg.FLOW.VSC_TOPK,
+            return_stats=True)
+        self._vsc_stats = diagnostics
+        if diagnostics:
+            print('VSC calibration: ' +
+                  ', '.join(f'{key}={value:.5f}' for key, value in diagnostics.items()),
+                  flush=True)
+        device_bank = dict(
+            bank, prototypes=calibrated_visual.to(self.device),
+            text=bank['text'].to(self.device))
         if self.cfg.TRAINER.BiMC.USING_ENSEMBLE:
             total = sum(item['count'] for item in self._ensemble_stats)
             covariance = sum(item['cov'] * (item['count'] / total) for item in self._ensemble_stats)
