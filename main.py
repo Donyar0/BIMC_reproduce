@@ -81,6 +81,9 @@ def extend_cfg(cfg):
     cfg.FLOW.HIDDEN = 0
     cfg.FLOW.TARGET = 'prototype'
     cfg.FLOW.CE_WEIGHT = 0.0
+    cfg.FLOW.VISUAL_CE_WEIGHT = 0.0
+    cfg.FLOW.VISUAL_CE_STEPS = 1
+    cfg.FLOW.TEXT_PROTO_CALIBRATION = 0.0
     cfg.FLOW.CYCLE_WEIGHT = 0.0
     cfg.FLOW.TEMPERATURE = 0.07
     cfg.FLOW.STEPS = 8
