@@ -123,12 +123,22 @@ class UnifiedFlowRunner(Runner):
         model = self.model.module if self.is_distributed else self.model
         model.eval().requires_grad_(False)
         rows = []
+        base_state = None
         num_base = len(self.data_manager.class_index_in_task[0])
         for task_id in range(self.data_manager.num_tasks):
             start = time.time()
             # Only load trusted checkpoints created by this project.
             checkpoint = torch.load(run_dir / f'flow_session{task_id}.pt', map_location='cpu', weights_only=not trusted_checkpoints)
             saved = torch.load(run_dir / f'bank_session{task_id}.pt', map_location='cpu', weights_only=not trusted_checkpoints)
+            # Do not silently score a historical replay/CE experiment as FM-only.
+            training = checkpoint.get('training', {})
+            if training.get('ce_weight', 0) != 0 or training.get('cycle_weight', 0) != 0:
+                raise ValueError('Saved checkpoint was trained with auxiliary losses')
+            if base_state is None:
+                base_state = checkpoint['state_dict']
+            elif any(not torch.equal(value, checkpoint['state_dict'][key])
+                     for key, value in base_state.items()):
+                raise ValueError('Saved Flow changed after base training; not FM-only frozen')
             expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1] for c in group]
             if saved['class_ids'] != expected or saved['encoder_id'] != checkpoint['encoder_id']:
                 raise ValueError('Saved checkpoint and bank are incompatible with dataset')
