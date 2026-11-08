@@ -51,7 +51,7 @@ FLOW:
   CYCLE_WEIGHT: 0.0  # text -> one-step visual -> text regularizer; 0 disables
   TEMPERATURE: 0.07
   STEPS: 8
-  OUTPUT_DIR: "output/unified_flow"
+  OUTPUT_DIR: "output/unified_flow_original_vsc"
   ADAPT_STEPS: 100
   ADAPT_LR: 0.0002
   ALPHA: 0.15
@@ -60,3 +60,9 @@ FLOW:
   GAMMA: 0.5  # validation search: 0.4 to 0.7
   LOGIT_SCALE: 1.0  # multiplier before softmax; tune on validation data
   BASE_MARGIN: 0.0  # subtract from base-class scores in incremental sessions
+
+  # VSC original-direction calibration; set strength 0 for exact baseline.
+  # FM, optional CE and query visual->text scoring remain unchanged.
+  VSC_VISUAL_STRENGTH: 0.1
+  VSC_ATTENTION_TEMPERATURE: 16.0
+  VSC_TOPK: 5  # include self; choose up to 4 visually nearest other semantic classes

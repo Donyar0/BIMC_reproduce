@@ -96,6 +96,81 @@ def build_bank(checkpoint, memory, *, steps, num_base, beta_base, beta_inc, devi
 
 
 @torch.no_grad()
+def vsc_calibrate_visual_prototypes(bank, *, strength, temperature=16.0,
+                                    topk=5, return_stats=False):
+    """VSC-inspired *text-to-visual* prototype calibration at inference.
+
+    Inputs come from the support bank: real visual class means and the
+    text->visual Flow-generated semantic prototypes. Query/test images and
+    their labels are never used to compute these calibrated prototypes.
+
+    This is a parameter-free, conservative adaptation of the original
+    VSC-Net SVPCM attention and residual logic, NOT its trained MLP.
+    The attention context is computed across the classes SEEN so far.
+    To avoid applying the same generated prototype twice (BiMC already
+    mixes it with the real mean), the residual is context minus the
+    same-class generated semantic prototype.
+
+    With strength=0, the original prototype bank is returned unchanged.
+    """
+    if not math.isfinite(strength) or not 0 <= strength <= 1:
+        raise ValueError('strength must be finite and in [0, 1]')
+    if not math.isfinite(temperature) or temperature <= 0:
+        raise ValueError('temperature must be finite and positive')
+    if isinstance(topk, bool) or not isinstance(topk, int) or topk < 1:
+        raise ValueError('topk must be an integer >= 1')
+
+    original = bank['prototypes']
+    if strength == 0:
+        return (original, {}) if return_stats else original
+
+    mixed = unit(original)
+    real = unit(bank['real']).to(mixed.device)
+    generated = unit(bank['generated']).to(mixed.device)
+    if real.shape != generated.shape or real.shape != mixed.shape:
+        raise ValueError('real/generated/prototypes banks must all have [classes, dim]')
+    classes = len(real)
+    if classes == 0:
+        raise ValueError('prototype bank cannot be empty')
+
+    # The visual support prototype attends to all text-derived visual
+    # representations, as in the original direction of VSC-Net.
+    similarities = real @ generated.T
+    logits = similarities * temperature
+    if topk < classes:
+        # Preserve the corresponding class in each attention neighborhood.
+        # Neighbor slots select the strongest non-self classes.
+        diagonal = torch.arange(classes, device=logits.device)
+        neighbors = logits.clone()
+        neighbors[diagonal, diagonal] = float('-inf')
+        keep = torch.zeros_like(logits, dtype=torch.bool)
+        keep[diagonal, diagonal] = True
+        if topk > 1:
+            indices = neighbors.topk(k=topk - 1, dim=-1).indices
+            keep.scatter_(1, indices, True)
+        logits = logits.masked_fill(~keep, float('-inf'))
+    weights = torch.softmax(logits, dim=-1)
+    context = weights @ generated
+
+    # Contextual semantic *correction*, anchored to the unmodified
+    # BiMC/Flow fused visual prototypes so the old method remains ablatable.
+    correction = context - generated
+    calibrated = F.normalize(mixed + strength * correction, dim=-1)
+
+    if not return_stats:
+        return calibrated
+    diagonal = torch.arange(classes, device=weights.device)
+    stats = {
+        'vsc/self_attention_mean': weights[diagonal, diagonal].mean().item(),
+        'vsc/own_class_top1_rate': (similarities.argmax(dim=-1) == diagonal).float().mean().item(),
+        'vsc/mean_cosine_shift': (
+            1.0 - (calibrated * mixed).sum(dim=-1)
+        ).mean().item(),
+    }
+    return calibrated, stats
+
+
+@torch.no_grad()
 def classify_bidirectional(model, image_features, bank, *, alpha, gamma):
     if not 0 <= alpha <= 1 or not 0 <= gamma <= 1:
         raise ValueError('alpha and gamma must be in [0, 1]')
