@@ -96,14 +96,44 @@ def build_bank(checkpoint, memory, *, steps, num_base, beta_base, beta_inc, devi
 
 
 @torch.no_grad()
-def classify_bidirectional(model, image_features, bank, *, alpha, gamma):
+def calibrate_text_bank(model, bank, *, strength):
+    """Apply visual-guided residual calibration to every seen text prototype.
+
+    The source is each class's STORED real support-set visual mean. It is
+    important not to use generated visual prototypes as visual evidence:
+    those originate in the very text prototype we are calibrating.
+    A single reverse Euler step is intentionally consistent with the
+    existing reverse-query update. strength=0 preserves old behavior.
+    """
+    if not 0 <= strength <= 1:
+        raise ValueError('Text calibration strength must be in [0, 1]')
+    text = bank['text']
+    real = bank['real']
+    if text.ndim != 2 or real.shape != text.shape:
+        raise ValueError('Text and real support prototype banks must align')
+    text = unit(text)
+    if strength == 0:
+        return text
+    visual = unit(real).to(next(model.parameters()).device)
+    text = text.to(visual.device)
+    time = torch.ones((len(visual), 1), device=visual.device)
+    projected = F.normalize(visual - model(visual, time), dim=-1)
+    return F.normalize((1 - strength) * text + strength * projected, dim=-1)
+
+
+@torch.no_grad()
+def classify_bidirectional(model, image_features, bank, *, alpha, gamma,
+                           text_calibration=0.0, calibrated_text=None):
     if not 0 <= alpha <= 1 or not 0 <= gamma <= 1:
         raise ValueError('alpha and gamma must be in [0, 1]')
     z = unit(image_features)
     t = torch.ones((len(z), 1), device=z.device)
     calibrated = F.normalize(z - alpha * model(z, t), dim=-1)
     visual = z @ bank['prototypes'].to(z.device).T
-    semantic = calibrated @ bank['text'].to(z.device).T
+    if calibrated_text is None:
+        calibrated_text = calibrate_text_bank(
+            model, bank, strength=text_calibration)
+    semantic = calibrated @ calibrated_text.to(z.device).T
     scores = gamma * visual + (1-gamma) * semantic
     ids = torch.tensor(bank['class_ids'], device=z.device)
     return ids[scores.argmax(-1)], scores
