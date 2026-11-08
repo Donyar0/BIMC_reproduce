@@ -131,8 +131,11 @@ def classify_bidirectional(model, image_features, bank, *, alpha, gamma,
     calibrated = F.normalize(z - alpha * model(z, t), dim=-1)
     visual = z @ bank['prototypes'].to(z.device).T
     if calibrated_text is None:
-        calibrated_text = calibrate_text_bank(
-            model, bank, strength=text_calibration)
+        # Preserve compatibility with the original unit tests and bank format
+        # when the opt-in feature is disabled.
+        calibrated_text = (bank['text'] if text_calibration == 0 else
+                           calibrate_text_bank(model, bank,
+                                               strength=text_calibration))
     semantic = calibrated @ calibrated_text.to(z.device).T
     scores = gamma * visual + (1-gamma) * semantic
     ids = torch.tensor(bank['class_ids'], device=z.device)
