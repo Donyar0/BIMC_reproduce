@@ -2,7 +2,6 @@
 CLIP stays outside the optimizer; only base training images may enter fit().
 """
 import argparse
-import math
 from pathlib import Path
 import torch
 import torch.nn.functional as F
@@ -18,19 +17,6 @@ def unit(x):
     if x.ndim != 2 or not torch.isfinite(x).all() or (x.norm(dim=-1) < 1e-8).any():
         raise ValueError('Features must be finite, nonzero [N,D] tensors')
     return F.normalize(x, dim=-1)
-
-
-def text_cycle_loss(model, text):
-    """One-step text -> visual -> text directional reconstruction loss.
-
-    F.normalize preserves gradients; unit() detaches and must not be used here.
-    This is a training regularizer, not an exact inverse of multi-step inference.
-    """
-    t0 = text.new_zeros((len(text), 1))
-    t1 = text.new_ones((len(text), 1))
-    visual = F.normalize(text + model(text, t0), dim=-1)
-    reconstructed = F.normalize(visual - model(visual, t1), dim=-1)
-    return (reconstructed - text).square().sum(-1).mean()
 
 
 def ids_checked(ids):
@@ -50,14 +36,12 @@ def text_cache(cache):
 
 
 def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
-        blocks=24, hidden=None, target='prototype', ce_weight=0.0,
-        temperature=0.07, seed=0, device='cpu', cycle_weight=0.0):
+        blocks=24, hidden=None, target='prototype', seed=0, device='cpu'):
+    """Fit the text-to-visual velocity field with FM loss and no auxiliary losses."""
     if cache.get('stage') != 'base' or cache.get('split') != 'train':
         raise ValueError('Training accepts only stage=base, split=train caches')
-    if epochs < 1 or batch_size < 1 or blocks < 1 or lr <= 0 or weight_decay < 0 or ce_weight < 0 or temperature <= 0:
+    if epochs < 1 or batch_size < 1 or blocks < 1 or lr <= 0 or weight_decay < 0:
         raise ValueError('Invalid training hyperparameters')
-    if not math.isfinite(cycle_weight) or cycle_weight < 0:
-        raise ValueError('cycle_weight must be finite and non-negative')
     if target not in ('prototype', 'sample'):
         raise ValueError('target must be prototype or sample')
     torch.manual_seed(seed)
@@ -65,9 +49,8 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
     visual = unit(cache['visual_prototypes']).cpu()
     if visual.shape != text.shape:
         raise ValueError('Visual prototype rows and dimensions must match text/class_ids')
-    # Consume BIMC prototypes directly; do not recompute means or calibration.
     if target == 'prototype':
-        sources, targets, y = text, visual, torch.arange(len(ids))
+        sources, targets = text, visual
     else:
         images = unit(cache['image_features']).cpu()
         labels = cache['image_labels'].detach().cpu()
@@ -76,50 +59,38 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
         if images.shape[1] != text.shape[1] or set(labels.tolist()) != set(ids):
             raise ValueError('Only listed base classes are allowed; each needs images')
         row = {c: i for i, c in enumerate(ids)}
-        y = torch.tensor([row[c] for c in labels.tolist()])
-        sources, targets = text[y], images
-    loader = DataLoader(TensorDataset(sources, targets, y), batch_size=batch_size,
+        indices = torch.tensor([row[c] for c in labels.tolist()])
+        sources, targets = text[indices], images
+    loader = DataLoader(TensorDataset(sources, targets), batch_size=batch_size,
                         shuffle=True, generator=torch.Generator().manual_seed(seed))
     arch = dict(in_channels=text.shape[1], model_channels=hidden or text.shape[1],
                 out_channels=text.shape[1], num_res_blocks=blocks)
     model = DeepFlowMatchingNet(**arch).to(device).train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    candidates = visual.to(device)
     history = []
     for epoch in range(epochs):
-        total, fm_total, cycle_total, count = 0., 0., 0., 0
-        for x0, x1, label in loader:
-            x0, x1, label = x0.to(device), x1.to(device), label.to(device)
+        sum_loss, count = 0.0, 0
+        for x0, x1 in loader:
+            x0, x1 = x0.to(device), x1.to(device)
             t = torch.rand(len(x0), 1, device=device)
-            xt = (1-t)*x0 + t*x1
-            pred_v = model(xt, t)
-            fm_loss = ((pred_v - (x1-x0))**2).sum(-1).mean()
-            loss = fm_loss
-            cycle_loss = text_cycle_loss(model, x0) if cycle_weight else None
-            if cycle_loss is not None:
-                loss = loss + cycle_weight * cycle_loss
-            # Optional NEW visual-prototype CE, not the author's text CE.
-            if ce_weight:
-                endpoint = F.normalize(xt + (1-t)*pred_v, dim=-1)
-                loss = loss + ce_weight*F.cross_entropy(endpoint @ candidates.T / temperature, label)
+            xt = (1 - t) * x0 + t * x1
+            velocity_target = x1 - x0
+            loss = (model(xt, t) - velocity_target).square().sum(-1).mean()
             if not torch.isfinite(loss):
-                raise RuntimeError('Nonfinite loss')
+                raise RuntimeError('Nonfinite FM loss')
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
-            total += loss.item()*len(x0)
-            fm_total += fm_loss.item()*len(x0)
-            if cycle_loss is not None:
-                cycle_total += cycle_loss.item()*len(x0)
+            sum_loss += loss.item() * len(x0)
             count += len(x0)
-        history.append(total/count)
-        print(f'epoch={epoch+1} loss={history[-1]:.6f} '
-              f'fm_loss={fm_total/count:.6f} cycle_loss={cycle_total/count:.6f}', flush=True)
-    return dict(format_version=2, state_dict={k:v.detach().cpu().clone() for k,v in model.state_dict().items()},
-                architecture=arch, encoder_id=cache['encoder_id'], base_class_ids=ids,
-                training=dict(epochs=epochs, batch_size=batch_size, lr=lr, weight_decay=weight_decay,
-                              target=target, ce_weight=ce_weight, temperature=temperature, seed=seed,
-                              cycle_weight=cycle_weight),
+        history.append(sum_loss / count)
+        print(f'epoch={epoch+1} fm_loss={history[-1]:.6f}', flush=True)
+    return dict(format_version=2,
+                state_dict={k:v.detach().cpu().clone() for k,v in model.state_dict().items()},
+                architecture=arch, encoder_id=cache['encoder_id'],
+                base_class_ids=ids,
+                training=dict(epochs=epochs, batch_size=batch_size, lr=lr,
+                              weight_decay=weight_decay, target=target, seed=seed),
                 loss_history=history)
 
 
@@ -177,7 +148,7 @@ def main():
     train.add_argument('--out', required=True)
     for name, default, typ in [('epochs',100,int),('batch-size',64,int),('lr',2e-4,float),
                              ('weight-decay',1e-4,float),('blocks',24,int),('hidden',None,int),
-                             ('ce-weight',0.,float),('temperature',0.07,float),('seed',0,int)]:
+                             ('seed',0,int)]:
         train.add_argument('--'+name, default=default, type=typ)
     train.add_argument('--target', choices=['prototype','sample'], default='prototype')
     gen = sub.add_parser('generate', help='Frozen inference, including incremental sessions')
