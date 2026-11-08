@@ -1,0 +1,39 @@
+METHOD: "swapped_vsc"
+SEED: 1
+
+DEVICE:
+  DEVICE_NAME: "cuda"
+  GPU_ID: "0;"
+
+DATALOADER:
+  TRAIN:
+    BATCH_SIZE_BASE: 64
+    BATCH_SIZE_INC: 64
+  TEST:
+    BATCH_SIZE: 100
+  NUM_WORKERS: 4
+
+MODEL:
+  BACKBONE:
+    NAME: "ViT-B/16"
+
+TRAINER:
+  BiMC:
+    PREC: "fp32"    # CLIP precision for inherited feature extraction
+
+  SwappedVSC:
+    PREC: "fp32"
+    HIDDEN_DIM: 512
+    PROJECTION_STRENGTH: 0.2
+    TEXT_STRENGTH: 0.1
+    ATTENTION_TAU: 8.0
+    LOGIT_SCALE: 20.0
+    FUSION_WEIGHT: 0.5
+    DESCRIPTION_WEIGHT: 0.5
+    CONSISTENCY_WEIGHT: 0.1
+    INDICATION_WEIGHT: 0.1
+    LR: 0.0001
+    WEIGHT_DECAY: 0.0001
+    BATCH_SIZE: 256
+    EPOCHS: 30
+    OUTPUT_DIR: "output/swapped_vsc"
