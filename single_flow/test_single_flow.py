@@ -36,9 +36,9 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 fit(dict(self.cache,**changes),epochs=1,blocks=1)
 
-    def test_sample_and_ce(self):
+    def test_sample_only_fm(self):
         with contextlib.redirect_stdout(io.StringIO()):
-            result=fit(self.cache,epochs=2,blocks=1,hidden=8,target='sample',ce_weight=0.1)
+            result=fit(self.cache,epochs=2,blocks=1,hidden=8,target='sample')
         self.assertTrue(all(torch.isfinite(torch.tensor(result['loss_history']))))
         with self.assertRaises(ValueError):
             fit(dict(self.cache, image_labels=torch.tensor([10,20,30,99])),
