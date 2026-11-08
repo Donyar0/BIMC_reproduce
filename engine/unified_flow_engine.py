@@ -12,7 +12,7 @@ from tqdm import tqdm
 from engine.engine import Runner
 from single_flow.bimc_cache import from_task_statistics
 from single_flow.s1_flow import fit
-from single_flow.unified_flow import adapt, build_bank, classify_bidirectional, load_model, real_means, ensemble_scores, prepare_ensemble
+from single_flow.unified_flow import adapt, build_bank, classify_bidirectional, calibrate_text_bank, load_model, real_means, ensemble_scores, prepare_ensemble
 from utils.experiment_logger import log_metrics
 
 
@@ -69,7 +69,9 @@ class UnifiedFlowRunner(Runner):
                         blocks=flow.BLOCKS, hidden=flow.HIDDEN or None,
                         target=flow.TARGET, ce_weight=flow.CE_WEIGHT,
                         temperature=flow.TEMPERATURE, seed=cfg.SEED, device=self.device,
-                        cycle_weight=flow.CYCLE_WEIGHT)
+                        cycle_weight=flow.CYCLE_WEIGHT,
+                        visual_ce_weight=flow.VISUAL_CE_WEIGHT,
+                        visual_ce_steps=flow.VISUAL_CE_STEPS)
                 torch.save(checkpoint, output / 'base_flow.pt')
 
             if task_id > 0:
@@ -140,6 +142,12 @@ class UnifiedFlowRunner(Runner):
         for name in ('PREC', 'VISION_CALIBRATION', 'LAMBDA_I', 'TAU', 'TEXT_CALIBRATION', 'LAMBDA_T', 'GAMMA_BASE', 'GAMMA_INC'):
             if getattr(original.TRAINER.BiMC, name) != getattr(cfg.TRAINER.BiMC, name):
                 raise ValueError(f'Saved run BiMC.{name} differs from current configuration')
+        # Changes to CE affect training: never pretend they are inference-only.
+        for name in ('VISUAL_CE_WEIGHT', 'VISUAL_CE_STEPS'):
+            old_value = getattr(original.FLOW, name, 0.0 if name.endswith('WEIGHT') else 1)
+            new_value = getattr(cfg.FLOW, name)
+            if old_value != new_value:
+                raise ValueError(f'FLOW.{name} affects training; saved run is incompatible')
         if original.FLOW.STEPS != cfg.FLOW.STEPS:
             raise ValueError('FLOW.STEPS must match the saved run')
         if not np.isfinite(cfg.FLOW.LOGIT_SCALE) or cfg.FLOW.LOGIT_SCALE <= 0:
@@ -218,11 +226,17 @@ class UnifiedFlowRunner(Runner):
             description_labels = torch.cat([item['labels'] for item in self._ensemble_stats])
             prepared_ensemble = prepare_ensemble(
                 device_bank, covariance, descriptions, description_labels, self.device)
+        # Evaluate every query against a single session-constant text bank.
+        # Never recalibrate using the query or test labels.
+        calibrated_text = calibrate_text_bank(
+            velocity, device_bank, strength=self.cfg.FLOW.TEXT_PROTO_CALIBRATION)
         for batch in tqdm(loader):
             images, labels = self.parse_batch(batch)
             features = model.extract_img_feature(images)
-            _, logits = classify_bidirectional(velocity, features, device_bank,
-                                               alpha=self.cfg.FLOW.ALPHA, gamma=self.cfg.FLOW.GAMMA)
+            _, logits = classify_bidirectional(
+                velocity, features, device_bank,
+                alpha=self.cfg.FLOW.ALPHA, gamma=self.cfg.FLOW.GAMMA,
+                calibrated_text=calibrated_text)
             if self.cfg.TRAINER.BiMC.USING_ENSEMBLE:
                 logits = ensemble_scores(
                     logits, features, prepared_ensemble,
