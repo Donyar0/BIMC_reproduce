@@ -71,6 +71,23 @@ def extend_cfg(cfg):
     cfg.TRAINER.BiMC.GAMMA_INC = -1.0
     cfg.TRAINER.BiMC.USING_ENSEMBLE = False
 
+    cfg.TRAINER.SwappedVSC = CN()
+    cfg.TRAINER.SwappedVSC.PREC = "fp32"
+    cfg.TRAINER.SwappedVSC.HIDDEN_DIM = 512
+    cfg.TRAINER.SwappedVSC.PROJECTION_STRENGTH = 0.2
+    cfg.TRAINER.SwappedVSC.TEXT_STRENGTH = 0.1
+    cfg.TRAINER.SwappedVSC.ATTENTION_TAU = 8.0
+    cfg.TRAINER.SwappedVSC.LOGIT_SCALE = 20.0
+    cfg.TRAINER.SwappedVSC.FUSION_WEIGHT = 0.5
+    cfg.TRAINER.SwappedVSC.DESCRIPTION_WEIGHT = 0.5
+    cfg.TRAINER.SwappedVSC.CONSISTENCY_WEIGHT = 0.1
+    cfg.TRAINER.SwappedVSC.INDICATION_WEIGHT = 0.1
+    cfg.TRAINER.SwappedVSC.LR = 0.0001
+    cfg.TRAINER.SwappedVSC.WEIGHT_DECAY = 0.0001
+    cfg.TRAINER.SwappedVSC.BATCH_SIZE = 256
+    cfg.TRAINER.SwappedVSC.EPOCHS = 30
+    cfg.TRAINER.SwappedVSC.OUTPUT_DIR = "output/swapped_vsc"
+
 
 
     
@@ -114,7 +131,10 @@ def main():
     set_gpu(cfg.DEVICE.GPU_ID)
 
     # Import and run the trainer
-    from engine.engine import Runner
+    if cfg.METHOD.lower() == "swapped_vsc":
+        from engine.swapped_vsc_engine import Runner
+    else:
+        from engine.engine import Runner
     engine = Runner(cfg)
     try:
         engine.run()
