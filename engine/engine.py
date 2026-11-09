@@ -131,14 +131,20 @@ class Runner:
                     acc['base_avg_acc'], acc['inc_avg_acc'], acc['harmonic_acc']
                 ))
 
-            log_metrics({
+            metrics = {
                 'task_id': i,
                 'mean_acc': acc['mean_acc'],
                 'base_avg_acc': acc['base_avg_acc'],
                 'inc_avg_acc': acc['inc_avg_acc'],
                 'harmonic_acc': acc['harmonic_acc'],
                 'elapsed_time': elapsed_time,
-            }, step=i)
+            }
+            # None in the base session is not a valid numeric SwanLab metric.
+            for metric in ('base_to_novel_pct', 'novel_to_base_pct',
+                           'base_to_novel_count', 'novel_to_base_count'):
+                if acc['bias'][metric] is not None:
+                    metrics[metric] = acc['bias'][metric]
+            log_metrics(metrics, step=i)
 
         print(f'Final acc:{self.acc_list}')
         print('FINAL_BIAS_JSON:' + json.dumps(self.bias_history[-1], sort_keys=True))
