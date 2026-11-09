@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import models.clip.clip as clip
 import json
+from models.neighbor_semantics import sample_description_index
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -161,10 +162,24 @@ class BiMC(nn.Module):
 
         text_features, text_targets = self.inference_text_feature(class_names, self.template, cls_begin_index)
 
-        description_features, description_targets, description_proto = \
-                                  self.inference_all_description_feature(class_names=class_names, 
+        description_features, description_targets, _ = \
+                                  self.inference_all_description_feature(class_names=class_names,
                                   gpt_path=self.cfg.DATASET.GPT_PATH,
                                   cls_begin_index=cls_begin_index)
+
+        # One reproducibly sampled description per class.  Form joint
+        # [CLIP(prompt), CLIP(description)] vectors for Flora-style top-k.
+        joint_text_features = []
+        for offset in range(len(class_names)):
+            class_id = int(class_index[offset])
+            matching = torch.where(description_targets == class_id)[0]
+            chosen = sample_description_index(len(matching), self.cfg.SEED, class_id)
+            description = description_features[matching[chosen]].to(text_features.device)
+            joint_text_features.append(torch.cat([
+                F.normalize(text_features[offset], dim=-1),
+                F.normalize(description, dim=-1),
+            ], dim=-1))
+        joint_text_features = torch.stack(joint_text_features, dim=0)
         
         images_features, images_targets, images_proto = \
                                     self.inference_all_img_feature(loader, cls_begin_index)
@@ -188,11 +203,11 @@ class BiMC(nn.Module):
         print('finish loading covariance')
 
         return {
-            'description_proto': description_proto,
             'description_features': description_features,
             'description_targets': description_targets,
 
             'text_features': text_features,
+            'joint_text_features': joint_text_features,
             'text_targets': text_targets,           
   
             'image_proto': images_proto,
@@ -208,7 +223,6 @@ class BiMC(nn.Module):
 
     def forward_ours(self, images, num_cls, num_base_cls,
                            image_proto, cov_image,
-                           description_proto,
                            description_features, description_targets,
                            text_features,
                            beta):
@@ -263,14 +277,10 @@ class BiMC(nn.Module):
         img_feat = self.extract_img_feature(images)
         img_feat = F.normalize(img_feat, dim=-1)
 
-        if self.cfg.TRAINER.BiMC.TEXT_CALIBRATION:
-            lambda_t = self.cfg.TRAINER.BiMC.LAMBDA_T
-        else:
-            lambda_t = 0.0
-
-        # Here we compute the classifier after modality calibration. 
-        # Note that image_proto has already been calibrated in the `build_task_statistics` function.
-        fused_proto = beta * ((1 - lambda_t) * text_features + lambda_t * description_proto) + (1 - beta) * image_proto        
+        # Text prototypes have already undergone Flora-style neighbor calibration
+        # in Runner after merging the currently seen classes.  No BiMC
+        # original prompt/description weighted calibration is applied.
+        fused_proto = beta * text_features + (1 - beta) * image_proto        
         fused_proto = F.normalize(fused_proto, dim=-1)  
         logits_proto_fused = img_feat @ fused_proto.t()
         prob_fused_proto = F.softmax(logits_proto_fused, dim=-1)
