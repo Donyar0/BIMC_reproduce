@@ -369,7 +369,7 @@ class BiMC(nn.Module):
 
         # CLIP-A-self text prototype is computed by Runner and supplied here.
         # Legacy BiMC text interpolation has been replaced entirely.
-        fused_proto = beta * text_features + (1 - beta) * image_proto        
+        fused_proto = beta * text_features.to(dtype=image_proto.dtype) + (1 - beta) * image_proto        
         fused_proto = F.normalize(fused_proto, dim=-1)  
         logits_proto_fused = img_feat @ fused_proto.t()
         prob_fused_proto = F.softmax(logits_proto_fused, dim=-1)
