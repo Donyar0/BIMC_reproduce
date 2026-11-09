@@ -44,6 +44,7 @@ class Runner:
             'description_targets',
             'text_features', 
             'joint_text_features',
+            'joint_text_targets',
             'text_targets',
             'image_proto', 
             'images_features', 
@@ -94,9 +95,10 @@ class Runner:
             state_dict_list.append(current_state_dict)            
             merged_state_dict = self.merge_dicts(state_dict_list)
             # Use all *seen* classes as Flora neighbors, never future classes.
-            # Repeatable single-description samples are cached in task statistics.
+            # All description pairs are retained and pooled per class after calibration.
             merged_state_dict['text_features'] = calibrate_neighbor_features(
                 merged_state_dict['joint_text_features'],
+                pair_labels=merged_state_dict['joint_text_targets'],
                 topk=self.cfg.TRAINER.BiMC.NEIGHBOR_TOPK,
                 tau=self.cfg.TRAINER.BiMC.NEIGHBOR_WEIGHT,
             )
