@@ -7,6 +7,7 @@ from tqdm import tqdm
 from utils.evaluator import AccuracyEvaluator
 from utils.experiment_logger import log_metrics
 from models.bimc import BiMC
+from models.neighbor_semantics import calibrate_neighbor_features
 import numpy as np
 import time
 
@@ -39,10 +40,10 @@ class Runner:
         result = {}
 
         keys_to_merge = [
-            'description_proto', 
             'description_features', 
             'description_targets',
             'text_features', 
+            'joint_text_features',
             'text_targets',
             'image_proto', 
             'images_features', 
@@ -92,6 +93,13 @@ class Runner:
 
             state_dict_list.append(current_state_dict)            
             merged_state_dict = self.merge_dicts(state_dict_list)
+            # Use all *seen* classes as Flora neighbors, never future classes.
+            # Repeatable single-description samples are cached in task statistics.
+            merged_state_dict['text_features'] = calibrate_neighbor_features(
+                merged_state_dict['joint_text_features'],
+                topk=self.cfg.TRAINER.BiMC.NEIGHBOR_TOPK,
+                tau=self.cfg.TRAINER.BiMC.NEIGHBOR_WEIGHT,
+            )
 
             start_time = time.time()
             acc = self.inference_task_covariance(i, merged_state_dict)
@@ -130,7 +138,6 @@ class Runner:
         image_proto = state_dict['image_proto']
         cov_image = state_dict['cov_image']
         text_features = state_dict['text_features']
-        description_proto = state_dict['description_proto']
         description_features = state_dict['description_features']
         description_targets = state_dict['description_targets']
 
@@ -146,7 +153,6 @@ class Runner:
             logits = self.model.forward_ours(data, num_accumulated_class, num_base_class,
                                                    image_proto, 
                                                    cov_image,
-                                                   description_proto,
                                                    description_features, 
                                                    description_targets,
                                                    text_features,
