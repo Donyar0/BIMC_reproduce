@@ -33,6 +33,21 @@ def pack_description_bank(features, labels):
     return packed, mask, classes
 
 
+def mean_description_prototypes(descriptions, valid_mask):
+    """No-training mean of CLIP-encoded, class-conditioned descriptions.
+
+    Unlike an untrained SelfAttentionTextAdapter (even with ratio=0), this
+    applies neither learned projections nor LayerNorm.
+    """
+    if descriptions.ndim != 3 or valid_mask.shape != descriptions.shape[:2]:
+        raise ValueError("Expected descriptions [C, M, D] and mask [C, M]")
+    if not bool(valid_mask.any(dim=1).all()):
+        raise ValueError("Every class must contain at least one description")
+    valid = valid_mask.unsqueeze(-1)
+    pooled = (descriptions.float() * valid).sum(dim=1) / valid.sum(dim=1)
+    return F.normalize(pooled, dim=-1)
+
+
 class SelfAttentionTextAdapter(nn.Module):
     """The one-head, reduced-QKV, residual/LN CLIP-A-self design.
 
