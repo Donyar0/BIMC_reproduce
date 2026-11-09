@@ -99,17 +99,19 @@ class Runner:
 
             state_dict_list.append(current_state_dict)
             merged_state_dict = self.merge_dicts(state_dict_list)
-            # Apply the same frozen learned adapter to all currently seen classes.
-            core_model.text_adapter.eval()
-            with torch.no_grad():
-                adapted_text, class_ids = core_model.vdt_prototypes(
-                    merged_state_dict['vdt_features'],
-                    merged_state_dict['vdt_targets']
-                )
-            expected = torch.arange(len(adapted_text), device=class_ids.device)
-            if not torch.equal(class_ids, expected):
-                raise ValueError("Unexpected class IDs when computing VDT text prototypes")
-            merged_state_dict['text_features'] = adapted_text
+            # The original-BiMC control retains native prompt/description
+            # embeddings; attention/mean branches replace only text_features.
+            if self.cfg.TRAINER.BiMC.VDT_MODE != "original":
+                core_model.text_adapter.eval()
+                with torch.no_grad():
+                    adapted_text, class_ids = core_model.vdt_prototypes(
+                        merged_state_dict['vdt_features'],
+                        merged_state_dict['vdt_targets']
+                    )
+                expected = torch.arange(len(adapted_text), device=class_ids.device)
+                if not torch.equal(class_ids, expected):
+                    raise ValueError("Unexpected class IDs when computing VDT text prototypes")
+                merged_state_dict['text_features'] = adapted_text
 
             start_time = time.time()
             acc = self.inference_task_covariance(i, merged_state_dict)
@@ -120,6 +122,11 @@ class Runner:
             print(f'=> Task [{i}], Acc: {acc["mean_acc"]:.3f}')
             self.acc_list.append(round(acc["mean_acc"], 3))
             self.task_acc_list.append(acc['task_acc'])
+            if i == self.data_manager.num_tasks - 1:
+                print("Final base acc:{:.2f} | Final novel mean acc:{:.2f} | Final harmonic acc:{:.2f}".format(
+                    acc['base_avg_acc'], acc['inc_avg_acc'], acc['harmonic_acc']
+                ))
+
             log_metrics({
                 'task_id': i,
                 'mean_acc': acc['mean_acc'],
