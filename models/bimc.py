@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import models.clip.clip as clip
 import json
-from models.vdt_self_attention import SelfAttentionTextAdapter, pack_description_bank, mean_description_prototypes
+from models.vdt_self_attention import (SelfAttentionTextAdapter, LinearTextAdapter, MLPTextAdapter, pack_description_bank, mean_description_prototypes)
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -45,13 +45,22 @@ class BiMC(nn.Module):
         self.vision_proto = None
         # CLIP-A-self is trained on base images only, then frozen forever.
         dim = int(self.clip_model.text_projection.shape[1])
-        self.text_adapter = SelfAttentionTextAdapter(
-            embed_dim=dim,
-            reduction=cfg.TRAINER.BiMC.VDT_REDUCTION,
-            ratio=cfg.TRAINER.BiMC.VDT_RATIO,
-            dropout=cfg.TRAINER.BiMC.VDT_DROPOUT,
-        ).to(self.device)
+        mode = cfg.TRAINER.BiMC.VDT_MODE
+        adapter_args = dict(embed_dim=dim, ratio=cfg.TRAINER.BiMC.VDT_RATIO,
+                            dropout=cfg.TRAINER.BiMC.VDT_DROPOUT)
+        if mode == "linear":
+            adapter = LinearTextAdapter(**adapter_args)
+        elif mode == "mlp":
+            adapter = MLPTextAdapter(**adapter_args)
+        else:
+            adapter = SelfAttentionTextAdapter(
+                reduction=cfg.TRAINER.BiMC.VDT_REDUCTION, **adapter_args
+            )
+        self.text_adapter = adapter.to(self.device)
         self.text_adapter_trained = False
+        print("VDT_MODE={} | trainable adapter parameters={}".format(
+            mode, sum(p.numel() for p in self.text_adapter.parameters())
+        ))
 
 
     @torch.no_grad()
@@ -177,10 +186,10 @@ class BiMC(nn.Module):
         packed, mask, classes = pack_description_bank(features, labels)
         if self.cfg.TRAINER.BiMC.VDT_MODE == "mean":
             prototypes = mean_description_prototypes(packed, mask)
-        elif self.cfg.TRAINER.BiMC.VDT_MODE == "attention":
+        elif self.cfg.TRAINER.BiMC.VDT_MODE in ("attention", "linear", "mlp"):
             prototypes = self.text_adapter(packed, mask)
         else:
-            raise ValueError("VDT_MODE must be 'mean' or 'attention'")
+            raise ValueError("Unsupported VDT_MODE")
         return prototypes, classes
 
     def train_base_text_adapter(self, base_state):
