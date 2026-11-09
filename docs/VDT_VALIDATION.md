@@ -61,3 +61,58 @@ The final novel metric is a **macro average across incremental tasks** in the la
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+
+## Follow-up: class-group bias, matched adapters, cross-dataset seeds
+
+Run the new follow-up suite **without replacing the historical validation files**:
+
+```bash
+python -m unittest discover -s tests -v
+python scripts/run_vdt_followup.py
+```
+
+Default is **12 independent runs** under `output/vdt_followup/<timestamp>/`:
+- CIFAR100 seed 1, modes `original`, `attention`, `linear`, `mlp` (four runs).
+- CUB200 seeds 2 and 3, `original` vs `attention` (four runs).
+- miniImageNet seeds 2 and 3, `original` vs `attention` (four runs).
+
+The CIFAR adapter study intentionally uses a **single seed initially** to assess whether attention is preferable to supervised feature adaptation. To verify across three seeds, use:
+
+```bash
+python scripts/run_vdt_followup.py --adapter-seeds 1,2,3 --no-transfer
+```
+
+To run just the cross-dataset missing seeds:
+
+```bash
+python scripts/run_vdt_followup.py --no-adapters
+```
+
+To upload logs to SwanLab, append `--swanlab`.
+
+### Controlled comparison and parameter counts
+
+- `original`: original BiMC text/description fusion, no VDT training.
+- `attention`: original CLIP-A-self attention over descriptions; base-only CE.
+- `linear`: same per-description residual ratio, dropout, LayerNorm, masked mean, base-only CE, but with a **single linear mapping**, no description interaction.
+- `mlp`: same training/aggregation but an independent 2-layer MLP per description, no description interaction.
+
+All trainable variants use the same learning rate, weight decay, epochs, frozen CLIP features and base CE objective. For ViT-B/16, reduction=4 (single-head), dimension 512, all three have exactly **263,680 trainable adapter parameters** (`D^2+3D`). The script prints and records the count per run. The baseline `original` constructs but does not train an unused adapter; its count is **not** a parameter-cost claim.
+
+### Bias diagnostics
+
+Each session now logs a `BIAS_METRICS_JSON` record with:
+- `novel_to_base_pct` = 100 * (number of **novel-ground-truth test examples predicted as a base class**) / (number of novel test examples)
+- `base_to_novel_pct` = 100 * (number of **base-ground-truth test examples predicted as a novel class**) / (number of base test examples)
+- Corresponding counts, denominators, and within-group errors.
+
+The base session has no novel examples, so `novel_to_base_pct` is **null**, not zero. Both rates are computed from the exact **final fused logits**, not the base-only training logits; they do not require sample-weighting assumptions.
+
+Output files: `manifest.json`, per-run logs, `results.json`, `runs.csv`, `paired_comparisons.json/csv`, and `aggregate.json`. Reports include Final and task-wise accuracy, base/novel accuracy, confusion rates, parameter counts, and runtime. Across-seed sample standard deviations are reported only if more than one paired seed is present.
+
+### Interpretation
+
+A positive Final Acc difference together with a stable/increased `novel_to_base_pct` may indicate gains come largely from improved base discrimination rather than novel-class generalization. A linear/MLP adapter matching attention suggests that supervised adaptation or LayerNorm/residual mixing is sufficient; attention-specific gains require attention outperforming these controlled baselines.
+
+This suite does not silently tune per-dataset hyperparameters. **No end-to-end GPU results are claimed until the suite is executed on the dataset server.**
