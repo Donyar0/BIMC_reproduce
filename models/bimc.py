@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import models.clip.clip as clip
 import json
+from models.vdt_self_attention import SelfAttentionTextAdapter, pack_description_bank
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -42,6 +43,15 @@ class BiMC(nn.Module):
         self.text_proto = None
         self.description_proto = None
         self.vision_proto = None
+        # CLIP-A-self is trained on base images only, then frozen forever.
+        dim = int(self.clip_model.text_projection.shape[1])
+        self.text_adapter = SelfAttentionTextAdapter(
+            embed_dim=dim,
+            reduction=cfg.TRAINER.BiMC.VDT_REDUCTION,
+            ratio=cfg.TRAINER.BiMC.VDT_RATIO,
+            dropout=cfg.TRAINER.BiMC.VDT_DROPOUT,
+        ).to(self.device)
+        self.text_adapter_trained = False
 
 
     @torch.no_grad()
@@ -127,6 +137,94 @@ class BiMC(nn.Module):
         return description_embeddings, all_targets, mean_embeddings
 
 
+    @torch.no_grad()
+    def inference_vdt_features(self, class_names, gpt_path, cls_begin_index):
+        """Encode name-conditioned descriptions for the CLIP-A-self adapter.
+
+        The original BiMC standalone description features are retained for KNN.
+        A VDT prompt consists of a class prompt followed by a description.
+        """
+        with open(gpt_path, "r") as handle:
+            descriptions_by_name = json.load(handle)
+        descriptions_by_name = {
+            str(k).lower().replace("_", " ").replace("-", " "): v
+            for k, v in descriptions_by_name.items()
+        }
+        all_features, all_labels = [], []
+        for offset, name in enumerate(class_names):
+            normalized_name = str(name).lower().replace("_", " ").replace("-", " ")
+            descriptions = descriptions_by_name[normalized_name]
+            if not descriptions:
+                raise ValueError("No descriptions available for class " + str(name))
+            class_prompt = self.template[0].format(normalized_name)
+            # Each description is already a complete sentence in BiMC's JSON.
+            # The prompt uses text-level concatenation, not feature concatenation.
+            prompts = [class_prompt + " " + str(desc) for desc in descriptions]
+            parts = []
+            for start in range(0, len(prompts), 64):
+                tokens = clip.tokenize(prompts[start:start + 64], truncate=True).to(self.device)
+                encoded = self.clip_model.encode_text(tokens)
+                parts.append(F.normalize(encoded, dim=-1))
+            feature = torch.cat(parts, dim=0)
+            all_features.append(feature)
+            all_labels.append(torch.full(
+                (feature.size(0),), cls_begin_index + offset,
+                dtype=torch.long, device=feature.device
+            ))
+        return torch.cat(all_features, dim=0), torch.cat(all_labels, dim=0)
+
+    def vdt_prototypes(self, features, labels):
+        packed, mask, classes = pack_description_bank(features, labels)
+        prototypes = self.text_adapter(packed, mask)
+        return prototypes, classes
+
+    def train_base_text_adapter(self, base_state):
+        """Train solely on base-session image features and their labels.
+
+        CLIP image/text encoders are frozen. Only attention parameters update.
+        Does not access any incremental class training images or descriptions.
+        """
+        self.text_adapter.train()
+        for param in self.clip_model.parameters():
+            param.requires_grad_(False)
+        optimizer = torch.optim.AdamW(
+            self.text_adapter.parameters(),
+            lr=self.cfg.TRAINER.BiMC.VDT_LR,
+            weight_decay=self.cfg.TRAINER.BiMC.VDT_WEIGHT_DECAY
+        )
+        image_features = F.normalize(base_state['images_features'].detach().float(), dim=-1)
+        targets = base_state['images_targets'].detach().long()
+        packed, mask, classes = pack_description_bank(
+            base_state['vdt_features'].detach(), base_state['vdt_targets']
+        )
+        if not torch.equal(classes, torch.arange(len(classes), device=classes.device)):
+            raise ValueError("Base classes must have contiguous zero-based labels")
+        num_images = image_features.size(0)
+        batch_size = int(self.cfg.TRAINER.BiMC.VDT_BATCH_SIZE)
+        if batch_size < 1:
+            raise ValueError("VDT_BATCH_SIZE must be positive")
+        with torch.enable_grad():
+            for epoch in range(int(self.cfg.TRAINER.BiMC.VDT_EPOCHS)):
+                order = torch.randperm(num_images, device=image_features.device)
+                epoch_loss = 0.0
+                for start in range(0, num_images, batch_size):
+                    idx = order[start:start + batch_size]
+                    optimizer.zero_grad()
+                    class_weights = self.text_adapter(packed, mask)
+                    logits = 100.0 * image_features[idx] @ class_weights.t()
+                    loss = F.cross_entropy(logits, targets[idx])
+                    loss.backward()
+                    optimizer.step()
+                    epoch_loss += loss.detach().item() * idx.numel()
+                print("VDT-Adapter base epoch={}/{} CE={:.6f}".format(
+                    epoch + 1, self.cfg.TRAINER.BiMC.VDT_EPOCHS,
+                    epoch_loss / num_images
+                ))
+        self.text_adapter.eval()
+        for param in self.text_adapter.parameters():
+            param.requires_grad_(False)
+        self.text_adapter_trained = True
+
     def soft_calibration(self, base_protos, cur_protos):
         shift_weight = self.cfg.TRAINER.BiMC.LAMBDA_I
         tau = self.cfg.TRAINER.BiMC.TAU
@@ -166,6 +264,10 @@ class BiMC(nn.Module):
                                   gpt_path=self.cfg.DATASET.GPT_PATH,
                                   cls_begin_index=cls_begin_index)
         
+        vdt_features, vdt_targets = self.inference_vdt_features(
+            class_names, self.cfg.DATASET.GPT_PATH, cls_begin_index
+        )
+
         images_features, images_targets, images_proto = \
                                     self.inference_all_img_feature(loader, cls_begin_index)
 
@@ -189,6 +291,8 @@ class BiMC(nn.Module):
 
         return {
             'description_proto': description_proto,
+            'vdt_features': vdt_features,
+            'vdt_targets': vdt_targets,
             'description_features': description_features,
             'description_targets': description_targets,
 
@@ -263,14 +367,9 @@ class BiMC(nn.Module):
         img_feat = self.extract_img_feature(images)
         img_feat = F.normalize(img_feat, dim=-1)
 
-        if self.cfg.TRAINER.BiMC.TEXT_CALIBRATION:
-            lambda_t = self.cfg.TRAINER.BiMC.LAMBDA_T
-        else:
-            lambda_t = 0.0
-
-        # Here we compute the classifier after modality calibration. 
-        # Note that image_proto has already been calibrated in the `build_task_statistics` function.
-        fused_proto = beta * ((1 - lambda_t) * text_features + lambda_t * description_proto) + (1 - beta) * image_proto        
+        # CLIP-A-self text prototype is computed by Runner and supplied here.
+        # Legacy BiMC text interpolation has been replaced entirely.
+        fused_proto = beta * text_features + (1 - beta) * image_proto        
         fused_proto = F.normalize(fused_proto, dim=-1)  
         logits_proto_fused = img_feat @ fused_proto.t()
         prob_fused_proto = F.softmax(logits_proto_fused, dim=-1)
