@@ -189,10 +189,12 @@ class BiMC(nn.Module):
         CLIP image/text encoders are frozen. Only attention parameters update.
         Does not access any incremental class training images or descriptions.
         """
-        if self.cfg.TRAINER.BiMC.VDT_MODE == "mean":
+        if self.cfg.TRAINER.BiMC.VDT_MODE in ("mean", "original"):
             self.text_adapter.eval()
             self.text_adapter_trained = False
-            print("VDT mode=mean: skip Self-Attention training")
+            print("VDT mode={}: skip Self-Attention training".format(
+                self.cfg.TRAINER.BiMC.VDT_MODE
+            ))
             return
         self.text_adapter.train()
         for param in self.clip_model.parameters():
@@ -274,9 +276,14 @@ class BiMC(nn.Module):
                                   gpt_path=self.cfg.DATASET.GPT_PATH,
                                   cls_begin_index=cls_begin_index)
         
-        vdt_features, vdt_targets = self.inference_vdt_features(
-            class_names, self.cfg.DATASET.GPT_PATH, cls_begin_index
-        )
+        if self.cfg.TRAINER.BiMC.VDT_MODE == "original":
+            # Avoid extra VDT encoding for the genuine original-BiMC control.
+            vdt_features = description_features.new_empty((0, description_features.size(-1)))
+            vdt_targets = description_targets.new_empty((0,))
+        else:
+            vdt_features, vdt_targets = self.inference_vdt_features(
+                class_names, self.cfg.DATASET.GPT_PATH, cls_begin_index
+            )
 
         images_features, images_targets, images_proto = \
                                     self.inference_all_img_feature(loader, cls_begin_index)
@@ -379,7 +386,13 @@ class BiMC(nn.Module):
 
         # CLIP-A-self text prototype is computed by Runner and supplied here.
         # Legacy BiMC text interpolation has been replaced entirely.
-        fused_proto = beta * text_features.to(dtype=image_proto.dtype) + (1 - beta) * image_proto        
+        if self.cfg.TRAINER.BiMC.VDT_MODE == "original":
+            # Exact original BiMC text calibration as an in-branch control.
+            original_t = self.cfg.TRAINER.BiMC.VDT_ORIGINAL_LAMBDA_T
+            calibrated_text = (1 - original_t) * text_features + original_t * description_proto
+        else:
+            calibrated_text = text_features
+        fused_proto = beta * calibrated_text.to(dtype=image_proto.dtype) + (1 - beta) * image_proto        
         fused_proto = F.normalize(fused_proto, dim=-1)  
         logits_proto_fused = img_feat @ fused_proto.t()
         prob_fused_proto = F.softmax(logits_proto_fused, dim=-1)
