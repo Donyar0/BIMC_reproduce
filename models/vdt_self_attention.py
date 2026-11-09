@@ -96,3 +96,64 @@ class SelfAttentionTextAdapter(nn.Module):
         weights = valid_mask.unsqueeze(-1).to(adapted.dtype)
         per_class = (adapted * weights).sum(dim=1) / weights.sum(dim=1)
         return F.normalize(per_class, dim=-1)
+
+
+class LinearTextAdapter(nn.Module):
+    """Parameter-matched non-attention control: per-description D->D projection.
+
+    For reduction=4 attention, this model has exactly the same number of
+    trainable parameters: D^2 + 3D (Linear + bias + LayerNorm).
+    It uses the same residual ratio, dropout, LN and mean pooling.
+    """
+
+    def __init__(self, embed_dim=512, ratio=0.2, dropout=0.1):
+        super().__init__()
+        if not 0.0 <= ratio <= 1.0:
+            raise ValueError("ratio must lie in [0, 1]")
+        self.projection = nn.Linear(embed_dim, embed_dim)
+        self.norm = nn.LayerNorm(embed_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.ratio = ratio
+
+    def forward(self, descriptions, valid_mask):
+        if descriptions.ndim != 3 or valid_mask.shape != descriptions.shape[:2]:
+            raise ValueError("Expected descriptions [C, M, D] and mask [C, M]")
+        if not bool(valid_mask.any(dim=1).all()):
+            raise ValueError("Every class needs at least one description")
+        x = descriptions.to(dtype=self.projection.weight.dtype)
+        out = self.dropout(self.projection(x))
+        y = self.norm(2.0 * (self.ratio * out + (1.0 - self.ratio) * x))
+        mask = valid_mask.unsqueeze(-1).to(y.dtype)
+        return F.normalize((y * mask).sum(1) / mask.sum(1), dim=-1)
+
+
+class MLPTextAdapter(nn.Module):
+    """Parameter-matched MLP control with per-description feature mixing.
+
+    D->D/2 (no bias), GELU, D/2->D (with bias) + LN gives D^2+3D
+    parameters, identical to Linear and attention with reduction=4.
+    It does not mix different descriptions; only attention does that.
+    """
+
+    def __init__(self, embed_dim=512, ratio=0.2, dropout=0.1):
+        super().__init__()
+        if embed_dim % 2:
+            raise ValueError("embed_dim must be even for parameter matching")
+        if not 0.0 <= ratio <= 1.0:
+            raise ValueError("ratio must lie in [0, 1]")
+        self.fc1 = nn.Linear(embed_dim, embed_dim // 2, bias=False)
+        self.fc2 = nn.Linear(embed_dim // 2, embed_dim, bias=True)
+        self.norm = nn.LayerNorm(embed_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.ratio = ratio
+
+    def forward(self, descriptions, valid_mask):
+        if descriptions.ndim != 3 or valid_mask.shape != descriptions.shape[:2]:
+            raise ValueError("Expected descriptions [C, M, D] and mask [C, M]")
+        if not bool(valid_mask.any(dim=1).all()):
+            raise ValueError("Every class needs at least one description")
+        x = descriptions.to(dtype=self.fc1.weight.dtype)
+        out = self.dropout(self.fc2(F.gelu(self.fc1(x))))
+        y = self.norm(2.0 * (self.ratio * out + (1.0 - self.ratio) * x))
+        mask = valid_mask.unsqueeze(-1).to(y.dtype)
+        return F.normalize((y * mask).sum(1) / mask.sum(1), dim=-1)
