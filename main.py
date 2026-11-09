@@ -69,6 +69,7 @@ def extend_cfg(cfg):
     cfg.TRAINER.BiMC.TEXT_CALIBRATION = False
     cfg.TRAINER.BiMC.LAMBDA_T = 0.0
     cfg.TRAINER.BiMC.VDT_MODE = 'attention'
+    cfg.TRAINER.BiMC.VDT_ORIGINAL_LAMBDA_T = 0.5
     cfg.TRAINER.BiMC.VDT_REDUCTION = 4
     cfg.TRAINER.BiMC.VDT_RATIO = 0.2
     cfg.TRAINER.BiMC.VDT_DROPOUT = 0.1
@@ -121,11 +122,32 @@ def main():
     train_cfg = args.train_cfg
 
     cfg = setup_cfg(data_cfg, train_cfg, args.opts)
-    init_swanlab(cfg, args)
 
-    # Set the random seed and GPU ID
-    set_seed(cfg.SEED)
+    # Seed before dataset construction, adapter initialization and random splits.
     set_gpu(cfg.DEVICE.GPU_ID)
+    set_seed(cfg.SEED)
+    import os
+    import json
+    import random
+    import numpy as np
+    import torch
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    if hasattr(torch.backends.cuda.matmul, "allow_tf32"):
+        torch.backends.cuda.matmul.allow_tf32 = False
+    print("EXPERIMENT_CONFIG_JSON:" + json.dumps({
+        "seed": cfg.SEED,
+        "dataset": cfg.DATASET.NAME,
+        "vdt_mode": cfg.TRAINER.BiMC.VDT_MODE,
+        "vdt_ratio": cfg.TRAINER.BiMC.VDT_RATIO,
+        "vdt_epochs": cfg.TRAINER.BiMC.VDT_EPOCHS,
+        "vdt_lr": cfg.TRAINER.BiMC.VDT_LR,
+        "vdt_original_lambda_t": cfg.TRAINER.BiMC.VDT_ORIGINAL_LAMBDA_T,
+        "ensemble": cfg.TRAINER.BiMC.USING_ENSEMBLE,
+        "torch": torch.__version__,
+        "cuda": str(torch.version.cuda),
+    }, sort_keys=True))
+    init_swanlab(cfg, args)
 
     # Import and run the trainer
     from engine.engine import Runner
