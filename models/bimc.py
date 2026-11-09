@@ -41,7 +41,6 @@ class BiMC(nn.Module):
         clip_model.eval()
         self.clip_model = clip_model.to(self.device)
         self.text_proto = None
-        self.description_proto = None
         self.vision_proto = None
 
 
@@ -100,7 +99,6 @@ class BiMC(nn.Module):
     @torch.no_grad()
     def inference_all_description_feature(self, class_names, gpt_path, cls_begin_index):
         description_embeddings = []
-        mean_embeddings = []
         all_targets = []
         file = open(gpt_path, "r")
         GPT_prompt_dict = json.load(file)
@@ -118,14 +116,11 @@ class BiMC(nn.Module):
             with torch.no_grad():
                 text_features = self.clip_model.encode_text(x_tokenized.cuda())
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-            mean_embeddings.append(text_features.mean(0).unsqueeze(0))
             description_embeddings.append(text_features)
             all_targets.append(targets)
         description_embeddings = torch.cat(description_embeddings, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
-        mean_embeddings = torch.cat(mean_embeddings, dim=0)
-        mean_embeddings = F.normalize(mean_embeddings, dim=-1)
-        return description_embeddings, all_targets, mean_embeddings
+        return description_embeddings, all_targets
 
 
     def soft_calibration(self, base_protos, cur_protos):
@@ -162,7 +157,7 @@ class BiMC(nn.Module):
 
         text_features, text_targets = self.inference_text_feature(class_names, self.template, cls_begin_index)
 
-        description_features, description_targets, _ = \
+        description_features, description_targets = \
                                   self.inference_all_description_feature(class_names=class_names,
                                   gpt_path=self.cfg.DATASET.GPT_PATH,
                                   cls_begin_index=cls_begin_index)
