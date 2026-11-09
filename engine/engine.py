@@ -9,6 +9,7 @@ from utils.experiment_logger import log_metrics
 from models.bimc import BiMC
 import numpy as np
 import time
+import json
 
 
 class Runner:
@@ -32,6 +33,7 @@ class Runner:
 
         self.acc_list = []
         self.task_acc_list = []
+        self.bias_history = []
         self.evaluator = AccuracyEvaluator(self.data_manager.class_index_in_task)
 
 
@@ -122,6 +124,8 @@ class Runner:
             print(f'=> Task [{i}], Acc: {acc["mean_acc"]:.3f}')
             self.acc_list.append(round(acc["mean_acc"], 3))
             self.task_acc_list.append(acc['task_acc'])
+            self.bias_history.append(acc['bias'])
+            print("BIAS_METRICS_JSON:" + json.dumps({"session": i, **acc['bias']}, sort_keys=True))
             if i == self.data_manager.num_tasks - 1:
                 print("Final base acc:{:.2f} | Final novel mean acc:{:.2f} | Final harmonic acc:{:.2f}".format(
                     acc['base_avg_acc'], acc['inc_avg_acc'], acc['harmonic_acc']
@@ -137,6 +141,7 @@ class Runner:
             }, step=i)
 
         print(f'Final acc:{self.acc_list}')
+        print('FINAL_BIAS_JSON:' + json.dumps(self.bias_history[-1], sort_keys=True))
         print('Task-wise acc:')
         for i, task_acc in enumerate(self.task_acc_list):
             print(f'task {i:2d}, acc:{task_acc}')
@@ -183,7 +188,8 @@ class Runner:
         all_logits = torch.cat(all_logits, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
 
-        eval_acc = self.evaluator.calc_accuracy(all_logits, all_targets, task_id) 
+        eval_acc = self.evaluator.calc_accuracy(all_logits, all_targets, task_id)
+        eval_acc['bias'] = self.evaluator.calc_base_novel_bias(all_logits, all_targets, task_id) 
         print(f"Test acc mean: {eval_acc['mean_acc']}, task-wise acc: {eval_acc['task_acc']}")
         return eval_acc
     
