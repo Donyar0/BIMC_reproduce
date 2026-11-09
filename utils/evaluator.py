@@ -49,6 +49,45 @@ class AccuracyEvaluator:
                 'inc_avg_acc': round(inc_avg_acc, 2)}
 
 
+    def calc_base_novel_bias(self, logits, targets, task_id):
+        """Class-group confusion rates (%) without changing predictions.
+
+        Novel -> Base: P(predicted base | true novel)
+        Base -> Novel: P(predicted novel | true base)
+        Also report within-group and cross-group mistake counts.
+        At session zero, novel-related rates are None (not zero).
+        """
+        base_ids = np.asarray(self.class_index_per_task[0], dtype=np.int64)
+        if isinstance(logits, torch.Tensor):
+            predictions = logits.argmax(dim=1).detach().cpu().numpy()
+        else:
+            predictions = np.asarray(logits).argmax(axis=1)
+        if isinstance(targets, torch.Tensor):
+            targets = targets.detach().cpu().numpy()
+        targets = np.asarray(targets)
+        if targets.shape[0] != predictions.shape[0]:
+            raise ValueError("Predictions and targets must have equal length")
+        base_true = np.isin(targets, base_ids)
+        base_pred = np.isin(predictions, base_ids)
+        novel_true = ~base_true
+        base_n = int(base_true.sum())
+        novel_n = int(novel_true.sum())
+        base_to_novel = int((base_true & ~base_pred).sum())
+        novel_to_base = int((novel_true & base_pred).sum())
+        base_wrong_within = int((base_true & base_pred & (targets != predictions)).sum())
+        novel_wrong_within = int((novel_true & ~base_pred & (targets != predictions)).sum())
+        return {
+            "num_base_test": base_n,
+            "num_novel_test": novel_n,
+            "base_to_novel_count": base_to_novel,
+            "novel_to_base_count": novel_to_base,
+            "base_to_novel_pct": round(100.0 * base_to_novel / base_n, 4) if base_n else None,
+            "novel_to_base_pct": round(100.0 * novel_to_base / novel_n, 4) if novel_n else None,
+            "base_wrong_within_count": base_wrong_within,
+            "novel_wrong_within_count": novel_wrong_within,
+        }
+
+
     def _count_right_pred_num(self, logits, targets):
         pred = np.argmax(logits, axis=1)
         return np.sum(pred == targets)
