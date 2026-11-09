@@ -26,8 +26,17 @@ TRAINER:
     LAMBDA_I: 0.1 
     TAU: 16        
 
-    TEXT_CALIBRATION: True
-    LAMBDA_T: 0.5
+    # Original BiMC text calibration is replaced by CLIP-A-self.
+    TEXT_CALIBRATION: False
+    LAMBDA_T: 0.0
+
+    VDT_REDUCTION: 4
+    VDT_RATIO: 0.2
+    VDT_DROPOUT: 0.1
+    VDT_EPOCHS: 20
+    VDT_BATCH_SIZE: 256
+    VDT_LR: 0.0001
+    VDT_WEIGHT_DECAY: 0.0001
 
     GAMMA_BASE: 1.0
     GAMMA_INC: 5.0
