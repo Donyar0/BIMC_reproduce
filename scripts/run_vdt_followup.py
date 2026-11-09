@@ -20,6 +20,10 @@ import subprocess
 import sys
 import time
 
+# Include repository root when invoked directly as a script.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 from scripts.validate_vdt_fscil import DATASETS, git_info, file_sha256, parse_result
 
 BIAS_RE = re.compile(r"BIAS_METRICS_JSON:(\{[^\r\n]*\})")
