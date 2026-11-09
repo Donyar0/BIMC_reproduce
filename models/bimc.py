@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import models.clip.clip as clip
 import json
-from models.neighbor_semantics import sample_description_index
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -162,20 +161,27 @@ class BiMC(nn.Module):
                                   gpt_path=self.cfg.DATASET.GPT_PATH,
                                   cls_begin_index=cls_begin_index)
 
-        # One reproducibly sampled description per class.  Form joint
-        # [CLIP(prompt), CLIP(description)] vectors for Flora-style top-k.
+        # Keep every category+description pair (not one random description).
+        # Each class prompt is repeated to pair with ALL class descriptions.
         joint_text_features = []
+        joint_text_targets = []
         for offset in range(len(class_names)):
             class_id = int(class_index[offset])
             matching = torch.where(description_targets == class_id)[0]
-            chosen = sample_description_index(len(matching), self.cfg.SEED, class_id)
-            description = description_features[matching[chosen]].to(text_features.device)
-            joint_text_features.append(torch.cat([
-                F.normalize(text_features[offset], dim=-1),
-                F.normalize(description, dim=-1),
-            ], dim=-1))
-        joint_text_features = torch.stack(joint_text_features, dim=0)
-        
+            if matching.numel() == 0:
+                raise ValueError(f"No descriptions for class {class_id}")
+            prompt = F.normalize(text_features[offset], dim=-1)
+            descriptions = F.normalize(
+                description_features[matching].to(text_features.device), dim=-1
+            )
+            repeated_prompt = prompt.unsqueeze(0).expand(len(matching), -1)
+            joint_text_features.append(torch.cat([repeated_prompt, descriptions], dim=-1))
+            joint_text_targets.append(
+                torch.full((len(matching),), class_id, dtype=torch.long, device=text_features.device)
+            )
+        joint_text_features = torch.cat(joint_text_features, dim=0)
+        joint_text_targets = torch.cat(joint_text_targets, dim=0)
+
         images_features, images_targets, images_proto = \
                                     self.inference_all_img_feature(loader, cls_begin_index)
 
@@ -203,6 +209,7 @@ class BiMC(nn.Module):
 
             'text_features': text_features,
             'joint_text_features': joint_text_features,
+            'joint_text_targets': joint_text_targets,
             'text_targets': text_targets,           
   
             'image_proto': images_proto,
