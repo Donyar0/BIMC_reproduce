@@ -68,6 +68,7 @@ def extend_cfg(cfg):
     # The original TEXT_CALIBRATION/LAMBDA_T are unused for this method.
     cfg.TRAINER.BiMC.TEXT_CALIBRATION = False
     cfg.TRAINER.BiMC.LAMBDA_T = 0.0
+    cfg.TRAINER.BiMC.VDT_MODE = 'attention'
     cfg.TRAINER.BiMC.VDT_REDUCTION = 4
     cfg.TRAINER.BiMC.VDT_RATIO = 0.2
     cfg.TRAINER.BiMC.VDT_DROPOUT = 0.1
@@ -83,7 +84,7 @@ def extend_cfg(cfg):
 
     
 
-def setup_cfg(dataset_cfg_file, method_cfg_file):
+def setup_cfg(dataset_cfg_file, method_cfg_file, overrides=None):
     cfg = CN()
     extend_cfg(cfg)
 
@@ -92,6 +93,9 @@ def setup_cfg(dataset_cfg_file, method_cfg_file):
 
     # 2. From the method config file
     cfg.merge_from_file(method_cfg_file)
+
+    if overrides:
+        cfg.merge_from_list(overrides)
 
     cfg.freeze()
     return cfg
@@ -109,12 +113,14 @@ def main():
     parser.add_argument('--swanlab_mode', type=str, default='online', choices=['online', 'offline', 'local', 'disabled'],
                         help="SwanLab running mode")
 
+    parser.add_argument('--opts', nargs='*', default=[], help='YACS KEY VALUE overrides, e.g. TRAINER.BiMC.VDT_RATIO 0.1')
+
     args = parser.parse_args()
 
     data_cfg = args.data_cfg
     train_cfg = args.train_cfg
 
-    cfg = setup_cfg(data_cfg, train_cfg)
+    cfg = setup_cfg(data_cfg, train_cfg, args.opts)
     init_swanlab(cfg, args)
 
     # Set the random seed and GPU ID
