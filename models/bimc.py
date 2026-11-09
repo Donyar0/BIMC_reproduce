@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import models.clip.clip as clip
 import json
-from models.vdt_self_attention import SelfAttentionTextAdapter, pack_description_bank
+from models.vdt_self_attention import SelfAttentionTextAdapter, pack_description_bank, mean_description_prototypes
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -175,7 +175,12 @@ class BiMC(nn.Module):
 
     def vdt_prototypes(self, features, labels):
         packed, mask, classes = pack_description_bank(features, labels)
-        prototypes = self.text_adapter(packed, mask)
+        if self.cfg.TRAINER.BiMC.VDT_MODE == "mean":
+            prototypes = mean_description_prototypes(packed, mask)
+        elif self.cfg.TRAINER.BiMC.VDT_MODE == "attention":
+            prototypes = self.text_adapter(packed, mask)
+        else:
+            raise ValueError("VDT_MODE must be 'mean' or 'attention'")
         return prototypes, classes
 
     def train_base_text_adapter(self, base_state):
@@ -184,6 +189,11 @@ class BiMC(nn.Module):
         CLIP image/text encoders are frozen. Only attention parameters update.
         Does not access any incremental class training images or descriptions.
         """
+        if self.cfg.TRAINER.BiMC.VDT_MODE == "mean":
+            self.text_adapter.eval()
+            self.text_adapter_trained = False
+            print("VDT mode=mean: skip Self-Attention training")
+            return
         self.text_adapter.train()
         for param in self.clip_model.parameters():
             param.requires_grad_(False)
