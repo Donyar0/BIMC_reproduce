@@ -65,8 +65,16 @@ def extend_cfg(cfg):
     cfg.TRAINER.BiMC.VISION_CALIBRATION = False
     cfg.TRAINER.BiMC.LAMBDA_I = -1.0
     cfg.TRAINER.BiMC.TAU = -1
+    # The original TEXT_CALIBRATION/LAMBDA_T are unused for this method.
     cfg.TRAINER.BiMC.TEXT_CALIBRATION = False
-    cfg.TRAINER.BiMC.LAMBDA_T = -1.0
+    cfg.TRAINER.BiMC.LAMBDA_T = 0.0
+    cfg.TRAINER.BiMC.VDT_REDUCTION = 4
+    cfg.TRAINER.BiMC.VDT_RATIO = 0.2
+    cfg.TRAINER.BiMC.VDT_DROPOUT = 0.1
+    cfg.TRAINER.BiMC.VDT_EPOCHS = 20
+    cfg.TRAINER.BiMC.VDT_BATCH_SIZE = 256
+    cfg.TRAINER.BiMC.VDT_LR = 0.0001
+    cfg.TRAINER.BiMC.VDT_WEIGHT_DECAY = 0.0001
     cfg.TRAINER.BiMC.GAMMA_BASE = -1.0
     cfg.TRAINER.BiMC.GAMMA_INC = -1.0
     cfg.TRAINER.BiMC.USING_ENSEMBLE = False
