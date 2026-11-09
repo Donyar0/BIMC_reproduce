@@ -41,6 +41,8 @@ class Runner:
         keys_to_merge = [
             'description_proto', 
             'description_features', 
+            'vdt_features',
+            'vdt_targets',
             'description_targets',
             'text_features', 
             'text_targets',
@@ -90,8 +92,24 @@ class Runner:
                                                              class_index=self.data_manager.class_index_in_task[i], 
                                                              calibrate_novel_vision_proto=self.cfg.TRAINER.BiMC.VISION_CALIBRATION,)
 
-            state_dict_list.append(current_state_dict)            
+            # Train attention once on session-0 images, before moving to later sessions.
+            core_model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+            if i == 0:
+                core_model.train_base_text_adapter(current_state_dict)
+
+            state_dict_list.append(current_state_dict)
             merged_state_dict = self.merge_dicts(state_dict_list)
+            # Apply the same frozen learned adapter to all currently seen classes.
+            core_model.text_adapter.eval()
+            with torch.no_grad():
+                adapted_text, class_ids = core_model.vdt_prototypes(
+                    merged_state_dict['vdt_features'],
+                    merged_state_dict['vdt_targets']
+                )
+            expected = torch.arange(len(adapted_text), device=class_ids.device)
+            if not torch.equal(class_ids, expected):
+                raise ValueError("Unexpected class IDs when computing VDT text prototypes")
+            merged_state_dict['text_features'] = adapted_text
 
             start_time = time.time()
             acc = self.inference_task_covariance(i, merged_state_dict)
