@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import models.clip.clip as clip
 import json
-from models.vdt_self_attention import (SelfAttentionTextAdapter, LinearTextAdapter, MLPTextAdapter, pack_description_bank, mean_description_prototypes)
+from models.vdt_self_attention import (SelfAttentionTextAdapter, LinearTextAdapter, MLPTextAdapter, pack_description_bank, mean_description_prototypes, visual_weighted_description_prototypes)
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -192,13 +192,28 @@ class BiMC(nn.Module):
             raise ValueError("Unsupported VDT_MODE")
         return prototypes, classes
 
+    def vdt_visual_weighted_prototypes(self, features, labels, support_prototypes):
+        """Use only the session's training/support visual prototypes as weights."""
+        packed, mask, classes = pack_description_bank(features, labels)
+        if support_prototypes.shape[0] != len(classes):
+            raise ValueError("Support prototypes must cover seen classes in ID order")
+        expected = torch.arange(len(classes), device=classes.device)
+        if not torch.equal(classes, expected):
+            raise ValueError("Support prototypes require sorted contiguous class IDs")
+        output, weights = visual_weighted_description_prototypes(
+            packed, mask, support_prototypes,
+            temperature=self.cfg.TRAINER.BiMC.VDT_VISUAL_TEMP,
+            blend=self.cfg.TRAINER.BiMC.VDT_VISUAL_BLEND,
+        )
+        return output, classes, weights
+
     def train_base_text_adapter(self, base_state):
         """Train solely on base-session image features and their labels.
 
         CLIP image/text encoders are frozen. Only attention parameters update.
         Does not access any incremental class training images or descriptions.
         """
-        if self.cfg.TRAINER.BiMC.VDT_MODE in ("mean", "original"):
+        if self.cfg.TRAINER.BiMC.VDT_MODE in ("mean", "original", "visual_weighted"):
             self.text_adapter.eval()
             self.text_adapter_trained = False
             print("VDT mode={}: skip Self-Attention training".format(
