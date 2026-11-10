@@ -281,6 +281,12 @@ class BiMC(nn.Module):
             raise ValueError("Base classes must have contiguous zero-based labels")
         num_images = image_features.size(0)
         objective = str(self.cfg.TRAINER.BiMC.VDT_TRAIN_OBJECTIVE)
+        if objective == "fusion_ce" and self.visual_adapter is not None:
+            raise ValueError(
+                "fusion_ce + visual attention requires an attention-aware "
+                "leave-one-out positive prototype; run the three-arm "
+                "comparison with --objective text_ce"
+            )
         beta = float(self.cfg.DATASET.BETA)
         if objective == "fusion_ce":
             visual = base_state["image_proto"].detach().float()
