@@ -9,6 +9,7 @@ from torch.nn import functional as F
 from models.vdt_visual import (
     VisionSelfAttentionAdapter, sample_disjoint_visual_episode,
     train_visual_aggregator, aggregate_visual_classes,
+    visual_episode_logits,
 )
 
 
@@ -121,6 +122,75 @@ class TestVisualAdapter(unittest.TestCase):
         self.assertEqual(out_new.dtype, torch.float16)
         self.assertEqual(tuple(out_new.shape), (1, 8))
         self.assertTrue(torch.isfinite(out_new).all())
+
+    def test_visual_fusion_logits_match_bimc_classifier(self):
+        queries = F.normalize(torch.randn(6, 8), dim=-1)
+        visual = F.normalize(torch.randn(3, 8), dim=-1).requires_grad_(True)
+        # Original BiMC prompt+description mixture is NOT normalized
+        # before final fusion. This test deliberately leaves it raw.
+        original_text = torch.randn(3, 8).requires_grad_(True)
+        beta = .3
+        logits = visual_episode_logits(
+            queries, visual, objective="fusion_ce",
+            text_prototypes=original_text, beta=beta
+        )
+        reference = 100. * queries @ F.normalize(
+            beta * original_text.detach() + (1. - beta) * visual,
+            dim=-1,
+        ).t()
+        torch.testing.assert_close(logits, reference, atol=1e-5, rtol=1e-5)
+        loss = F.cross_entropy(logits, torch.tensor([0, 1, 2, 0, 1, 2]))
+        loss.backward()
+        self.assertIsNotNone(visual.grad)
+        self.assertGreater(visual.grad.abs().sum().item(), 0.)
+        self.assertIsNone(original_text.grad)
+
+    def test_visual_pure_logits_match_previous_ce(self):
+        queries = F.normalize(torch.randn(4, 8), dim=-1)
+        visual = F.normalize(torch.randn(3, 8), dim=-1)
+        actual = visual_episode_logits(
+            queries, visual, objective="visual_ce"
+        )
+        torch.testing.assert_close(actual, 100. * queries @ visual.t(),
+                                   atol=1e-5, rtol=1e-5)
+
+    def test_fusion_episodes_train_only_visual_adapter(self):
+        adapter = VisionSelfAttentionAdapter(
+            embed_dim=8, reduction=2, dropout=0.
+        )
+        text = F.normalize(torch.randn(6, 8), dim=-1).requires_grad_(True)
+        params_before = [p.detach().clone() for p in adapter.parameters()]
+        with contextlib.redirect_stdout(io.StringIO()), torch.no_grad():
+            losses = train_visual_aggregator(
+                adapter, self.images, self.labels, 6,
+                epochs=2, steps_per_epoch=2,
+                support_per_class=5, query_per_class=4, lr=1e-3,
+                weight_decay=0., seed=3, objective="fusion_ce",
+                text_prototypes=text, beta=.3,
+            )
+        self.assertEqual(len(losses), 2)
+        self.assertTrue(all(torch.isfinite(torch.tensor(losses))))
+        self.assertIsNone(text.grad)
+        self.assertTrue(any(not torch.equal(a, b) for a, b
+                            in zip(params_before, adapter.parameters())))
+        self.assertFalse(adapter.training)
+        self.assertTrue(all(not p.requires_grad for p in adapter.parameters()))
+
+    def test_fusion_rejects_missing_or_invalid_inputs(self):
+        q = self.images[:6]
+        v = F.normalize(torch.randn(6, 8), dim=-1)
+        with self.assertRaises(ValueError):
+            visual_episode_logits(q, v, objective="fusion_ce", beta=.3)
+        with self.assertRaises(ValueError):
+            visual_episode_logits(q, v, objective="fusion_ce",
+                                  text_prototypes=torch.randn(6, 8), beta=-.5)
+        with self.assertRaises(ValueError):
+            train_visual_aggregator(
+                VisionSelfAttentionAdapter(embed_dim=8, reduction=2),
+                self.images, self.labels, 6, epochs=1, steps_per_epoch=1,
+                objective="fusion_ce", text_prototypes=torch.randn(5, 8),
+                beta=.3,
+            )
 
     def test_rejects_underfilled_support_query_split(self):
         with self.assertRaises(ValueError):
