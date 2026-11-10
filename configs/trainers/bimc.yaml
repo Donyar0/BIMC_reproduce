@@ -26,11 +26,10 @@ TRAINER:
     LAMBDA_I: 0.1 
     TAU: 16        
 
-    # Original BiMC text calibration is replaced by CLIP-A-self.
+    # Base-session Linear Adapter calibrates text prototypes; original is an opt-in control.
     TEXT_CALIBRATION: False
     LAMBDA_T: 0.0
 
-    VDT_REDUCTION: 4
     VDT_RATIO: 0.2
     VDT_DROPOUT: 0.1
     VDT_EPOCHS: 20
