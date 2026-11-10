@@ -260,7 +260,7 @@ class BiMC(nn.Module):
         images = F.normalize(current_state["images_features"].detach().float(), dim=-1)
         labels = current_state["images_targets"].detach().long()
         current_ids = torch.as_tensor(current_state["class_index"], device=labels.device)
-        if images.numel() == 0 or not torch.isin(labels, current_ids).all():
+        if images.numel() == 0 or not (labels[:, None] == current_ids[None, :]).any(dim=1).all():
             raise ValueError("Incremental training images must be from the new session")
         if labels.min() < 0 or labels.max() >= len(classes):
             raise ValueError("Incremental labels do not match seen class classifier")
