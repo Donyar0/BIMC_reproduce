@@ -5,6 +5,7 @@ from datasets.data_manager import DatasetManager
 from torch.nn import functional as F
 from tqdm import tqdm
 from utils.evaluator import AccuracyEvaluator
+from utils.finegrained_diagnostics import summarize_class_confusions
 from utils.experiment_logger import log_metrics
 from models.bimc import BiMC
 import numpy as np
@@ -195,7 +196,17 @@ class Runner:
         all_targets = torch.cat(all_targets, dim=0)
 
         eval_acc = self.evaluator.calc_accuracy(all_logits, all_targets, task_id)
-        eval_acc['bias'] = self.evaluator.calc_base_novel_bias(all_logits, all_targets, task_id) 
+        eval_acc['bias'] = self.evaluator.calc_base_novel_bias(all_logits, all_targets, task_id)
+        # Only the final CUB200 session needs the full 200-way confusion
+        # diagnostic; no test labels are used in any training path.
+        if (self.cfg.DATASET.NAME.lower() == "cub200" and
+                task_id == self.data_manager.num_tasks - 1):
+            diagnostics = summarize_class_confusions(
+                all_logits, all_targets, self.data_manager.class_names,
+                self.data_manager.class_index_in_task[0], top_k=30
+            )
+            print("FINEGRAINED_DIAGNOSTICS_JSON:" + json.dumps(diagnostics, ensure_ascii=False))
+ 
         print(f"Test acc mean: {eval_acc['mean_acc']}, task-wise acc: {eval_acc['task_acc']}")
         return eval_acc
     
