@@ -86,6 +86,42 @@ class TestVisualAdapter(unittest.TestCase):
         )
         self.assertEqual(tuple(five_shot.shape), (1, 8))
 
+    def test_bimc_visual_prototype_preserves_fp16_and_base_reference(self):
+        # Integration smoke without downloading or constructing any CLIP weights.
+        from types import SimpleNamespace
+        from models.bimc import BiMC
+        model = BiMC.__new__(BiMC)
+        torch.nn.Module.__init__(model)
+        model.cfg = SimpleNamespace(TRAINER=SimpleNamespace(BiMC=SimpleNamespace(
+            VDT_VISUAL_MAX_SUPPORT=0,
+            VISION_CALIBRATION=True, LAMBDA_I=0.1, TAU=16,
+        )))
+        model.visual_adapter = VisionSelfAttentionAdapter(
+            embed_dim=8, reduction=2, dropout=0.
+        ).eval()
+        model.visual_adapter_trained = True
+        for p in model.visual_adapter.parameters():
+            p.requires_grad_(False)
+        base = {
+            "images_features": self.images.half(),
+            "images_targets": self.labels,
+            "image_proto": torch.zeros(6, 8, dtype=torch.float16),
+            "class_index": list(range(6)),
+        }
+        new = {
+            "images_features": F.normalize(torch.randn(5, 8), dim=-1).half(),
+            "images_targets": torch.full((5,), 6, dtype=torch.long),
+            "image_proto": torch.zeros(1, 8, dtype=torch.float16),
+            "class_index": [6],
+        }
+        out_base = model.vdt_visual_prototypes(base, task_id=0)
+        self.assertEqual(out_base.dtype, torch.float16)
+        self.assertEqual(model.base_vision_prototype.dtype, torch.float32)
+        out_new = model.vdt_visual_prototypes(new, task_id=1)
+        self.assertEqual(out_new.dtype, torch.float16)
+        self.assertEqual(tuple(out_new.shape), (1, 8))
+        self.assertTrue(torch.isfinite(out_new).all())
+
     def test_rejects_underfilled_support_query_split(self):
         with self.assertRaises(ValueError):
             sample_disjoint_visual_episode(
