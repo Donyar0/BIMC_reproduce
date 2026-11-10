@@ -311,6 +311,9 @@ class BiMC(nn.Module):
 
         images_features, images_targets, images_proto = \
                                     self.inference_all_img_feature(loader, cls_begin_index)
+        # Uncalibrated support-only visual prototypes for description selection
+        # and diagnostic image/text cosine. Never built from test images.
+        support_proto = images_proto.clone()
 
         if cls_begin_index != 0:
             if calibrate_novel_vision_proto:
@@ -341,6 +344,7 @@ class BiMC(nn.Module):
             'text_targets': text_targets,           
   
             'image_proto': images_proto,
+            'support_proto': support_proto,
             'images_features': images_features,
             'images_targets': images_targets,
             'cov_image': cov_images,
