@@ -43,7 +43,7 @@ class BiMC(nn.Module):
         self.text_proto = None
         self.description_proto = None
         self.vision_proto = None
-        # Base-session supervised text calibration; frozen afterwards.
+        # Base-session supervised text calibration; optional per-session 5-shot updates.
         mode = cfg.TRAINER.BiMC.VDT_MODE
         if mode not in ("linear", "original"):
             raise ValueError("VDT_MODE must be 'linear' or 'original'")
@@ -243,12 +243,14 @@ class BiMC(nn.Module):
         Trainable Linear Adapter is refrozen before evaluation.
         """
         epochs = int(self.cfg.TRAINER.BiMC.VDT_INC_EPOCHS)
-        if self.text_adapter is None or task_id == 0 or epochs <= 0:
+        if epochs < 0:
+            raise ValueError("Incremental epochs cannot be negative")
+        if self.text_adapter is None or task_id == 0 or epochs == 0:
             return
         if not self.text_adapter_trained:
             raise RuntimeError("Train base adapter before incremental fine-tuning")
         lr = float(self.cfg.TRAINER.BiMC.VDT_INC_LR)
-        if lr <= 0 or epochs < 0:
+        if lr <= 0:
             raise ValueError("Incremental learning rate must be positive")
         packed, mask, classes = pack_description_bank(
             merged_state["vdt_features"].detach(),
