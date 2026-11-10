@@ -127,3 +127,68 @@ few-shot updating will help. Updating a globally shared adapter with
 only new-class CE may drift older text prototypes and harm base-class
 accuracy. Compare Base/Novel/Final accuracies against the frozen
 control before trying any replay or regularization.
+
+
+## 2026-11-10: Inference-aligned training objective ablation
+
+**Motivation:** the old `text_ce` trains on image-versus-text-only
+scores, but the actual BiMC inference classifies using
+`normalize(beta * adapted_text + (1-beta) * support_visual)`.
+For CUB200 beta=0.30 (visual weight=0.70), while CIFAR100 and
+miniImageNet have beta=0.65. Consequently, the training and prediction
+objectives can be substantially different, especially on CUB200.
+This is a hypothesis, *not* evidence that CE necessarily caused the
+poor CUB200 results.
+
+Keep the same frozen CLIP, Linear Adapter, prompt+description encoding,
+BiMC fusion and default Ensemble=False. Only change the **base training
+loss**, controlled by the new `VDT_TRAIN_OBJECTIVE` flag:
+
+* `text_ce` (default): existing CE over image-to-text-only logits.
+* `fusion_ce`: CE over the same L2-normalized text+visual fused
+  classifier used at inference, scaled by 100. Visual prototypes
+  are calculated **only from training/support images**.
+
+To avoid a self-match shortcut in training, the **positive** class
+visual prototype for each training query is calculated with the current
+training image removed (leave-one-out, or LOO). Negative-class visual
+prototypes remain unchanged. For the optional real incremental phase,
+the 4-shot LOO support prototype is also BiMC-calibrated with the frozen
+base visual prototypes before forming the positive fused classifier.
+Only the current session's 5-shot images enter incremental CE;
+historical image features are *not* replayed. No query/test images
+are accessed during adapter optimization.
+
+Suggested **two runs only** on CUB200 Seed 1:
+
+```bash
+git pull origin feature/bimc-vdt-self-attention
+python -m unittest tests.test_vdt_objective -v
+python -m unittest tests.test_vdt_linear -v
+
+# Old loss -- base-only text CE, no incremental updates.
+python scripts/run_linear_baseline.py --dataset cub200 --seed 1 --objective text_ce
+
+# New loss -- change only the base objective.
+python scripts/run_linear_baseline.py --dataset cub200 --seed 1 --objective fusion_ce
+```
+
+The default remains `text_ce`; existing command invocations are
+unchanged. Do NOT compare `fusion_ce` with results using different
+beta, seeds or ensemble settings.
+
+To separately test optional incremental-session loss, use
+`--inc-epochs 3 --inc-lr 1e-5 --inc-objective fusion_ce`.
+Keep incremental updates **off** for the first A/B evaluation to
+isolate the base training objective.
+
+The run manifest stores both `base_objective` and
+`incremental_objective`. The base stage prints
+`VDT_BASE_OBJECTIVE_JSON`; per-session incremental logs retain
+old/new text prototype drift diagnostics.
+
+**Interpretation:** improvement in CUB200 base accuracy alone does
+not establish fine-grained FSCIL transfer. Evaluate final accuracy,
+new-class mean, and novel-to-novel confusions. Since the fusion loss
+also trains on visual class prototypes, consider whether its advantage
+carries over to unseen classes in future multi-seed runs.
