@@ -3,9 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import models.clip.clip as clip
 import json
-from models.vdt_self_attention import (SelfAttentionTextAdapter, LinearTextAdapter, MLPTextAdapter, pack_description_bank, mean_description_prototypes, visual_weighted_description_prototypes)
-from models.vdt_contrastive import contrastive_description_prototypes, description_weight_diagnostics
-from models.vdt_pseudo_validation import select_base_only_contrastive_strength
+from models.vdt_linear import LinearTextAdapter, pack_description_bank
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -45,27 +43,23 @@ class BiMC(nn.Module):
         self.text_proto = None
         self.description_proto = None
         self.vision_proto = None
-        # CLIP-A-self is trained on base images only, then frozen forever.
-        dim = int(self.clip_model.text_projection.shape[1])
+        # Base-session supervised text calibration; frozen afterwards.
         mode = cfg.TRAINER.BiMC.VDT_MODE
-        adapter_args = dict(embed_dim=dim, ratio=cfg.TRAINER.BiMC.VDT_RATIO,
-                            dropout=cfg.TRAINER.BiMC.VDT_DROPOUT)
-        if mode == "linear":
-            adapter = LinearTextAdapter(**adapter_args)
-        elif mode == "mlp":
-            adapter = MLPTextAdapter(**adapter_args)
-        else:
-            adapter = SelfAttentionTextAdapter(
-                reduction=cfg.TRAINER.BiMC.VDT_REDUCTION, **adapter_args
-            )
-        self.text_adapter = adapter.to(self.device)
+        if mode not in ("linear", "original"):
+            raise ValueError("VDT_MODE must be 'linear' or 'original'")
+        self.text_adapter = None
         self.text_adapter_trained = False
-        # Initialize for fixed mode; base-train pseudo-CV may overwrite it.
-        self.contrastive_strength = float(cfg.TRAINER.BiMC.VDT_NEGATIVE_STRENGTH)
-        self.cv_report = None
-        print("VDT_MODE={} | trainable adapter parameters={}".format(
-            mode, sum(p.numel() for p in self.text_adapter.parameters())
-        ))
+        if mode == "linear":
+            dim = int(self.clip_model.text_projection.shape[1])
+            self.text_adapter = LinearTextAdapter(
+                embed_dim=dim, ratio=cfg.TRAINER.BiMC.VDT_RATIO,
+                dropout=cfg.TRAINER.BiMC.VDT_DROPOUT
+            ).to(self.device)
+            print("VDT_MODE=linear | trainable adapter parameters={}".format(
+                sum(p.numel() for p in self.text_adapter.parameters())
+            ))
+        else:
+            print("VDT_MODE=original | trainable adapter parameters=0")
 
 
     @torch.no_grad()
@@ -188,81 +182,15 @@ class BiMC(nn.Module):
         return torch.cat(all_features, dim=0), torch.cat(all_labels, dim=0)
 
     def vdt_prototypes(self, features, labels):
+        if self.text_adapter is None:
+            raise RuntimeError("Text calibration is only available in linear mode")
         packed, mask, classes = pack_description_bank(features, labels)
-        if self.cfg.TRAINER.BiMC.VDT_MODE == "mean":
-            prototypes = mean_description_prototypes(packed, mask)
-        elif self.cfg.TRAINER.BiMC.VDT_MODE in ("attention", "linear", "mlp"):
-            prototypes = self.text_adapter(packed, mask)
-        else:
-            raise ValueError("Unsupported VDT_MODE")
-        return prototypes, classes
-
-    def vdt_visual_weighted_prototypes(self, features, labels, support_prototypes):
-        """Use only the session's training/support visual prototypes as weights."""
-        packed, mask, classes = pack_description_bank(features, labels)
-        if support_prototypes.shape[0] != len(classes):
-            raise ValueError("Support prototypes must cover seen classes in ID order")
-        expected = torch.arange(len(classes), device=classes.device)
-        if not torch.equal(classes, expected):
-            raise ValueError("Support prototypes require sorted contiguous class IDs")
-        output, weights = visual_weighted_description_prototypes(
-            packed, mask, support_prototypes,
-            temperature=self.cfg.TRAINER.BiMC.VDT_VISUAL_TEMP,
-            blend=self.cfg.TRAINER.BiMC.VDT_VISUAL_BLEND,
-        )
-        return output, classes, weights
-
-    @torch.no_grad()
-    def vdt_contrastive_prototypes(self, features, labels, support_prototypes):
-        packed, mask, classes = pack_description_bank(features, labels)
-        expected = torch.arange(len(classes), device=classes.device)
-        if not torch.equal(classes, expected):
-            raise ValueError("Contrastive VDT needs contiguous seen-class IDs")
-        if len(classes) != support_prototypes.size(0):
-            raise ValueError("Class IDs and support prototypes do not match")
-        output, weights, _ = contrastive_description_prototypes(
-            packed, mask, support_prototypes,
-            temperature=self.cfg.TRAINER.BiMC.VDT_VISUAL_TEMP,
-            blend=self.cfg.TRAINER.BiMC.VDT_VISUAL_BLEND,
-            negative_strength=self.contrastive_strength,
-        )
-        return output, classes, weights
-
-    @torch.no_grad()
-    def select_contrastive_strength(self, base_state):
-        if self.cfg.TRAINER.BiMC.VDT_MODE != "contrastive_cv":
-            return
-        raw = self.cfg.TRAINER.BiMC.VDT_CV_CANDIDATES
-        if not isinstance(raw, (list, tuple)) or not raw:
-            raise ValueError("VDT_CV_CANDIDATES must be nonempty")
-        self.contrastive_strength, self.cv_report = select_base_only_contrastive_strength(
-            base_state=base_state,
-            beta=float(self.cfg.DATASET.BETA),
-            shift_weight=float(self.cfg.TRAINER.BiMC.LAMBDA_I) if
-                         self.cfg.TRAINER.BiMC.VISION_CALIBRATION else 0.0,
-            tau=float(self.cfg.TRAINER.BiMC.TAU),
-            seed=int(self.cfg.SEED),
-            candidates=raw,
-            episodes=int(self.cfg.TRAINER.BiMC.VDT_CV_EPISODES),
-            query_per_class=int(self.cfg.TRAINER.BiMC.VDT_CV_QUERIES),
-            novel_shots=int(self.cfg.DATASET.NUM_INC_SHOT),
-            temperature=float(self.cfg.TRAINER.BiMC.VDT_VISUAL_TEMP),
-            blend=float(self.cfg.TRAINER.BiMC.VDT_VISUAL_BLEND),
-        )
-        print("VDT_PSEUDO_CV_JSON:" + json.dumps(self.cv_report, sort_keys=True))
+        return self.text_adapter(packed, mask), classes
 
     def train_base_text_adapter(self, base_state):
-        """Train solely on base-session image features and their labels.
-
-        CLIP image/text encoders are frozen. Only attention parameters update.
-        Does not access any incremental class training images or descriptions.
-        """
-        if self.cfg.TRAINER.BiMC.VDT_MODE in ("mean", "original", "visual_weighted", "contrastive_fixed", "contrastive_cv"):
-            self.text_adapter.eval()
-            self.text_adapter_trained = False
-            print("VDT mode={}: skip Self-Attention training".format(
-                self.cfg.TRAINER.BiMC.VDT_MODE
-            ))
+        """Train linear adapter on base-session images only; freeze in FSCIL."""
+        if self.text_adapter is None:
+            print("VDT_MODE=original: no text adapter to train")
             return
         self.text_adapter.train()
         for param in self.clip_model.parameters():
@@ -355,9 +283,6 @@ class BiMC(nn.Module):
 
         images_features, images_targets, images_proto = \
                                     self.inference_all_img_feature(loader, cls_begin_index)
-        # Uncalibrated support-only visual prototypes for description selection
-        # and diagnostic image/text cosine. Never built from test images.
-        support_proto = images_proto.clone()
 
         if cls_begin_index != 0:
             if calibrate_novel_vision_proto:
@@ -388,7 +313,6 @@ class BiMC(nn.Module):
             'text_targets': text_targets,           
   
             'image_proto': images_proto,
-            'support_proto': support_proto,
             'images_features': images_features,
             'images_targets': images_targets,
             'cov_image': cov_images,
