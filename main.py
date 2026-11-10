@@ -73,6 +73,9 @@ def extend_cfg(cfg):
     cfg.TRAINER.BiMC.VDT_RATIO = 0.2
     cfg.TRAINER.BiMC.VDT_DROPOUT = 0.1
     cfg.TRAINER.BiMC.VDT_EPOCHS = 20
+    # Original classifier CE or actual BiMC fused-prototype CE.
+    cfg.TRAINER.BiMC.VDT_TRAIN_OBJECTIVE = 'text_ce'
+    cfg.TRAINER.BiMC.VDT_INC_OBJECTIVE = 'text_ce'
     # Optional incremental-session five-shot CE updates (0 = frozen baseline).
     cfg.TRAINER.BiMC.VDT_INC_EPOCHS = 0
     cfg.TRAINER.BiMC.VDT_INC_LR = 0.00001
@@ -143,6 +146,8 @@ def main():
         "vdt_mode": cfg.TRAINER.BiMC.VDT_MODE,
         "vdt_ratio": cfg.TRAINER.BiMC.VDT_RATIO,
         "vdt_epochs": cfg.TRAINER.BiMC.VDT_EPOCHS,
+        "vdt_train_objective": cfg.TRAINER.BiMC.VDT_TRAIN_OBJECTIVE,
+        "vdt_inc_objective": cfg.TRAINER.BiMC.VDT_INC_OBJECTIVE,
         "vdt_inc_epochs": cfg.TRAINER.BiMC.VDT_INC_EPOCHS,
         "vdt_inc_lr": cfg.TRAINER.BiMC.VDT_INC_LR,
         "vdt_lr": cfg.TRAINER.BiMC.VDT_LR,
