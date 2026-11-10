@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Contrastive description selection vs visual-only and learned adapters.
 
-Defaults: CUB200 seeds 1,2,3 and CIFAR100/miniImageNet seed 1, with
-original/mean/attention/visual_weighted/contrastive_fixed/contrastive_cv.
-30 isolated paired runs, no tuning on real FSCIL test data.
+Default: CUB200 seed 1 with contrastive_fixed only (one run).
+Use --datasets, --cub-seeds and --modes to expand the study as needed.
+No tuning on real FSCIL test data.
 """
 import argparse
 import json
@@ -34,11 +34,17 @@ def plan_from_args(args):
     datasets = [d.strip().lower() for d in args.datasets.split(",") if d.strip()]
     if not datasets or any(d not in DATASETS for d in datasets):
         raise ValueError("Unknown or empty datasets list")
+    requested_modes = [x.strip().lower() for x in getattr(args, "modes", "contrastive_fixed").split(",") if x.strip()]
+    if not requested_modes or len(requested_modes) != len(set(requested_modes)):
+        raise ValueError("Specify one or more unique modes")
+    unknown_modes = set(requested_modes) - set(MODES)
+    if unknown_modes:
+        raise ValueError("Unknown modes: " + ", ".join(sorted(unknown_modes)))
     plan = []
     for dataset in datasets:
         seeds = args.cub_seeds if dataset == "cub200" else args.other_seeds
         for seed in seeds:
-            for mode in MODES:
+            for mode in requested_modes:
                 plan.append((dataset, seed, mode))
     return plan
 
@@ -230,8 +236,10 @@ def run(args):
 
 def main():
     p=argparse.ArgumentParser(description="Contrastive VDT + base-only pseudo-incremental validation")
-    p.add_argument("--datasets",default="cub200,cifar100,miniimagenet")
-    p.add_argument("--cub-seeds",type=parse_seeds,default=[1,2,3])
+    p.add_argument("--datasets",default="cub200")
+    p.add_argument("--modes",default="contrastive_fixed",
+                   help="Comma-separated subset of: "+",".join(MODES))
+    p.add_argument("--cub-seeds",type=parse_seeds,default=[1])
     p.add_argument("--other-seeds",type=parse_seeds,default=[1])
     p.add_argument("--temp",type=float,default=10.0)
     p.add_argument("--blend",type=float,default=0.5)
