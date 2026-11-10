@@ -343,3 +343,38 @@ hyperparameters are held identical.
 **No new accuracy claims** are justified until the GPU runs complete.
 A gain on a single CUB seed alone is not sufficient evidence of improved
 fine-grained transfer.
+
+
+### Minimal rerun after fixed-mode initialization bug
+
+The previous 30-run batch already completed 25 runs, but all five
+`contrastive_fixed` runs failed because the class did not initialize
+`self.contrastive_strength`. That attribute is now initialized in
+`models/bimc.py`. **Avoid rerunning the successful arms.**
+
+The default command now launches exactly **ONE** experiment (CUB200,
+seed 1, `contrastive_fixed`):
+
+```bash
+python -m unittest tests.test_vdt_contrastive -v
+python scripts/run_vdt_contrastive.py
+```
+
+If that runs correctly, complete only the other missing fixed-mode
+seeds/datasets:
+
+```bash
+python scripts/run_vdt_contrastive.py --cub-seeds 2,3
+python scripts/run_vdt_contrastive.py --datasets cifar100,miniimagenet --other-seeds 1
+```
+
+The latter are **two** experiments, not a six-way rerun. Note that one
+batch's `paired_comparisons.csv` will be empty when it contains only
+the fixed mode and no same-batch original baseline; compare its
+`results.json` against the already measured, same-seed original
+results from the preceding archive.
+
+To opt into a direct paired comparison within one output folder, pass
+`--modes original,contrastive_fixed` (2 runs). A full six-arm run is
+available only when explicitly requested with
+`--modes original,mean,attention,visual_weighted,contrastive_fixed,contrastive_cv`.
