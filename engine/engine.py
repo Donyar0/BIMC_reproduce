@@ -6,6 +6,8 @@ from torch.nn import functional as F
 from tqdm import tqdm
 from utils.evaluator import AccuracyEvaluator
 from utils.finegrained_diagnostics import summarize_class_confusions
+from utils.prototype_geometry import prototype_geometry
+from models.vdt_self_attention import pack_description_bank, mean_description_prototypes
 from utils.experiment_logger import log_metrics
 from models.bimc import BiMC
 import numpy as np
@@ -49,7 +51,8 @@ class Runner:
             'description_targets',
             'text_features', 
             'text_targets',
-            'image_proto', 
+            'image_proto',
+            'support_proto',
             'images_features', 
             'images_targets'
         ]
@@ -104,17 +107,43 @@ class Runner:
             merged_state_dict = self.merge_dicts(state_dict_list)
             # The original-BiMC control retains native prompt/description
             # embeddings; attention/mean branches replace only text_features.
-            if self.cfg.TRAINER.BiMC.VDT_MODE != "original":
+            mode = self.cfg.TRAINER.BiMC.VDT_MODE
+            if mode != "original":
                 core_model.text_adapter.eval()
                 with torch.no_grad():
-                    adapted_text, class_ids = core_model.vdt_prototypes(
-                        merged_state_dict['vdt_features'],
-                        merged_state_dict['vdt_targets']
-                    )
+                    if mode == "visual_weighted":
+                        adapted_text, class_ids, _ = core_model.vdt_visual_weighted_prototypes(
+                            merged_state_dict['vdt_features'],
+                            merged_state_dict['vdt_targets'],
+                            merged_state_dict['support_proto'],
+                        )
+                    else:
+                        adapted_text, class_ids = core_model.vdt_prototypes(
+                            merged_state_dict['vdt_features'],
+                            merged_state_dict['vdt_targets']
+                        )
                 expected = torch.arange(len(adapted_text), device=class_ids.device)
                 if not torch.equal(class_ids, expected):
                     raise ValueError("Unexpected class IDs when computing VDT text prototypes")
                 merged_state_dict['text_features'] = adapted_text
+
+                # Geometry is diagnostic only: compute at the final session
+                # from frozen text descriptions and training/support prototypes.
+                if (i == self.data_manager.num_tasks - 1 and
+                        self.cfg.DATASET.NAME.lower() == "cub200"):
+                    packed, valid, ids = pack_description_bank(
+                        merged_state_dict['vdt_features'],
+                        merged_state_dict['vdt_targets']
+                    )
+                    raw_desc_mean = mean_description_prototypes(packed, valid)
+                    geometry = prototype_geometry(
+                        raw_desc_mean, adapted_text,
+                        merged_state_dict['support_proto'],
+                        self.data_manager.class_names,
+                        len(self.data_manager.class_index_in_task[0]),
+                        top_k=40,
+                    )
+                    print("VDT_GEOMETRY_JSON:" + json.dumps(geometry, ensure_ascii=False))
 
             start_time = time.time()
             acc = self.inference_task_covariance(i, merged_state_dict)
