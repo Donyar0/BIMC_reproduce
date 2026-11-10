@@ -115,7 +115,11 @@ prototypes with the updated weights, and evaluate.
 
 Each incremental session prints `VDT-Adapter incremental task=... CE=...`
 and `VDT_INCREMENTAL_UPDATE_JSON` with new image count, seen-class
-count, LR, epochs and parameter delta norm. The original Final Acc,
+count, LR, epochs, parameter delta norm, and the mean cosine similarity
+of **old/new text prototypes before vs. after** each update.
+`result.json` stores these in `metrics.incremental_updates`; 0 updates
+in the frozen run is expected. Smaller old-prototype cosine indicates
+more drift. This metric does not, by itself, prove forgetting. The original Final Acc,
 Task-wise Acc and base/novel bias summaries stay unchanged.
 
 This is an intentionally minimal ablation, **not** a claim that
