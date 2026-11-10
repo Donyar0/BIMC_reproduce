@@ -157,22 +157,32 @@ def train_visual_aggregator(adapter, features, targets, num_classes,
 
 
 @torch.no_grad()
-def aggregate_visual_classes(adapter, features, targets, class_ids):
+def aggregate_visual_classes(adapter, features, targets, class_ids,
+                             max_support=0):
     """Aggregate every class's available training/support images, no sampling.
 
     One class at a time bounds attention memory when CIFAR base classes have
-    ~500 training images. New classes typically have exactly five.
+    ~500 training images. By default max_support=0 uses ALL images. A positive
+    cap uses deterministic evenly spaced indices within each class, without
+    touching test data. New classes typically have exactly five.
     """
     if features.ndim != 2 or targets.ndim != 1:
         raise ValueError("Expected features [N,D] and labels [N]")
     if not isinstance(class_ids,torch.Tensor):
         class_ids = torch.as_tensor(class_ids,device=targets.device)
+    if max_support < 0:
+        raise ValueError("max_support cannot be negative")
     adapter.eval()
     prototypes=[]
     for cid in class_ids.tolist():
         selected = features[targets == cid]
         if selected.shape[0] == 0:
             raise ValueError("No support image for class " + str(cid))
+        if max_support and len(selected) > max_support:
+            indices = torch.linspace(
+                0, len(selected) - 1, max_support, device=selected.device
+            ).round().long()
+            selected = selected[indices]
         tokens = F.normalize(selected.float(),dim=-1).unsqueeze(0)
         valid = torch.ones(tokens.shape[:2],dtype=torch.bool,device=tokens.device)
         prototypes.append(adapter(tokens,valid)[0])
