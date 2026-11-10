@@ -5,8 +5,10 @@ Examples:
   python scripts/run_linear_baseline.py
   python scripts/run_linear_baseline.py --dataset cub200 --seed 1
   python scripts/run_linear_baseline.py --dataset miniimagenet --seed 1
-  python scripts/run_linear_baseline.py --mode original  # paired baseline
-No visual description weighting, attention or pseudo-validation.
+  python scripts/run_linear_baseline.py --ablation visual
+  python scripts/run_linear_baseline.py --ablation both
+  python scripts/run_linear_baseline.py --ablation original
+One process per run, no automatic hyperparameter sweep.
 """
 import argparse
 import ast
@@ -65,6 +67,7 @@ def provenance():
             return None
 
     paths = ["main.py", "models/bimc.py", "models/vdt_linear.py",
+             "models/vdt_visual.py", "models/vdt_objective.py",
              "engine/engine.py", "scripts/run_linear_baseline.py"]
     digest = {
         path: hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
@@ -76,11 +79,25 @@ def provenance():
 
 
 def run(args):
+    # Three requested ablations plus genuine original-BiMC baseline.
+    # --mode is retained only for backward compatibility.
+    ablation = args.ablation
+    if args.mode == "original" and ablation == "text":
+        ablation = "original"
+    elif args.mode == "original" and ablation != "original":
+        raise ValueError("--mode original conflicts with --ablation")
+    use_text = ablation in ("text", "both")
+    use_visual = ablation in ("visual", "both")
+    text_mode = "linear" if use_text else "original"
+    if use_visual and args.inc_epochs:
+        raise ValueError("Both Adapters are frozen after base training in the visual ablations")
+    if args.visual_epochs < 1 or args.visual_steps < 1 or args.visual_max_support < 0:
+        raise ValueError("Invalid visual Adapter epochs/steps/support cap")
     if args.inc_epochs < 0 or args.inc_lr <= 0:
         raise ValueError("Incremental epochs must be nonnegative and LR positive")
-    if args.mode == "original" and args.objective != "text_ce":
+    if not use_text and args.objective != "text_ce":
         raise ValueError("Original BiMC does not train a text Adapter")
-    if args.mode == "original" and args.inc_epochs > 0:
+    if not use_text and args.inc_epochs > 0:
         raise ValueError("Incremental updates require --mode linear")
     train_cfg = ROOT / "configs/trainers/bimc.yaml"
     dataset_cfg = ROOT / DATASETS[args.dataset]
@@ -93,15 +110,23 @@ def run(args):
     cmd = [
         sys.executable, "main.py", "--data_cfg", DATASETS[args.dataset],
         "--train_cfg", "configs/trainers/bimc.yaml",
-        "--opts", "SEED", str(args.seed), "TRAINER.BiMC.VDT_MODE", args.mode,
+        "--opts", "SEED", str(args.seed), "TRAINER.BiMC.VDT_MODE", text_mode,
+        "TRAINER.BiMC.VDT_USE_VISUAL_ADAPTER", str(use_visual),
+        "TRAINER.BiMC.VDT_VISUAL_EPOCHS", str(args.visual_epochs),
+        "TRAINER.BiMC.VDT_VISUAL_STEPS", str(args.visual_steps),
+        "TRAINER.BiMC.VDT_VISUAL_MAX_SUPPORT", str(args.visual_max_support),
         "TRAINER.BiMC.VDT_INC_EPOCHS", str(args.inc_epochs),
         "TRAINER.BiMC.VDT_INC_LR", str(args.inc_lr),
         "TRAINER.BiMC.VDT_TRAIN_OBJECTIVE", args.objective,
         "TRAINER.BiMC.VDT_INC_OBJECTIVE", args.inc_objective,
     ]
     manifest = {
-        "dataset": args.dataset, "seed": args.seed, "mode": args.mode,
+        "dataset": args.dataset, "seed": args.seed, "mode": text_mode,
+        "ablation": ablation, "text_adapter_enabled": use_text,
+        "visual_adapter_enabled": use_visual,
         "incremental_epochs": args.inc_epochs, "incremental_lr": args.inc_lr,
+        "visual_epochs": args.visual_epochs, "visual_steps": args.visual_steps,
+        "visual_max_support": args.visual_max_support,
         "base_objective": args.objective, "incremental_objective": args.inc_objective,
         "config_sha256": {
             str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -142,6 +167,14 @@ def main():
     p.add_argument("--dataset", choices=sorted(DATASETS), default="cifar100")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--mode", choices=("linear", "original"), default="linear")
+    p.add_argument("--ablation", choices=("text", "visual", "both", "original"),
+                   default="text", help="Text-only, visual-only, both, or original BiMC")
+    p.add_argument("--visual-epochs", type=int, default=20,
+                   help="Base-only visual Adapter episodic training epochs")
+    p.add_argument("--visual-steps", type=int, default=5,
+                   help="Disjoint support/query episodes per base training epoch")
+    p.add_argument("--visual-max-support", type=int, default=0,
+                   help="0 means use all class training images when aggregating")
     p.add_argument("--objective", choices=("text_ce", "fusion_ce"),
                    default="text_ce", help="Base-session adapter loss; default reproduces old CE")
     p.add_argument("--inc-objective", choices=("text_ce", "fusion_ce"),
