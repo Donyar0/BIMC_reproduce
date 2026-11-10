@@ -11,6 +11,7 @@ import csv
 from datetime import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import statistics
@@ -53,10 +54,35 @@ def git_info(root):
     def git(*args):
         result = subprocess.run(["git", *args], cwd=root, text=True, capture_output=True)
         return result.stdout.strip() if result.returncode == 0 else ""
+    info_file = root / ".git_info.json"
+    metadata = {}
+    if info_file.is_file():
+        try:
+            metadata = json.loads(info_file.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            metadata = {}
+    commit = (git("rev-parse", "HEAD") or
+              os.environ.get("VDT_GIT_COMMIT") or
+              os.environ.get("GIT_COMMIT") or
+              os.environ.get("GITHUB_SHA") or
+              metadata.get("commit") or metadata.get("sha"))
+    branch = (git("branch", "--show-current") or
+              os.environ.get("VDT_GIT_BRANCH") or
+              metadata.get("branch"))
+    # A source digest remains meaningful when code is copied without .git.
+    source_paths = ["main.py", "models/bimc.py",
+                    "models/vdt_contrastive.py",
+                    "models/vdt_pseudo_validation.py",
+                    "models/vdt_self_attention.py", "engine/engine.py"]
+    source_hashes = {name: file_sha256(root / name)
+                     for name in source_paths if (root / name).is_file()}
     return {
-        "branch": git("branch", "--show-current"),
-        "commit": git("rev-parse", "HEAD"),
-        "dirty": bool(git("status", "--porcelain")),
+        "branch": branch or None,
+        "commit": commit or None,
+        "commit_verified_with_git": bool(git("rev-parse", "HEAD")),
+        "git_metadata_missing": not bool(commit),
+        "dirty": bool(git("status", "--porcelain")) if (root/".git").exists() else None,
+        "source_sha256": source_hashes,
     }
 
 
