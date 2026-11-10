@@ -365,3 +365,48 @@ combined with the visual Adapter: text-side leave-one-out correction
 assumes visual mean prototypes, not attention aggregation.
 The new flag `--visual-objective fusion_ce` is separate, and supports
 both `--ablation visual` and `--ablation both`.
+
+
+## Novel visual prototype calibration: on versus off
+
+Controlled test for whether BiMC's **second-stage base visual prototype
+soft-calibration** helps or hurts newly learned visual Self-Attention
+prototypes. The visual adapter is still base-trained and frozen for
+each FSCIL incremental session; the original BiMC text/fusion logits,
+base visual reference, class splits, and training objectives are
+unchanged.
+
+* Default `VDT_VISUAL_NOVEL_CALIBRATION=True`: for every new class,
+  `A_v(new_class_5shot) -> BiMC soft_calibration(adapted_base_prototypes)`.
+* Off `VDT_VISUAL_NOVEL_CALIBRATION=False`: for every new class,
+  `A_v(new_class_5shot)` **only**; no base visual reference mixing.
+* Base prototypes are unchanged and remain cached. Earlier incremental
+  classes remain frozen after first construction. This toggle applies
+  **only** when a visual Adapter is enabled; original BiMC mean-prototype
+  calibration behavior is unaffected.
+
+```bash
+git fetch github
+git switch feature/bimc-vdt-self-attention
+git pull --ff-only github feature/bimc-vdt-self-attention
+python -m unittest tests.test_vdt_visual -v
+
+# Two-run paired CUB200 seed1 comparison (visual only, visual_ce)
+python scripts/run_novel_visual_calibration_ablation.py --dataset cub200 --seed 1
+
+# Or one run at a time:
+python scripts/run_linear_baseline.py --dataset cub200 --seed 1 \
+  --ablation visual --visual-objective visual_ce
+python scripts/run_linear_baseline.py --dataset cub200 --seed 1 \
+  --ablation visual --visual-objective visual_ce \
+  --no-novel-visual-calibration
+
+# Optional, dual-Adapter comparison:
+python scripts/run_novel_visual_calibration_ablation.py \
+  --dataset cub200 --seed 1 --ablation both
+```
+
+The paired script writes `output/novel_visual_calibration_ablation/<timestamp>/summary.csv`
+and JSON, plus per-run logs and standard `result.json`. Compare Final,
+Base, NovelTaskMean, and novel-to-novel confusions. The only intended
+experimental difference is new-class visual soft calibration.
