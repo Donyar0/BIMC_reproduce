@@ -75,6 +75,74 @@ class TestCleanLinear(unittest.TestCase):
                         trainer == "bimc_ensemble",
                     )
 
+    def test_incremental_updates_only_when_enabled(self):
+        from types import SimpleNamespace
+        from models.bimc import BiMC
+        torch.manual_seed(7)
+        cfg = SimpleNamespace(
+            TRAINER=SimpleNamespace(
+                BiMC=SimpleNamespace(
+                    VDT_INC_EPOCHS=2,
+                    VDT_INC_LR=1e-3,
+                    VDT_WEIGHT_DECAY=0.,
+                    VDT_BATCH_SIZE=10,
+                )
+            )
+        )
+        # Construct just the torch module without loading any CLIP weights.
+        model = BiMC.__new__(BiMC)
+        torch.nn.Module.__init__(model)
+        model.cfg = cfg
+        model.text_adapter = LinearTextAdapter(embed_dim=8, ratio=.2, dropout=0.)
+        model.text_adapter_trained = True
+        for p in model.text_adapter.parameters():
+            p.requires_grad_(False)
+        features = torch.nn.functional.normalize(torch.randn(6, 8), dim=-1)
+        labels = torch.tensor([0, 0, 1, 1, 2, 2])
+        state = {
+            "images_features": features[4:],
+            "images_targets": labels[4:],
+            "class_index": [2],
+        }
+        merged = {
+            "vdt_features": features,
+            "vdt_targets": labels,
+        }
+        before = [p.detach().clone() for p in model.text_adapter.parameters()]
+        with torch.no_grad():  # Runner.run is itself @torch.no_grad().
+            model.train_incremental_text_adapter(state, merged, task_id=1)
+        self.assertTrue(any(
+            not torch.equal(a, b) for a, b in
+            zip(before, model.text_adapter.parameters())
+        ))
+        self.assertTrue(all(not p.requires_grad for p in model.text_adapter.parameters()))
+        self.assertFalse(model.text_adapter.training)
+
+        after = [p.detach().clone() for p in model.text_adapter.parameters()]
+        cfg.TRAINER.BiMC.VDT_INC_EPOCHS = 0
+        model.train_incremental_text_adapter(state, merged, task_id=2)
+        self.assertTrue(all(torch.equal(a, b) for a, b in
+                            zip(after, model.text_adapter.parameters())))
+
+    def test_incremental_rejects_old_class_images(self):
+        from types import SimpleNamespace
+        from models.bimc import BiMC
+        model = BiMC.__new__(BiMC)
+        torch.nn.Module.__init__(model)
+        model.cfg = SimpleNamespace(TRAINER=SimpleNamespace(BiMC=SimpleNamespace(
+            VDT_INC_EPOCHS=1, VDT_INC_LR=1e-4,
+            VDT_WEIGHT_DECAY=0., VDT_BATCH_SIZE=10
+        )))
+        model.text_adapter = LinearTextAdapter(embed_dim=8)
+        model.text_adapter_trained = True
+        state = {"images_features": torch.randn(2, 8),
+                 "images_targets": torch.tensor([0, 2]),
+                 "class_index": [2]}
+        merged = {"vdt_features": torch.randn(3, 8),
+                  "vdt_targets": torch.tensor([0, 1, 2])}
+        with self.assertRaises(ValueError):
+            model.train_incremental_text_adapter(state, merged, task_id=1)
+
     def test_result_parser(self):
         log="BIAS_METRICS_JSON:{\"session\":0}\nFinal acc:[80.0,75.0]\nTask-wise acc:\ntask  0, acc:[80.0]\ntask  1, acc:[78.0,50.0]\n"
         parsed=parse_run(log)
