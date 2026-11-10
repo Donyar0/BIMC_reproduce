@@ -28,6 +28,7 @@ DATASETS = {
 FINAL = re.compile(r"Final acc:\s*(\[[^\r\n]*\])")
 TASK = re.compile(r"task\s+\d+,\s+acc:\s*(\[[^\r\n]*\])")
 BIAS = re.compile(r"BIAS_METRICS_JSON:(\{[^\r\n]*\})")
+INC_UPDATE = re.compile(r"VDT_INCREMENTAL_UPDATE_JSON:(\{[^\r\n]*\})")
 
 
 def parse_run(log):
@@ -40,6 +41,7 @@ def parse_run(log):
     if len(tasks) != len(final_acc) or not final_acc:
         return None
     bias = [json.loads(a) for a in BIAS.findall(log)]
+    incremental_updates = [json.loads(a) for a in INC_UPDATE.findall(log)]
     return {
         "final_acc": final_acc, "task_wise_acc": tasks,
         "last_acc": final_acc[-1],
@@ -49,6 +51,7 @@ def parse_run(log):
             sum(tasks[-1][1:]) / len(tasks[-1][1:]) if len(tasks[-1]) > 1 else None
         ),
         "bias_by_session": bias,
+        "incremental_updates": incremental_updates,
     }
 
 
