@@ -101,6 +101,8 @@ class TestContrastiveVDT(unittest.TestCase):
     def test_runner_modes_and_log_parsing(self):
         self.assertEqual(len(MODES),6)
         a=Namespace(datasets="cub200",cub_seeds=[1],other_seeds=[1])
+        self.assertEqual(plan_from_args(a),[("cub200",1,"contrastive_fixed")])
+        a.modes=",".join(MODES)
         self.assertEqual(len(plan_from_args(a)),6)
         obj={"selected_strength":.5}
         self.assertEqual(parse_named_json("VDT_PSEUDO_CV_JSON:"+json.dumps(obj)+"\n",CV_RE),obj)
