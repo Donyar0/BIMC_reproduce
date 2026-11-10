@@ -89,6 +89,8 @@ def run(args):
     use_text = ablation in ("text", "both")
     use_visual = ablation in ("visual", "both")
     text_mode = "linear" if use_text else "original"
+    if args.no_novel_visual_calibration and not use_visual:
+        raise ValueError("--no-novel-visual-calibration requires --ablation visual or both")
     if args.visual_objective == "fusion_ce" and not use_visual:
         raise ValueError("--visual-objective fusion_ce requires a visual Adapter")
     if use_visual and args.objective != "text_ce":
@@ -122,6 +124,7 @@ def run(args):
         "TRAINER.BiMC.VDT_VISUAL_EPOCHS", str(args.visual_epochs),
         "TRAINER.BiMC.VDT_VISUAL_STEPS", str(args.visual_steps),
         "TRAINER.BiMC.VDT_VISUAL_OBJECTIVE", args.visual_objective,
+        "TRAINER.BiMC.VDT_VISUAL_NOVEL_CALIBRATION", str(not args.no_novel_visual_calibration),
         "TRAINER.BiMC.VDT_VISUAL_MAX_SUPPORT", str(args.visual_max_support),
         "TRAINER.BiMC.VDT_INC_EPOCHS", str(args.inc_epochs),
         "TRAINER.BiMC.VDT_INC_LR", str(args.inc_lr),
@@ -137,6 +140,7 @@ def run(args):
         "visual_epochs": args.visual_epochs, "visual_steps": args.visual_steps,
         "visual_objective": args.visual_objective,
         "visual_max_support": args.visual_max_support,
+        "novel_visual_calibration": not args.no_novel_visual_calibration,
         "base_objective": args.objective, "incremental_objective": args.inc_objective,
         "config_sha256": {
             str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -166,6 +170,7 @@ def run(args):
         "ablation": ablation,
         "text_adapter_enabled": use_text,
         "visual_adapter_enabled": use_visual,
+        "novel_visual_calibration": not args.no_novel_visual_calibration,
         "incremental_epochs": args.inc_epochs, "incremental_lr": args.inc_lr,
         "metrics": metrics
     }
@@ -184,6 +189,8 @@ def main():
                    default="text", help="Text-only, visual-only, both, or original BiMC")
     p.add_argument("--visual-epochs", type=int, default=20,
                    help="Base-only visual Adapter episodic training epochs")
+    p.add_argument("--no-novel-visual-calibration", action="store_true",
+                   help="Disable BiMC second-stage base-prototype calibration of new visual Adapter prototypes")
     p.add_argument("--visual-objective", choices=("visual_ce", "fusion_ce"),
                    default="visual_ce",
                    help="Visual Adapter episodic loss: pure visual or BiMC fused CE")
