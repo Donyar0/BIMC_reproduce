@@ -89,8 +89,8 @@ def sample_disjoint_visual_episode(features, targets, num_classes,
         query_rows.append(features[qi.to(features.device)])
     support_idx = torch.stack(support_idx)
     query_idx = torch.stack(query_idx)
-    if bool(torch.isin(support_idx.reshape(-1),
-                       query_idx.reshape(-1)).any()):
+    if bool((support_idx.reshape(-1, 1) ==
+             query_idx.reshape(1, -1)).any()):
         raise AssertionError("Episode has support/query index overlap")
     support = torch.stack(support_rows, dim=0).detach()
     queries = torch.cat(query_rows, dim=0).detach()
