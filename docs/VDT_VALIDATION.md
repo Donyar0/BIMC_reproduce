@@ -173,3 +173,82 @@ Before interpreting deltas, check that paired original and adapter records
 both completed successfully and use the same config/seed. This experiment is
 a comparison of mechanisms, **not** a claim that any architecture is new or
 that CUB200 accuracy has improved prior to running these trials.
+
+
+## New: support-guided description selection and prototype geometry
+
+Targeted research question: Does a 5-shot *training-support* visual prototype
+help distinguish near-identical bird classes, or does base-only supervised
+text adaptation collapse their textual margins?
+
+```bash
+python -m unittest discover -s tests -v
+python scripts/run_vdt_visual_diagnostics.py
+```
+
+Default **20 matched runs** (same dataset, seed, CLIP backbone, BiMC classifier,
+Ensemble=False, text descriptions, 20 base training epochs for attention):
+- CUB200 seeds 1,2,3 × `original`, `mean`, `attention`, `visual_weighted` (12).
+- CIFAR100 seed 1 × four modes (4).
+- miniImageNet seed 1 × four modes (4).
+
+Fast CUB-only test:
+
+```bash
+python scripts/run_vdt_visual_diagnostics.py --datasets cub200 --cub-seeds 1
+```
+
+Additional temperature/blend experiments (explicit configurations, **not**
+automatically tuned on test set):
+
+```bash
+python scripts/run_vdt_visual_diagnostics.py --datasets cub200 --cub-seeds 1 --temp 5 --blend 0.5
+```
+
+### What `visual_weighted` actually does
+
+For every class `c`, construct the mean visual prototype `v_c` **only**
+from its own training/support images: all base-session training images for base
+classes, and the session's five labeled training shots for each novel class.
+Frozen CLIP encodes name-conditioned description texts `d_{c,j}`.
+
+`w_{c,j} = softmax_j(temp * cosine(v_c, d_{c,j}))`
+
+`t_c^weighted = normalize((1-blend) * mean_j(normalize(d_{c,j})) + blend * normalize(sum_j w_{c,j} * normalize(d_{c,j})))`
+
+No CLIP updates, attention training, or added trainable parameters are
+required for this mode. The original BiMC visual prototype calibration,
+fusion `beta`, task splits and accuracy reporting stay unchanged.
+`temp=0` or `blend=0` produces the no-training mean baseline up to numerical
+precision. `visual_weighted` is a *diagnostic alternative*, not an established
+new method.
+
+### Geometry diagnostics (CUB200 only; final seen-class session)
+
+For non-original modes, the script compares the **raw mean description
+prototype** with the selected calibrated text prototype and the uncalibrated
+training/support visual prototype. Saved geometry includes:
+- `support_alignment`: base/novel mean text↔support-visual cosine and delta
+- `classes`: per-class support cosine, and the nearest-other-text class
+  before/after adaptation
+- `most_similar_raw_pairs`: 40 closest raw text pairs and their changed
+  separation `delta_separation = raw_cos - candidate_cos`. Positive = pair
+  moved further apart
+- `most_collapsed_pairs`, `most_separated_pairs`: largest changes in
+  cosine separation. These are *geometric diagnostics*, not guarantees of
+  classification gain
+
+Files under `output/vdt_visual_diagnostics/<timestamp>/`:
+`manifest.json`, complete per-run `.log`, `results.json`, `runs.csv`,
+`paired_comparisons.csv/json`, `aggregate.json`,
+`diagnostics/cub200_seed*_*.json`,
+`geometry/cub200_seed*_*.json`,
+`geometry_summary.csv`,
+`cub_class_accuracy_deltas.csv`, `cub_confusion_pair_deltas.csv`.
+
+No test labels are used in description selection or geometric calibration.
+Test labels are used **only** for ordinary post-inference accuracy/confusion
+evaluation. A class's genuine image prototype is saved before BiMC's visual
+calibration so the weighting metric is not computed from a recursively
+calibrated prototype. Interpret paired seed means before drawing conclusions;
+CUB changes of a few tenths of a percentage point can be small.
