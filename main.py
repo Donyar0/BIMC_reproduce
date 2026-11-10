@@ -79,6 +79,18 @@ def extend_cfg(cfg):
     # Optional incremental-session five-shot CE updates (0 = frozen baseline).
     cfg.TRAINER.BiMC.VDT_INC_EPOCHS = 0
     cfg.TRAINER.BiMC.VDT_INC_LR = 0.00001
+    # Visual CLIP-A-self: base train only, frozen for all incremental sessions.
+    cfg.TRAINER.BiMC.VDT_USE_VISUAL_ADAPTER = False
+    cfg.TRAINER.BiMC.VDT_VISUAL_REDUCTION = 4
+    cfg.TRAINER.BiMC.VDT_VISUAL_RATIO = 0.2
+    cfg.TRAINER.BiMC.VDT_VISUAL_DROPOUT = 0.1
+    cfg.TRAINER.BiMC.VDT_VISUAL_EPOCHS = 20
+    cfg.TRAINER.BiMC.VDT_VISUAL_STEPS = 5
+    cfg.TRAINER.BiMC.VDT_VISUAL_EPISODE_SHOTS = 5
+    cfg.TRAINER.BiMC.VDT_VISUAL_EPISODE_QUERIES = 5
+    cfg.TRAINER.BiMC.VDT_VISUAL_LR = 0.0001
+    # 0 = use all available training/support images per class in inference.
+    cfg.TRAINER.BiMC.VDT_VISUAL_MAX_SUPPORT = 0
     cfg.TRAINER.BiMC.VDT_BATCH_SIZE = 256
     cfg.TRAINER.BiMC.VDT_LR = 0.0001
     cfg.TRAINER.BiMC.VDT_WEIGHT_DECAY = 0.0001
@@ -150,6 +162,13 @@ def main():
         "vdt_inc_objective": cfg.TRAINER.BiMC.VDT_INC_OBJECTIVE,
         "vdt_inc_epochs": cfg.TRAINER.BiMC.VDT_INC_EPOCHS,
         "vdt_inc_lr": cfg.TRAINER.BiMC.VDT_INC_LR,
+        "vdt_use_visual_adapter": cfg.TRAINER.BiMC.VDT_USE_VISUAL_ADAPTER,
+        "vdt_visual_epochs": cfg.TRAINER.BiMC.VDT_VISUAL_EPOCHS,
+        "vdt_visual_steps": cfg.TRAINER.BiMC.VDT_VISUAL_STEPS,
+        "vdt_visual_episode_shots": cfg.TRAINER.BiMC.VDT_VISUAL_EPISODE_SHOTS,
+        "vdt_visual_episode_queries": cfg.TRAINER.BiMC.VDT_VISUAL_EPISODE_QUERIES,
+        "vdt_visual_lr": cfg.TRAINER.BiMC.VDT_VISUAL_LR,
+        "vdt_visual_max_support": cfg.TRAINER.BiMC.VDT_VISUAL_MAX_SUPPORT,
         "vdt_lr": cfg.TRAINER.BiMC.VDT_LR,
         "vdt_original_lambda_t": cfg.TRAINER.BiMC.VDT_ORIGINAL_LAMBDA_T,
         "ensemble": cfg.TRAINER.BiMC.USING_ENSEMBLE,
