@@ -91,14 +91,32 @@ class Runner:
 
 
 
-            current_state_dict = self.model.build_task_statistics(current_class_name, loader,
-                                                             class_index=self.data_manager.class_index_in_task[i], 
-                                                             calibrate_novel_vision_proto=self.cfg.TRAINER.BiMC.VISION_CALIBRATION,)
+            use_visual = self.cfg.TRAINER.BiMC.VDT_USE_VISUAL_ADAPTER
+            current_state_dict = self.model.build_task_statistics(
+                current_class_name, loader,
+                class_index=self.data_manager.class_index_in_task[i],
+                # In visual mode, apply BiMC calibration *after* attention
+                # aggregation; otherwise preserve the original mean path.
+                calibrate_novel_vision_proto=(
+                    self.cfg.TRAINER.BiMC.VISION_CALIBRATION and not use_visual
+                ),
+            )
 
-            # Train exactly once on base images, then freeze the linear adapter.
             core_model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
             if i == 0:
+                # Independent base training: vision first (allows text
+                # fusion_ce to use the actual inference visual prototype).
+                if use_visual:
+                    core_model.train_base_visual_adapter(current_state_dict)
+                    current_state_dict["image_proto"] = core_model.vdt_visual_prototypes(
+                        current_state_dict, task_id=i
+                    )
                 core_model.train_base_text_adapter(current_state_dict)
+            elif use_visual:
+                # Frozen visual adapter, new-class support images only.
+                current_state_dict["image_proto"] = core_model.vdt_visual_prototypes(
+                    current_state_dict, task_id=i
+                )
 
             state_dict_list.append(current_state_dict)
             merged_state_dict = self.merge_dicts(state_dict_list)
