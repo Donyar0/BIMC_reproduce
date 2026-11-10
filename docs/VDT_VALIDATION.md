@@ -116,3 +116,60 @@ Output files: `manifest.json`, per-run logs, `results.json`, `runs.csv`, `paired
 A positive Final Acc difference together with a stable/increased `novel_to_base_pct` may indicate gains come largely from improved base discrimination rather than novel-class generalization. A linear/MLP adapter matching attention suggests that supervised adaptation or LayerNorm/residual mixing is sufficient; attention-specific gains require attention outperforming these controlled baselines.
 
 This suite does not silently tune per-dataset hyperparameters. **No end-to-end GPU results are claimed until the suite is executed on the dataset server.**
+
+
+## Extended focused ablation: CIFAR100 + CUB200
+
+To answer whether a simple CE-trained adapter generalizes as well as
+self-attention, especially on fine-grained CUB200:
+
+```bash
+python -m unittest discover -s tests -v
+python scripts/run_vdt_finegrained.py
+```
+
+This runs **20 matched and isolated experiments** under
+`Ensemble=False`, `VDT_RATIO=0.2`, `VDT_EPOCHS=20`:
+
+- CIFAR100 seeds **2, 3** × `original/attention/linear/mlp` (8 runs);
+  previous seed 1 controls remain available in the earlier follow-up directory.
+- CUB200 seeds **1, 2, 3** × `original/attention/linear/mlp` (12 runs).
+- miniImageNet is intentionally **not repeated** here: all three seeds of
+  `original/attention` have already been measured. To expand MLP/linear
+  onto miniImageNet later, update the study plan separately.
+
+Quick CUB-only validation:
+```bash
+python scripts/run_vdt_finegrained.py --no-cifar --cub-seeds 1
+```
+
+Run CIFAR-only:
+```bash
+python scripts/run_vdt_finegrained.py --no-cub
+```
+
+Optional `--swanlab` publishes the usual per-session metrics. The new runner
+writes to `output/vdt_finegrained/<timestamp>/` and does not alter previous
+experiment outputs:
+
+- `results.json`, `runs.csv`, `paired_comparisons.csv/json`,
+  `aggregate.json`, `manifest.json`, and per-run console logs
+- `diagnostics/cub200_seed<seed>_<mode>.json`: final-session
+  class-level accuracy, sorted hard classes and directed confusion pairs
+- `cub_class_accuracy_deltas.csv`: same-seed changes in the accuracy of
+  each class relative to the original BiMC control (positive = improvement)
+- `cub_confusion_pair_deltas.csv`: directed true label → predicted label
+  mistakes that increased or decreased relative to the same-seed original
+  control (positive = **more errors** on that pair)
+
+Class names are taken from the dataset's own `classes` array, and classes
+are matched by integer ID within each same-seed pair. **These reports do not
+claim which species belong to the same biological family**; to establish that
+kind of relationship a separate, explicit taxonomy mapping would be needed.
+Rates are based on actual test counts. The diagnostic uses only predictions
+and ground truth at final evaluation, not training inputs or gradients.
+
+Before interpreting deltas, check that paired original and adapter records
+both completed successfully and use the same config/seed. This experiment is
+a comparison of mechanisms, **not** a claim that any architecture is new or
+that CUB200 accuracy has improved prior to running these trials.
