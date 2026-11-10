@@ -73,6 +73,10 @@ def provenance():
 
 
 def run(args):
+    if args.inc_epochs < 0 or args.inc_lr <= 0:
+        raise ValueError("Incremental epochs must be nonnegative and LR positive")
+    if args.mode == "original" and args.inc_epochs > 0:
+        raise ValueError("Incremental updates require --mode linear")
     train_cfg = ROOT / "configs/trainers/bimc.yaml"
     dataset_cfg = ROOT / DATASETS[args.dataset]
     for path in (train_cfg, dataset_cfg):
@@ -84,10 +88,13 @@ def run(args):
     cmd = [
         sys.executable, "main.py", "--data_cfg", DATASETS[args.dataset],
         "--train_cfg", "configs/trainers/bimc.yaml",
-        "--opts", "SEED", str(args.seed), "TRAINER.BiMC.VDT_MODE", args.mode
+        "--opts", "SEED", str(args.seed), "TRAINER.BiMC.VDT_MODE", args.mode,
+        "TRAINER.BiMC.VDT_INC_EPOCHS", str(args.inc_epochs),
+        "TRAINER.BiMC.VDT_INC_LR", str(args.inc_lr),
     ]
     manifest = {
         "dataset": args.dataset, "seed": args.seed, "mode": args.mode,
+        "incremental_epochs": args.inc_epochs, "incremental_lr": args.inc_lr,
         "config_sha256": {
             str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in (train_cfg, dataset_cfg)
@@ -113,6 +120,7 @@ def run(args):
         "status": "success" if code == 0 and metrics is not None else "failed",
         "exit_code": code, "elapsed_seconds": round(time.monotonic()-start, 2),
         "dataset": args.dataset, "seed": args.seed, "mode": args.mode,
+        "incremental_epochs": args.inc_epochs, "incremental_lr": args.inc_lr,
         "metrics": metrics
     }
     (output / "result.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -126,6 +134,10 @@ def main():
     p.add_argument("--dataset", choices=sorted(DATASETS), default="cifar100")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--mode", choices=("linear", "original"), default="linear")
+    p.add_argument("--inc-epochs", type=int, default=0,
+                   help="5-shot epochs per incremental session; default 0 keeps Adapter frozen")
+    p.add_argument("--inc-lr", type=float, default=1e-5,
+                   help="Incremental AdamW learning rate, independent of base LR")
     p.add_argument("--output-dir", default="output/vdt_linear")
     sys.exit(run(p.parse_args()))
 
