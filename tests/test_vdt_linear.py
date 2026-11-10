@@ -58,6 +58,23 @@ class TestCleanLinear(unittest.TestCase):
         self.assertIn('if mode not in ("linear", "original"):',content)
         self.assertNotIn("contrastive_description_prototypes",content)
 
+    def test_all_dataset_trainer_configs_load(self):
+        # Catch strict YACS keys left behind when obsolete modules are removed.
+        from main import setup_cfg
+        root = Path(__file__).resolve().parents[1]
+        for dataset in ("cifar100", "cub200", "miniimagenet"):
+            for trainer in ("bimc", "bimc_ensemble"):
+                with self.subTest(dataset=dataset, trainer=trainer):
+                    cfg = setup_cfg(
+                        str(root / "configs" / "datasets" / (dataset + ".yaml")),
+                        str(root / "configs" / "trainers" / (trainer + ".yaml")),
+                    )
+                    self.assertEqual(cfg.TRAINER.BiMC.VDT_MODE, "linear")
+                    self.assertEqual(
+                        cfg.TRAINER.BiMC.USING_ENSEMBLE,
+                        trainer == "bimc_ensemble",
+                    )
+
     def test_result_parser(self):
         log="BIAS_METRICS_JSON:{\"session\":0}\nFinal acc:[80.0,75.0]\nTask-wise acc:\ntask  0, acc:[80.0]\ntask  1, acc:[78.0,50.0]\n"
         parsed=parse_run(log)
