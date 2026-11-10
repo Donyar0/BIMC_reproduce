@@ -71,6 +71,22 @@ def extend_cfg(cfg):
     cfg.TRAINER.BiMC.GAMMA_INC = -1.0
     cfg.TRAINER.BiMC.USING_ENSEMBLE = False
 
+    # Optional training-free local patch classifier (CDPS).
+    cfg.TRAINER.CDPS = CN()
+    cfg.TRAINER.CDPS.ENABLED = False
+    cfg.TRAINER.CDPS.GLOBAL_WEIGHT = 0.5
+    cfg.TRAINER.CDPS.TOP_PERCENT = 0.4
+    cfg.TRAINER.CDPS.NUM_REGIONS = 2
+    cfg.TRAINER.CDPS.TOPK = 20
+    cfg.TRAINER.CDPS.NUM_CONFUSE = 5
+    cfg.TRAINER.CDPS.OMEGA = 0.1
+    cfg.TRAINER.CDPS.MAX_SUPPORT = 8
+    cfg.TRAINER.CDPS.MAX_QUERY_PATCHES = 64
+    cfg.TRAINER.CDPS.QUERY_TOPK = 20
+    cfg.TRAINER.CDPS.TEMPERATURE = 1.0
+    cfg.TRAINER.CDPS.CACHE_DIR = "output/cdps_patch_memory"
+
+
 
 
     
