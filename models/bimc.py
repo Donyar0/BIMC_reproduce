@@ -5,6 +5,8 @@ import models.clip.clip as clip
 import json
 from models.vdt_linear import LinearTextAdapter, pack_description_bank
 from models.vdt_objective import linear_adapter_ce, support_feature_moments
+from models.vdt_visual import (VisionSelfAttentionAdapter, train_visual_aggregator,
+                               aggregate_visual_classes)
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -61,6 +63,20 @@ class BiMC(nn.Module):
             ))
         else:
             print("VDT_MODE=original | trainable adapter parameters=0")
+
+        self.visual_adapter = None
+        self.visual_adapter_trained = False
+        if cfg.TRAINER.BiMC.VDT_USE_VISUAL_ADAPTER:
+            dim = int(self.clip_model.visual.output_dim)
+            self.visual_adapter = VisionSelfAttentionAdapter(
+                embed_dim=dim,
+                reduction=cfg.TRAINER.BiMC.VDT_VISUAL_REDUCTION,
+                ratio=cfg.TRAINER.BiMC.VDT_VISUAL_RATIO,
+                dropout=cfg.TRAINER.BiMC.VDT_VISUAL_DROPOUT,
+            ).to(self.device)
+            print("VDT_VISUAL_ATTENTION | trainable parameters={}".format(
+                sum(p.numel() for p in self.visual_adapter.parameters())
+            ))
 
 
     @torch.no_grad()
@@ -187,6 +203,61 @@ class BiMC(nn.Module):
             raise RuntimeError("Text calibration is only available in linear mode")
         packed, mask, classes = pack_description_bank(features, labels)
         return self.text_adapter(packed, mask), classes
+
+    def train_base_visual_adapter(self, base_state):
+        """Train on base TRAIN images only, then freeze until all sessions end."""
+        if self.visual_adapter is None:
+            return
+        if self.visual_adapter_trained:
+            raise RuntimeError("Visual Adapter must be trained only once")
+        for p in self.clip_model.parameters():
+            p.requires_grad_(False)
+        features = base_state["images_features"].detach().float()
+        labels = base_state["images_targets"].detach().long()
+        class_ids = torch.as_tensor(base_state["class_index"],device=labels.device)
+        if not torch.equal(class_ids,torch.arange(len(class_ids),device=labels.device)):
+            raise ValueError("Base class IDs must be contiguous and zero-based")
+        history = train_visual_aggregator(
+            self.visual_adapter, features, labels,
+            num_classes=len(class_ids),
+            epochs=int(self.cfg.TRAINER.BiMC.VDT_VISUAL_EPOCHS),
+            steps_per_epoch=int(self.cfg.TRAINER.BiMC.VDT_VISUAL_STEPS),
+            support_per_class=int(self.cfg.TRAINER.BiMC.VDT_VISUAL_EPISODE_SHOTS),
+            query_per_class=int(self.cfg.TRAINER.BiMC.VDT_VISUAL_EPISODE_QUERIES),
+            lr=float(self.cfg.TRAINER.BiMC.VDT_VISUAL_LR),
+            weight_decay=float(self.cfg.TRAINER.BiMC.VDT_WEIGHT_DECAY),
+            seed=int(self.cfg.SEED),
+        )
+        self.visual_adapter_trained = True
+        print("VDT_VISUAL_TRAIN_JSON:" + json.dumps({
+            "training":"base_only_disjoint_episodic_support_query",
+            "num_base_images":int(len(features)),
+            "epochs":len(history),
+            "steps_per_epoch":int(self.cfg.TRAINER.BiMC.VDT_VISUAL_STEPS),
+            "final_episodic_ce":history[-1],
+        },sort_keys=True))
+
+    @torch.no_grad()
+    def vdt_visual_prototypes(self, state, task_id):
+        """Generate current-session prototypes with a frozen visual attention."""
+        if self.visual_adapter is None or not self.visual_adapter_trained:
+            raise RuntimeError("Visual Adapter must be base-trained before aggregation")
+        if self.visual_adapter.training or any(p.requires_grad for p in self.visual_adapter.parameters()):
+            raise RuntimeError("Visual Adapter must remain frozen during inference")
+        class_ids = torch.as_tensor(state["class_index"],
+                                    device=state["images_targets"].device)
+        result = aggregate_visual_classes(
+            self.visual_adapter,
+            state["images_features"].detach(),
+            state["images_targets"].detach(),
+            class_ids,
+            max_support=int(self.cfg.TRAINER.BiMC.VDT_VISUAL_MAX_SUPPORT),
+        )
+        if task_id == 0:
+            self.base_vision_prototype = result.detach().clone()
+        elif self.cfg.TRAINER.BiMC.VISION_CALIBRATION:
+            result = self.soft_calibration(self.base_vision_prototype, result)
+        return result
 
     def train_base_text_adapter(self, base_state):
         """Train linear adapter on base-session images only; freeze in FSCIL."""
