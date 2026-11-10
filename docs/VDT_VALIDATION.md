@@ -252,3 +252,94 @@ evaluation. A class's genuine image prototype is saved before BiMC's visual
 calibration so the weighting metric is not computed from a recursively
 calibrated prototype. Interpret paired seed means before drawing conclusions;
 CUB changes of a few tenths of a percentage point can be small.
+
+
+## Class-contrastive description selection and base-only validation (new)
+
+Research hypothesis: a description can match its own class and still match
+nearby bird species; own-class visual similarity alone is insufficient.
+Do **not** optimize parameters on CUB200/CIFAR100/miniImageNet test results.
+
+```bash
+python -m unittest tests.test_vdt_contrastive -v
+python -m unittest discover -s tests -v
+python scripts/run_vdt_contrastive.py
+```
+
+Default suite = **30 separate, paired runs**: CUB200 seeds 1/2/3
+(18 runs), CIFAR100 seed 1 (6), miniImageNet seed 1 (6).
+The following six arms use the same dataset, seed and Ensemble=False
+protocol inside each group:
+
+| VDT_MODE | Explanation | Extra trainable parameters |
+|---|---|---|
+| original | Original BiMC text calibration | none used |
+| mean | Uniform VDT description mean | 0 |
+| attention | 20-epoch base-only CE trained self-attention | 263,680 |
+| visual_weighted | Class-own visual similarity weighting | 0 |
+| contrastive_fixed | Hardest-other-class penalty, lambda=1.0 fixed | 0 |
+| contrastive_cv | Same formula but lambda selected **only** by pseudo-incremental validation on base TRAIN images | 0 |
+
+Fast CUB-only smoke:
+```bash
+python scripts/run_vdt_contrastive.py --datasets cub200 --cub-seeds 1
+```
+
+Contrastive description scores use all *currently available training/support
+class prototypes*, with no future class or test information:
+
+```
+score(c,j) = cosine(description(c,j), visual_support(c))
+           - lambda * max_{k != c, k seen} cosine(description(c,j), visual_support(k))
+weight(c,j) = softmax_j(temperature * score(c,j))
+text(c) = normalize((1-blend) * description_mean(c)
+                 + blend * normalized_weighted_description_sum(c))
+```
+
+`contrastive_fixed` has lambda=1, temperature=10, blend=0.5.
+`contrastive_cv` compares the fixed grid lambda=[0,0.5,1,2];
+every candidate uses the SAME deterministic pseudo-incremental episodes:
+
+1. Divide **base TRAIN classes** into pseudo-base and pseudo-novel (75/25).
+2. Hold out five query images per base training class; they never enter that
+   episode's support or visual prototype.
+3. Use the remaining training images for pseudo-base support, and exactly
+   five training images per pseudo-novel class.
+4. Recreate original BiMC visual calibration for pseudo-novel prototypes and
+   text/vision fusion. Predict on held-out base-training query images.
+5. Select lambda maximizing the 3-episode mean harmonic accuracy of
+   pseudo-base and pseudo-novel; break ties in favor of smaller lambda.
+6. Lock the selected lambda **before any real incremental session**.
+   Neither CUB200 test labels nor real novel-class samples tune lambda.
+
+Pseudo-CV is not a substitute for an independent cross-dataset test; it
+only prevents directly tuning lambda on the benchmark test splits.
+
+### New diagnostics and files
+
+`output/vdt_contrastive/<timestamp>/` includes:
+- `manifest.json`: config SHA256, actual commands, code-file SHA256
+  (and Git SHA if server has Git metadata). Missing commit is reported as
+  `null`, not silently as an empty string.
+- `results.json`, `runs.csv`, `paired_comparisons.csv/json`,
+  `aggregate.json`: matched Final/average/base/novel and bias comparisons
+- `pseudo_cv/*contrastive_cv.json`: candidate score curves, selected
+  lambda, deterministic pseudo-episode configuration; this should be
+  inspected **before** interpreting real test accuracy
+- `weights/*.json` and `weight_summary.csv` (CUB final session):
+  normalized entropy (1=uniform; 0=concentrated), mean top-1 weight,
+  within-class description cosine/redundancy, own-support cosine,
+  hardest-competitor cosine and weighting score margins
+- `geometry/*.json` and `geometry_summary.csv`: text-prototype
+  separation and support alignment before/after description selection
+- `diagnostics/*.json`, `cub_class_accuracy_deltas.csv`,
+  `cub_confusion_pair_deltas.csv`: class- and confusion-pair errors
+  against matched original BiMC
+
+A key ablation is lambda=0: `contrastive_fixed` with
+`--negative-strength 0` must match `visual_weighted` when the other
+hyperparameters are held identical.
+
+**No new accuracy claims** are justified until the GPU runs complete.
+A gain on a single CUB seed alone is not sufficient evidence of improved
+fine-grained transfer.
