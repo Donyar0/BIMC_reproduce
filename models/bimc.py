@@ -268,6 +268,11 @@ class BiMC(nn.Module):
             raise ValueError("Incremental labels do not match seen class classifier")
 
         adapter = self.text_adapter
+        # Measure text-prototype drift caused by new-shot-only updating.
+        # Evaluation prototypes are always produced with dropout disabled.
+        adapter.eval()
+        with torch.no_grad():
+            prototype_before = adapter(packed, mask).detach().clone()
         params_before = [p.detach().clone() for p in adapter.parameters()]
         for p in adapter.parameters():
             p.requires_grad_(True)
@@ -306,6 +311,23 @@ class BiMC(nn.Module):
                 (p.detach().float() - old.float()).square().sum().item()
                 for p, old in zip(adapter.parameters(), params_before)
             )
+        with torch.no_grad():
+            prototype_after = adapter(packed, mask).detach()
+            prototype_cosines = F.cosine_similarity(
+                prototype_before, prototype_after, dim=-1
+            )
+            previous_ids = ~(
+                classes[:, None] == current_ids.to(classes.device)[None, :]
+            ).any(dim=1)
+            new_ids_mask = ~previous_ids
+            previous_cosine_mean = (
+                float(prototype_cosines[previous_ids].mean().item())
+                if previous_ids.any() else None
+            )
+            new_cosine_mean = (
+                float(prototype_cosines[new_ids_mask].mean().item())
+                if new_ids_mask.any() else None
+            )
         print("VDT_INCREMENTAL_UPDATE_JSON:" + json.dumps({
             "session": task_id,
             "num_train_samples": int(images.size(0)),
@@ -314,6 +336,8 @@ class BiMC(nn.Module):
             "epochs": epochs,
             "lr": lr,
             "parameter_delta_l2": delta_sq ** 0.5,
+            "previous_text_proto_cosine_before_after": previous_cosine_mean,
+            "new_text_proto_cosine_before_after": new_cosine_mean,
         }, sort_keys=True))
 
     def soft_calibration(self, base_protos, cur_protos):
