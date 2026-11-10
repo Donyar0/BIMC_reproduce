@@ -192,3 +192,98 @@ not establish fine-grained FSCIL transfer. Evaluate final accuracy,
 new-class mean, and novel-to-novel confusions. Since the fusion loss
 also trains on visual class prototypes, consider whether its advantage
 carries over to unseen classes in future multi-seed runs.
+
+
+## New: visual intra-class Self-Attention Adapter ablation
+
+**Question:** can CLIP-A-self-style aggregation of *image features from
+the same class* build more discriminative visual prototypes than an
+unweighted mean, especially on CUB200?
+
+### Components
+
+- **Text Adapter:** original base-only Linear Adapter on prompt+visual
+  descriptions. Same CE objective as before, frozen in FSCIL increments.
+- **Visual Adapter:** one-head reduced-QKV self-attention on
+  `[class, support-images, CLIP-feature-dim]`; residual mixing +
+  LayerNorm + masked class-wise mean + L2 normalization. CLIP image
+  encoder is frozen.
+- **Visual training:** on base TRAIN image features, each optimizer step
+  creates fresh, class-balanced episodes containing **5 support
+  images and 5 disjoint query images per base class**. Supports build
+  visual prototypes, while queries incur classification CE over base
+  visual prototypes: `CE(100 * image_query @ visual_proto.T, class)`.
+  Query images are never included in their own support aggregation.
+  Default 20 epochs × 5 episodes/epoch, AdamW LR 1e-4.
+- **Incremental inference:** the trained Visual Adapter remains frozen.
+  Reaggregate each newly introduced class's **five available support
+  images** through that same attention network. Apply original BiMC
+  novel visual calibration *after* this aggregation. Base visual
+  reference prototypes are the base-adapted prototypes, and remain
+  fixed; previous session prototypes are cached, never re-created.
+- **Full base inference:** by default the Visual Adapter aggregates
+  all available base training images per class, one class at a time.
+  For memory-constrained environments optionally specify
+  `--visual-max-support 128`; this selects deterministic class
+  subsets and is *not* identical to the default full-support setting.
+- **Text+Visual fusion:** unchanged BiMC
+  `normalize(beta * text_proto + (1-beta) * image_proto)`.
+  Ensemble=False is maintained for the controlled comparisons.
+
+This is **instance-level visual self-attention within a class**, not
+spatial patch/region attention, and does not claim to solve patch-level
+fine-grained perception by itself.
+
+### Three-arm controlled experiment (CUB200, seed 1)
+
+```bash
+git fetch github
+git switch feature/bimc-vdt-self-attention
+git pull --ff-only github feature/bimc-vdt-self-attention
+python -m unittest tests.test_vdt_visual -v
+python -m unittest tests.test_vdt_linear -v
+python -m unittest tests.test_vdt_objective -v
+
+# Each command launches ONE experiment:
+python scripts/run_linear_baseline.py --dataset cub200 --seed 1 --ablation text
+python scripts/run_linear_baseline.py --dataset cub200 --seed 1 --ablation visual
+python scripts/run_linear_baseline.py --dataset cub200 --seed 1 --ablation both
+
+# Or run precisely these three arms and write a summary CSV:
+python scripts/run_adapter_triplet.py --dataset cub200 --seed 1
+```
+
+Optional *fourth* original BiMC control:
+`python scripts/run_adapter_triplet.py --dataset cub200 --seed 1 --include-original`.
+
+| ablation | text classifier | visual classifier | adapter training |
+| --- | --- | --- | --- |
+| text | base-trained Linear | original BiMC support mean | text CE |
+| visual | original BiMC prompt+description text | visual self-attention support aggregation | episodic visual CE |
+| both | base-trained Linear | visual self-attention support aggregation | independent text CE + visual CE |
+| original (optional) | original BiMC | original support mean | neither |
+
+For a fair controlled first comparison, **all three have base-only
+training**; do not use incremental text fine-tuning. Visual training
+is identical in `visual` and `both` arms, but two independent runs
+may use different adapter initialization sequences as the text adapter
+is only constructed in text/both arms. This is the same random seed
+protocol but not necessarily bitwise-identical visual weights.
+
+For the initial three-arm sweep use `--objective text_ce` (default).
+The earlier `fusion_ce` for text-only experiments is still supported,
+but **both+fusion_ce** is explicitly disallowed until it can compute
+attention-aware leave-one-out visual prototypes. This prevents
+silently mixing a mean-LOO loss with an attention-based classifier.
+
+The scripts write `output/adapter_triplet/<timestamp>/summary.csv`,
+individual run logs and a `results.json`. Each run has its own
+`output/vdt_linear/<timestamp>/result.json`, class-wise metrics and
+source/config SHA256 manifest. Assess Base/Novel/Final and the CUB
+novel-to-novel directed confusion counts, not only Final Acc.
+
+**Known limitation:** the training episodes have 5 supports per base
+class, while default base inference uses all support images. This
+is intentional for 5-shot novel generalization, but a support-count
+distribution shift remains and should be reported. No results are
+claimed until actual GPU runs are complete.
