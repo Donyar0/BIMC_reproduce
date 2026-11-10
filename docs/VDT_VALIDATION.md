@@ -265,10 +265,10 @@ Optional *fourth* original BiMC control:
 
 For a fair controlled first comparison, **all three have base-only
 training**; do not use incremental text fine-tuning. Visual training
-is identical in `visual` and `both` arms, but two independent runs
-may use different adapter initialization sequences as the text adapter
-is only constructed in text/both arms. This is the same random seed
-protocol but not necessarily bitwise-identical visual weights.
+uses the same deliberately isolated initialization seed, support/query
+episode generator, and dropout RNG in `visual` and `both` arms.
+The text initialization and optimizer RNG are preserved with separate
+RNG contexts, giving a cleaner paired architectural comparison.
 
 For the initial three-arm sweep use `--objective text_ce` (default).
 The earlier `fusion_ce` for text-only experiments is still supported,
