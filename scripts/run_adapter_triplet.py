@@ -31,6 +31,8 @@ def run(args):
             "--dataset",args.dataset,"--seed",str(args.seed),
             "--ablation",arm,
             "--objective",args.objective if arm in ("text","both") else "text_ce",
+            "--visual-objective",
+            args.visual_objective if arm in ("visual","both") else "visual_ce",
             "--visual-epochs",str(args.visual_epochs),
             "--visual-steps",str(args.visual_steps),
             "--visual-max-support",str(args.visual_max_support),
@@ -60,6 +62,7 @@ def run(args):
         metrics = report.get("metrics") if report else None
         row = {
             "arm":arm,"dataset":args.dataset,"seed":args.seed,
+            "visual_objective":args.visual_objective if arm in ("visual","both") else None,
             "status":report.get("status") if report else "failed",
             "return_code":code,
             "last_acc":metrics.get("last_acc") if metrics else None,
@@ -95,6 +98,8 @@ def main():
     p.add_argument("--seed",type=int,default=1)
     p.add_argument("--include-original",action="store_true")
     p.add_argument("--objective",choices=("text_ce","fusion_ce"),default="text_ce")
+    p.add_argument("--visual-objective",choices=("visual_ce","fusion_ce"),
+                   default="visual_ce")
     p.add_argument("--visual-epochs",type=int,default=20)
     p.add_argument("--visual-steps",type=int,default=5)
     p.add_argument("--visual-max-support",type=int,default=0)
