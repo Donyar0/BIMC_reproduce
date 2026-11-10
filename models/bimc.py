@@ -70,7 +70,8 @@ class BiMC(nn.Module):
             dim = int(self.clip_model.visual.output_dim)
             # Independent, reproducible initialization: text-only vs dual
             # comparisons must not change Linear Adapter initialization.
-            with torch.random.fork_rng(devices=[]):
+            init_devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
+            with torch.random.fork_rng(devices=init_devices):
                 torch.manual_seed(int(cfg.SEED) + 91731)
                 visual_net = VisionSelfAttentionAdapter(
                     embed_dim=dim,
