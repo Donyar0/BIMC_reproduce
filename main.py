@@ -70,6 +70,8 @@ def extend_cfg(cfg):
     cfg.TRAINER.BiMC.LAMBDA_T = 0.0
     cfg.TRAINER.BiMC.VDT_MODE = 'attention'
     cfg.TRAINER.BiMC.VDT_ORIGINAL_LAMBDA_T = 0.5
+    cfg.TRAINER.BiMC.VDT_VISUAL_TEMP = 10.0
+    cfg.TRAINER.BiMC.VDT_VISUAL_BLEND = 0.5
     cfg.TRAINER.BiMC.VDT_REDUCTION = 4
     cfg.TRAINER.BiMC.VDT_RATIO = 0.2
     cfg.TRAINER.BiMC.VDT_DROPOUT = 0.1
@@ -143,6 +145,8 @@ def main():
         "vdt_epochs": cfg.TRAINER.BiMC.VDT_EPOCHS,
         "vdt_lr": cfg.TRAINER.BiMC.VDT_LR,
         "vdt_original_lambda_t": cfg.TRAINER.BiMC.VDT_ORIGINAL_LAMBDA_T,
+        "vdt_visual_temp": cfg.TRAINER.BiMC.VDT_VISUAL_TEMP,
+        "vdt_visual_blend": cfg.TRAINER.BiMC.VDT_VISUAL_BLEND,
         "ensemble": cfg.TRAINER.BiMC.USING_ENSEMBLE,
         "torch": torch.__version__,
         "cuda": str(torch.version.cuda),
