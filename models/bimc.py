@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import models.clip.clip as clip
 import json
 from models.vdt_linear import LinearTextAdapter, pack_description_bank
+from models.vdt_objective import linear_adapter_ce, support_feature_moments
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -208,6 +209,19 @@ class BiMC(nn.Module):
         if not torch.equal(classes, torch.arange(len(classes), device=classes.device)):
             raise ValueError("Base classes must have contiguous zero-based labels")
         num_images = image_features.size(0)
+        objective = str(self.cfg.TRAINER.BiMC.VDT_TRAIN_OBJECTIVE)
+        beta = float(self.cfg.DATASET.BETA)
+        if objective == "fusion_ce":
+            visual = base_state["image_proto"].detach().float()
+            support_sums, support_counts = support_feature_moments(
+                image_features, targets, len(classes)
+            )
+        else:
+            visual, support_sums, support_counts = None, None, None
+        print("VDT_BASE_OBJECTIVE_JSON:" + json.dumps({
+            "objective": objective, "beta": beta,
+            "leave_one_out_positive": objective == "fusion_ce",
+        }, sort_keys=True))
         batch_size = int(self.cfg.TRAINER.BiMC.VDT_BATCH_SIZE)
         if batch_size < 1:
             raise ValueError("VDT_BATCH_SIZE must be positive")
@@ -219,8 +233,11 @@ class BiMC(nn.Module):
                     idx = order[start:start + batch_size]
                     optimizer.zero_grad()
                     class_weights = self.text_adapter(packed, mask)
-                    logits = 100.0 * image_features[idx] @ class_weights.t()
-                    loss = F.cross_entropy(logits, targets[idx])
+                    loss = linear_adapter_ce(
+                        image_features[idx], targets[idx], class_weights,
+                        visual_prototypes=visual, beta=beta, mode=objective,
+                        support_sums=support_sums, support_counts=support_counts,
+                    )
                     loss.backward()
                     optimizer.step()
                     epoch_loss += loss.detach().item() * idx.numel()
@@ -267,6 +284,25 @@ class BiMC(nn.Module):
         if labels.min() < 0 or labels.max() >= len(classes):
             raise ValueError("Incremental labels do not match seen class classifier")
 
+        objective = str(self.cfg.TRAINER.BiMC.VDT_INC_OBJECTIVE)
+        beta = float(self.cfg.DATASET.BETA)
+        if objective == "fusion_ce":
+            visual = merged_state["image_proto"].detach().float()
+            # Old class support features are NOT used to fine-tune the
+            # adapter. Only new-session supports build LOO moments.
+            support_sums, support_counts = support_feature_moments(
+                images, labels, len(classes)
+            )
+            # Reproduce BiMC's novel-class prototype calibration after
+            # removing the current query from its support centroid.
+            def loo_calibration(loo_features):
+                if not self.cfg.TRAINER.BiMC.VISION_CALIBRATION:
+                    return loo_features
+                return self.soft_calibration(self.base_vision_prototype, loo_features)
+        else:
+            visual, support_sums, support_counts = None, None, None
+            loo_calibration = None
+
         adapter = self.text_adapter
         # Measure text-prototype drift caused by new-shot-only updating.
         # Evaluation prototypes are always produced with dropout disabled.
@@ -294,8 +330,12 @@ class BiMC(nn.Module):
                         idx = order[start:start + batch_size]
                         optimizer.zero_grad()
                         classifier = adapter(packed, mask)
-                        logits = 100.0 * images[idx] @ classifier.t()
-                        loss = F.cross_entropy(logits, labels[idx])
+                        loss = linear_adapter_ce(
+                            images[idx], labels[idx], classifier,
+                            visual_prototypes=visual, beta=beta, mode=objective,
+                            support_sums=support_sums, support_counts=support_counts,
+                            calibrate_loo=loo_calibration,
+                        )
                         loss.backward()
                         optimizer.step()
                         loss_total += loss.detach().item() * idx.numel()
@@ -335,6 +375,9 @@ class BiMC(nn.Module):
             "num_seen_classes": int(len(classes)),
             "epochs": epochs,
             "lr": lr,
+            "objective": objective,
+            "beta": beta,
+            "leave_one_out_positive": objective == "fusion_ce",
             "parameter_delta_l2": delta_sq ** 0.5,
             "previous_text_proto_cosine_before_after": previous_cosine_mean,
             "new_text_proto_cosine_before_after": new_cosine_mean,
