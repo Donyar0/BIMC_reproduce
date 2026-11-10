@@ -72,6 +72,10 @@ def extend_cfg(cfg):
     cfg.TRAINER.BiMC.VDT_ORIGINAL_LAMBDA_T = 0.5
     cfg.TRAINER.BiMC.VDT_VISUAL_TEMP = 10.0
     cfg.TRAINER.BiMC.VDT_VISUAL_BLEND = 0.5
+    cfg.TRAINER.BiMC.VDT_NEGATIVE_STRENGTH = 1.0
+    cfg.TRAINER.BiMC.VDT_CV_CANDIDATES = [0.0, 0.5, 1.0, 2.0]
+    cfg.TRAINER.BiMC.VDT_CV_EPISODES = 3
+    cfg.TRAINER.BiMC.VDT_CV_QUERIES = 5
     cfg.TRAINER.BiMC.VDT_REDUCTION = 4
     cfg.TRAINER.BiMC.VDT_RATIO = 0.2
     cfg.TRAINER.BiMC.VDT_DROPOUT = 0.1
@@ -147,6 +151,10 @@ def main():
         "vdt_original_lambda_t": cfg.TRAINER.BiMC.VDT_ORIGINAL_LAMBDA_T,
         "vdt_visual_temp": cfg.TRAINER.BiMC.VDT_VISUAL_TEMP,
         "vdt_visual_blend": cfg.TRAINER.BiMC.VDT_VISUAL_BLEND,
+        "vdt_negative_strength": cfg.TRAINER.BiMC.VDT_NEGATIVE_STRENGTH,
+        "vdt_cv_candidates": list(cfg.TRAINER.BiMC.VDT_CV_CANDIDATES),
+        "vdt_cv_episodes": cfg.TRAINER.BiMC.VDT_CV_EPISODES,
+        "vdt_cv_queries": cfg.TRAINER.BiMC.VDT_CV_QUERIES,
         "ensemble": cfg.TRAINER.BiMC.USING_ENSEMBLE,
         "torch": torch.__version__,
         "cuda": str(torch.version.cuda),
