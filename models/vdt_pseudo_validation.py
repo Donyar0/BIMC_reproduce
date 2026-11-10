@@ -58,6 +58,7 @@ def select_base_only_contrastive_strength(
     gen = torch.Generator(device="cpu")
     gen.manual_seed(int(seed) + 809071)
     episodes_data = []
+    split_audit = []
     n_novel = max(1, min(c-1, round(0.25*c)))
     for episode_id in range(int(episodes)):
         order = torch.randperm(c, generator=gen).tolist()
@@ -65,6 +66,8 @@ def select_base_only_contrastive_strength(
         old_ids = order[n_novel:]
         ordering = old_ids + novel_ids
         supports = []
+        supports_count = 0
+        queries_count = 0
         q_features = []
         q_labels = []
         for new_id, actual_id in enumerate(ordering):
@@ -73,6 +76,10 @@ def select_base_only_contrastive_strength(
             query_idx = shuffled[:query_per_class].to(x.device)
             other_idx = shuffled[query_per_class:].to(x.device)
             used_idx = other_idx[:novel_shots] if new_id >= len(old_ids) else other_idx
+            if set(used_idx.cpu().tolist()).intersection(query_idx.cpu().tolist()):
+                raise AssertionError("Support/query overlap in pseudo-incremental episode")
+            supports_count += int(used_idx.numel())
+            queries_count += int(query_idx.numel())
             supports.append(F.normalize(x[used_idx].mean(dim=0), dim=-1))
             q_features.append(x[query_idx])
             q_labels.append(torch.full((len(query_idx),), new_id,
@@ -86,6 +93,13 @@ def select_base_only_contrastive_strength(
             visual[len(old_ids):] = F.normalize(
                 (1-shift_weight)*novel + shift_weight*correction, dim=-1
             )
+        split_audit.append({
+            "episode": episode_id, "pseudo_base_class_ids": old_ids,
+            "pseudo_novel_class_ids": novel_ids,
+            "support_images_used": supports_count,
+            "heldout_query_images": queries_count,
+            "support_query_overlap_count": 0,
+        })
         episodes_data.append({
             "visual_for_weights": torch.stack(supports),
             "visual_for_fusion": visual,
@@ -139,6 +153,7 @@ def select_base_only_contrastive_strength(
         "objective":"mean_pseudo_base_novel_harmonic_accuracy",
         "beta":float(beta),"vision_shift_weight":float(shift_weight),
         "vision_tau":float(tau),
+        "episode_splits":split_audit,
         "candidate_results":values,
         "selected_strength":float(selected["strength"]),
     }
