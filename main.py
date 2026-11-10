@@ -89,6 +89,8 @@ def extend_cfg(cfg):
     cfg.TRAINER.BiMC.VDT_VISUAL_EPISODE_SHOTS = 5
     cfg.TRAINER.BiMC.VDT_VISUAL_EPISODE_QUERIES = 5
     cfg.TRAINER.BiMC.VDT_VISUAL_LR = 0.0001
+    # Episodic visual loss: visual_ce (baseline) or fusion_ce (new).
+    cfg.TRAINER.BiMC.VDT_VISUAL_OBJECTIVE = 'visual_ce'
     # 0 = use all available training/support images per class in inference.
     cfg.TRAINER.BiMC.VDT_VISUAL_MAX_SUPPORT = 0
     cfg.TRAINER.BiMC.VDT_BATCH_SIZE = 256
@@ -168,6 +170,7 @@ def main():
         "vdt_visual_episode_shots": cfg.TRAINER.BiMC.VDT_VISUAL_EPISODE_SHOTS,
         "vdt_visual_episode_queries": cfg.TRAINER.BiMC.VDT_VISUAL_EPISODE_QUERIES,
         "vdt_visual_lr": cfg.TRAINER.BiMC.VDT_VISUAL_LR,
+        "vdt_visual_objective": cfg.TRAINER.BiMC.VDT_VISUAL_OBJECTIVE,
         "vdt_visual_max_support": cfg.TRAINER.BiMC.VDT_VISUAL_MAX_SUPPORT,
         "vdt_lr": cfg.TRAINER.BiMC.VDT_LR,
         "vdt_original_lambda_t": cfg.TRAINER.BiMC.VDT_ORIGINAL_LAMBDA_T,
