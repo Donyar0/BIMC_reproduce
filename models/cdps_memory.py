@@ -190,13 +190,39 @@ class IncrementalCDPS:
         _, patches, attention = self._encode(images.to(self.device))
         queries = [self._filter(patches[i], attention[i], is_query=True)
                    for i in range(len(images))]
-        # Avoid enormous [batch, classes, query patches, memory patches] tensors.
-        local_logits = torch.empty(len(images), len(class_ids), device=self.device)
-        for col, cid in enumerate(class_ids):
-            exemplars = self.memory[cid].to(self.device)
-            for row, query in enumerate(queries):
-                values = (query @ exemplars.T).max(dim=1).values
-                if self.query_topk > 0:
-                    values = values.topk(min(self.query_topk, len(values))).values
-                local_logits[row, col] = values.mean()
+        # Process classes in bounded chunks, with padding masks for different
+        # support / query patch counts. This is substantially faster than a
+        # Python loop over every query/class pair.
+        batch_size = len(queries)
+        max_q = max(len(q) for q in queries)
+        dim = queries[0].size(-1)
+        q_pad = torch.zeros(batch_size, max_q, dim, device=self.device)
+        q_len = torch.tensor([len(q) for q in queries], device=self.device)
+        for row, q in enumerate(queries):
+            q_pad[row, :len(q)] = q
+        q_valid = torch.arange(max_q, device=self.device)[None, :] < q_len[:, None]
+        local_logits = torch.empty(batch_size, len(class_ids), device=self.device)
+        chunk = 8
+        for start in range(0, len(class_ids), chunk):
+            names = class_ids[start:start + chunk]
+            memories = [self.memory[c].to(self.device) for c in names]
+            max_m = max(len(m) for m in memories)
+            bank = torch.zeros(len(names), max_m, dim, device=self.device)
+            m_valid = torch.zeros(len(names), max_m, dtype=torch.bool, device=self.device)
+            for j, mem in enumerate(memories):
+                bank[j, :len(mem)] = mem
+                m_valid[j, :len(mem)] = True
+            sim = torch.einsum("bqd,cmd->bcqm", q_pad, bank)
+            sim = sim.masked_fill(~m_valid[None, :, None, :], -1e4)
+            nearest = sim.max(dim=-1).values
+            nearest = nearest.masked_fill(~q_valid[:, None, :], -1e4)
+            if self.query_topk > 0:
+                ranks = min(self.query_topk, max_q)
+                values = nearest.topk(ranks, dim=-1).values
+                n = q_len.clamp(max=ranks)
+                selection = torch.arange(ranks, device=self.device)[None, None, :] < n[:, None, None]
+                score = (values * selection).sum(dim=-1) / n[:, None]
+            else:
+                score = nearest.masked_fill(~q_valid[:, None, :], 0).sum(dim=-1) / q_len[:, None]
+            local_logits[:, start:start + len(names)] = score
         return F.softmax(local_logits / self.temperature, dim=-1)
