@@ -73,6 +73,9 @@ def extend_cfg(cfg):
     cfg.TRAINER.BiMC.VDT_RATIO = 0.2
     cfg.TRAINER.BiMC.VDT_DROPOUT = 0.1
     cfg.TRAINER.BiMC.VDT_EPOCHS = 20
+    # Optional incremental-session five-shot CE updates (0 = frozen baseline).
+    cfg.TRAINER.BiMC.VDT_INC_EPOCHS = 0
+    cfg.TRAINER.BiMC.VDT_INC_LR = 0.00001
     cfg.TRAINER.BiMC.VDT_BATCH_SIZE = 256
     cfg.TRAINER.BiMC.VDT_LR = 0.0001
     cfg.TRAINER.BiMC.VDT_WEIGHT_DECAY = 0.0001
@@ -140,6 +143,8 @@ def main():
         "vdt_mode": cfg.TRAINER.BiMC.VDT_MODE,
         "vdt_ratio": cfg.TRAINER.BiMC.VDT_RATIO,
         "vdt_epochs": cfg.TRAINER.BiMC.VDT_EPOCHS,
+        "vdt_inc_epochs": cfg.TRAINER.BiMC.VDT_INC_EPOCHS,
+        "vdt_inc_lr": cfg.TRAINER.BiMC.VDT_INC_LR,
         "vdt_lr": cfg.TRAINER.BiMC.VDT_LR,
         "vdt_original_lambda_t": cfg.TRAINER.BiMC.VDT_ORIGINAL_LAMBDA_T,
         "ensemble": cfg.TRAINER.BiMC.USING_ENSEMBLE,
