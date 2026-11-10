@@ -48,6 +48,36 @@ def mean_description_prototypes(descriptions, valid_mask):
     return F.normalize(pooled, dim=-1)
 
 
+def visual_weighted_description_prototypes(descriptions, valid_mask, visual_prototypes,
+                                            temperature=10.0, blend=0.5):
+    """Training-free per-class description weighting from SUPPORT visual evidence.
+
+    The visual_prototypes input must contain training images only (all base
+    training images or five incremental shots), not any test-set features.
+    Uses CLIP cosine similarity between each class's own visual prototype and
+    its name-conditioned description embeddings; no cross-class leakage.
+    At blend=0 or temperature=0, reduces to untrained description mean.
+    """
+    if descriptions.ndim != 3 or valid_mask.shape != descriptions.shape[:2]:
+        raise ValueError("Expected descriptions [C, M, D] and mask [C, M]")
+    if visual_prototypes.shape != (descriptions.size(0), descriptions.size(2)):
+        raise ValueError("visual_prototypes must have shape [C, D]")
+    if not bool(valid_mask.any(dim=1).all()):
+        raise ValueError("Each class must have valid descriptions")
+    if temperature < 0 or not 0.0 <= blend <= 1.0:
+        raise ValueError("Temperature >= 0 and blend in [0,1] required")
+
+    desc = F.normalize(descriptions.float(), dim=-1)
+    visual = F.normalize(visual_prototypes.float(), dim=-1)
+    similarities = (desc * visual[:, None, :]).sum(dim=-1)
+    logits = (float(temperature) * similarities).masked_fill(~valid_mask, -1e4)
+    weights = torch.softmax(logits, dim=1)
+    weighted = F.normalize((desc * weights.unsqueeze(-1)).sum(dim=1), dim=-1)
+    mean = mean_description_prototypes(desc, valid_mask)
+    output = F.normalize((1.0 - blend) * mean + blend * weighted, dim=-1)
+    return output, weights
+
+
 class SelfAttentionTextAdapter(nn.Module):
     """The one-head, reduced-QKV, residual/LN CLIP-A-self design.
 
