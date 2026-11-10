@@ -78,6 +78,8 @@ def provenance():
 def run(args):
     if args.inc_epochs < 0 or args.inc_lr <= 0:
         raise ValueError("Incremental epochs must be nonnegative and LR positive")
+    if args.mode == "original" and args.objective != "text_ce":
+        raise ValueError("Original BiMC does not train a text Adapter")
     if args.mode == "original" and args.inc_epochs > 0:
         raise ValueError("Incremental updates require --mode linear")
     train_cfg = ROOT / "configs/trainers/bimc.yaml"
@@ -94,10 +96,13 @@ def run(args):
         "--opts", "SEED", str(args.seed), "TRAINER.BiMC.VDT_MODE", args.mode,
         "TRAINER.BiMC.VDT_INC_EPOCHS", str(args.inc_epochs),
         "TRAINER.BiMC.VDT_INC_LR", str(args.inc_lr),
+        "TRAINER.BiMC.VDT_TRAIN_OBJECTIVE", args.objective,
+        "TRAINER.BiMC.VDT_INC_OBJECTIVE", args.inc_objective,
     ]
     manifest = {
         "dataset": args.dataset, "seed": args.seed, "mode": args.mode,
         "incremental_epochs": args.inc_epochs, "incremental_lr": args.inc_lr,
+        "base_objective": args.objective, "incremental_objective": args.inc_objective,
         "config_sha256": {
             str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in (train_cfg, dataset_cfg)
@@ -137,6 +142,10 @@ def main():
     p.add_argument("--dataset", choices=sorted(DATASETS), default="cifar100")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--mode", choices=("linear", "original"), default="linear")
+    p.add_argument("--objective", choices=("text_ce", "fusion_ce"),
+                   default="text_ce", help="Base-session adapter loss; default reproduces old CE")
+    p.add_argument("--inc-objective", choices=("text_ce", "fusion_ce"),
+                   default="text_ce", help="Optional incremental-session adapter loss")
     p.add_argument("--inc-epochs", type=int, default=0,
                    help="5-shot epochs per incremental session; default 0 keeps Adapter frozen")
     p.add_argument("--inc-lr", type=float, default=1e-5,
