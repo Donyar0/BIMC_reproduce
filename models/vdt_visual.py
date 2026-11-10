@@ -126,29 +126,35 @@ def train_visual_aggregator(adapter, features, targets, num_classes,
         p.requires_grad_(True)
     adapter.train()
     history = []
+    # Visual dropout RNG is identical across visual-only/dual runs and
+    # does not change the following text-only Adapter training RNG.
+    rng_devices = [features.device.index if features.device.index is not None
+                   else torch.cuda.current_device()] if features.is_cuda else []
     try:
-        with torch.enable_grad():
-            for epoch in range(int(epochs)):
-                sum_loss = 0.0
-                for _ in range(int(steps_per_epoch)):
-                    supports, mask, queries, labels, _, _ = (
-                        sample_disjoint_visual_episode(
-                            features, targets, num_classes,
-                            support_per_class,query_per_class,generator=gen
+        with torch.random.fork_rng(devices=rng_devices):
+            torch.manual_seed(int(seed) + 91732)
+            with torch.enable_grad():
+                for epoch in range(int(epochs)):
+                    sum_loss = 0.0
+                    for _ in range(int(steps_per_epoch)):
+                        supports, mask, queries, labels, _, _ = (
+                            sample_disjoint_visual_episode(
+                                features, targets, num_classes,
+                                support_per_class, query_per_class, generator=gen
+                            )
                         )
-                    )
-                    optimizer.zero_grad()
-                    prototypes = adapter(supports,mask)
-                    logits = 100.0 * (queries @ prototypes.t())
-                    loss = F.cross_entropy(logits,labels)
-                    loss.backward()
-                    optimizer.step()
-                    sum_loss += float(loss.detach())
-                mean_loss = sum_loss / steps_per_epoch
-                history.append(mean_loss)
-                print("VISUAL_ADAPTER base epoch={}/{} episodic_CE={:.6f}".format(
-                    epoch+1,epochs,mean_loss
-                ))
+                        optimizer.zero_grad()
+                        prototypes = adapter(supports,mask)
+                        logits = 100.0 * (queries @ prototypes.t())
+                        loss = F.cross_entropy(logits,labels)
+                        loss.backward()
+                        optimizer.step()
+                        sum_loss += float(loss.detach())
+                    mean_loss = sum_loss / steps_per_epoch
+                    history.append(mean_loss)
+                    print("VISUAL_ADAPTER base epoch={}/{} episodic_CE={:.6f}".format(
+                        epoch+1,epochs,mean_loss
+                    ))
     finally:
         adapter.eval()
         for p in adapter.parameters():
