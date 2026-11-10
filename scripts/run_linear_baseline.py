@@ -89,6 +89,11 @@ def run(args):
     use_text = ablation in ("text", "both")
     use_visual = ablation in ("visual", "both")
     text_mode = "linear" if use_text else "original"
+    if use_visual and args.objective != "text_ce":
+        raise ValueError(
+            "Visual aggregation currently supports only text_ce for the text "
+            "branch (fusion_ce LOO would need attention-aware leave-one-out)"
+        )
     if use_visual and args.inc_epochs:
         raise ValueError("Both Adapters are frozen after base training in the visual ablations")
     if args.visual_epochs < 1 or args.visual_steps < 1 or args.visual_max_support < 0:
