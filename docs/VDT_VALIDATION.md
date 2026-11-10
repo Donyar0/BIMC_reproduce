@@ -75,3 +75,51 @@ observations, not newly rerun results.
 To reproduce historical comparisons, use the archives from prior
 experiments or commit history rather than restoring obsolete modules
 in this clean branch.
+
+## Optional incremental-session Linear Adapter fine-tuning
+
+The default setup remains the **frozen-Adapter control**:
+`VDT_INC_EPOCHS=0`. For an incremental-learning ablation, use a
+**separate** low learning rate and 3 epochs on each incremental
+session's 5-shot labeled support images:
+
+```bash
+# Control: base CE training only; adapter frozen for the 8/10 new sessions
+python scripts/run_linear_baseline.py --dataset cifar100 --seed 1
+
+# Incremental experiment: 3 AdamW epochs per new session, lr=1e-5
+python scripts/run_linear_baseline.py --dataset cifar100 --seed 1 \
+    --inc-epochs 3 --inc-lr 1e-5
+
+# Focus on fine-grained dataset, one run only:
+python scripts/run_linear_baseline.py --dataset cub200 --seed 1 \
+    --inc-epochs 3 --inc-lr 1e-5
+```
+
+The underlying `main.py` flags are:
+`TRAINER.BiMC.VDT_INC_EPOCHS` (default 0) and
+`TRAINER.BiMC.VDT_INC_LR` (default 1e-5).
+The base-stage epochs/lr are unchanged. The original BiMC mode does
+not update any adapter.
+
+**Protocol:** at the start of each incremental session, build that
+session's statistics from its **training/support images only**.
+Fine-tune the *same base-trained Linear Adapter*, with CE on current
+session images and their original global class labels. The softmax
+classifier consists of **all seen text prototypes**, meaning the new
+shots compete against base and previously seen novel classes. No old
+image replay, distillation, additional auxiliary losses, old image
+features, or test data are used in the update. The CLIP encoders stay
+frozen. After training, freeze the adapter, recompute all seen text
+prototypes with the updated weights, and evaluate.
+
+Each incremental session prints `VDT-Adapter incremental task=... CE=...`
+and `VDT_INCREMENTAL_UPDATE_JSON` with new image count, seen-class
+count, LR, epochs and parameter delta norm. The original Final Acc,
+Task-wise Acc and base/novel bias summaries stay unchanged.
+
+This is an intentionally minimal ablation, **not** a claim that
+few-shot updating will help. Updating a globally shared adapter with
+only new-class CE may drift older text prototypes and harm base-class
+accuracy. Compare Base/Novel/Final accuracies against the frozen
+control before trying any replay or regularization.
