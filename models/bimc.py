@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import models.clip.clip as clip
 import json
 from models.vdt_self_attention import (SelfAttentionTextAdapter, LinearTextAdapter, MLPTextAdapter, pack_description_bank, mean_description_prototypes, visual_weighted_description_prototypes)
+from models.vdt_contrastive import contrastive_description_prototypes, description_weight_diagnostics
+from models.vdt_pseudo_validation import select_base_only_contrastive_strength
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -207,13 +209,52 @@ class BiMC(nn.Module):
         )
         return output, classes, weights
 
+    @torch.no_grad()
+    def vdt_contrastive_prototypes(self, features, labels, support_prototypes):
+        packed, mask, classes = pack_description_bank(features, labels)
+        expected = torch.arange(len(classes), device=classes.device)
+        if not torch.equal(classes, expected):
+            raise ValueError("Contrastive VDT needs contiguous seen-class IDs")
+        if len(classes) != support_prototypes.size(0):
+            raise ValueError("Class IDs and support prototypes do not match")
+        output, weights, _ = contrastive_description_prototypes(
+            packed, mask, support_prototypes,
+            temperature=self.cfg.TRAINER.BiMC.VDT_VISUAL_TEMP,
+            blend=self.cfg.TRAINER.BiMC.VDT_VISUAL_BLEND,
+            negative_strength=self.contrastive_strength,
+        )
+        return output, classes, weights
+
+    @torch.no_grad()
+    def select_contrastive_strength(self, base_state):
+        if self.cfg.TRAINER.BiMC.VDT_MODE != "contrastive_cv":
+            return
+        raw = self.cfg.TRAINER.BiMC.VDT_CV_CANDIDATES
+        if not isinstance(raw, (list, tuple)) or not raw:
+            raise ValueError("VDT_CV_CANDIDATES must be nonempty")
+        self.contrastive_strength, self.cv_report = select_base_only_contrastive_strength(
+            base_state=base_state,
+            beta=float(self.cfg.DATASET.BETA),
+            shift_weight=float(self.cfg.TRAINER.BiMC.LAMBDA_I) if
+                         self.cfg.TRAINER.BiMC.VISION_CALIBRATION else 0.0,
+            tau=float(self.cfg.TRAINER.BiMC.TAU),
+            seed=int(self.cfg.SEED),
+            candidates=raw,
+            episodes=int(self.cfg.TRAINER.BiMC.VDT_CV_EPISODES),
+            query_per_class=int(self.cfg.TRAINER.BiMC.VDT_CV_QUERIES),
+            novel_shots=int(self.cfg.DATASET.NUM_INC_SHOT),
+            temperature=float(self.cfg.TRAINER.BiMC.VDT_VISUAL_TEMP),
+            blend=float(self.cfg.TRAINER.BiMC.VDT_VISUAL_BLEND),
+        )
+        print("VDT_PSEUDO_CV_JSON:" + json.dumps(self.cv_report, sort_keys=True))
+
     def train_base_text_adapter(self, base_state):
         """Train solely on base-session image features and their labels.
 
         CLIP image/text encoders are frozen. Only attention parameters update.
         Does not access any incremental class training images or descriptions.
         """
-        if self.cfg.TRAINER.BiMC.VDT_MODE in ("mean", "original", "visual_weighted"):
+        if self.cfg.TRAINER.BiMC.VDT_MODE in ("mean", "original", "visual_weighted", "contrastive_fixed", "contrastive_cv"):
             self.text_adapter.eval()
             self.text_adapter_trained = False
             print("VDT mode={}: skip Self-Attention training".format(
