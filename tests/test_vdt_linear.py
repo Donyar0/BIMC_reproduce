@@ -3,6 +3,8 @@
 python -m unittest discover -s tests -v
 """
 import json
+import contextlib
+import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -109,8 +111,29 @@ class TestCleanLinear(unittest.TestCase):
             "vdt_targets": labels,
         }
         before = [p.detach().clone() for p in model.text_adapter.parameters()]
-        with torch.no_grad():  # Runner.run is itself @torch.no_grad().
+        packed, mask, _ = pack_description_bank(
+            merged["vdt_features"], merged["vdt_targets"]
+        )
+        model.text_adapter.eval()
+        with torch.no_grad():
+            text_before = model.text_adapter(packed, mask).detach().clone()
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured), torch.no_grad():
+            # Runner.run is itself @torch.no_grad().
             model.train_incremental_text_adapter(state, merged, task_id=1)
+        with torch.no_grad():
+            text_after = model.text_adapter(packed, mask).detach().clone()
+        updates = [line.split("VDT_INCREMENTAL_UPDATE_JSON:", 1)[-1]
+                   for line in captured.getvalue().splitlines()
+                   if line.startswith("VDT_INCREMENTAL_UPDATE_JSON:")]
+        self.assertEqual(len(updates), 1)
+        summary = json.loads(updates[0])
+        self.assertEqual(summary["num_train_samples"], 2)
+        self.assertEqual(summary["num_seen_classes"], 3)
+        self.assertGreater(summary["parameter_delta_l2"], 0)
+        self.assertIn("previous_text_proto_cosine_before_after", summary)
+        self.assertIn("new_text_proto_cosine_before_after", summary)
+        self.assertFalse(torch.equal(text_before[:2], text_after[:2]))
         self.assertTrue(any(
             not torch.equal(a, b) for a, b in
             zip(before, model.text_adapter.parameters())
@@ -145,10 +168,12 @@ class TestCleanLinear(unittest.TestCase):
 
     def test_result_parser(self):
         log="BIAS_METRICS_JSON:{\"session\":0}\nFinal acc:[80.0,75.0]\nTask-wise acc:\ntask  0, acc:[80.0]\ntask  1, acc:[78.0,50.0]\n"
+        log += ("VDT_INCREMENTAL_UPDATE_JSON:{\\\"session\\\":1,\\\"parameter_delta_l2\\\":0.4}\\n")
         parsed=parse_run(log)
         self.assertEqual(parsed["last_acc"],75.)
         self.assertEqual(parsed["task_wise_acc"][-1],[78.,50.])
         self.assertEqual(parsed["bias_by_session"][0]["session"],0)
+        self.assertEqual(parsed["incremental_updates"][0]["session"],1)
 
 
 if __name__=="__main__":
