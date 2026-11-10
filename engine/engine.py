@@ -102,6 +102,12 @@ class Runner:
 
             state_dict_list.append(current_state_dict)
             merged_state_dict = self.merge_dicts(state_dict_list)
+            if i > 0 and self.cfg.TRAINER.BiMC.VDT_MODE == "linear":
+                # Only current-session labeled 5-shot images supervise the
+                # adapter; all seen text prototypes compete in the CE logits.
+                core_model.train_incremental_text_adapter(
+                    current_state_dict, merged_state_dict, task_id=i
+                )
             if self.cfg.TRAINER.BiMC.VDT_MODE == "linear":
                 core_model.text_adapter.eval()
                 with torch.no_grad():
