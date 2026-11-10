@@ -297,7 +297,9 @@ class BiMC(nn.Module):
         )
         if task_id == 0:
             self.base_vision_prototype = result.detach().clone()
-        elif self.cfg.TRAINER.BiMC.VISION_CALIBRATION:
+        elif (self.cfg.TRAINER.BiMC.VISION_CALIBRATION
+              and self.cfg.TRAINER.BiMC.VDT_VISUAL_NOVEL_CALIBRATION):
+            # Optional BiMC second-stage calibration of the new class.
             result = self.soft_calibration(self.base_vision_prototype, result)
         # CLIP fp16 inference expects image prototypes in its image-feature
         # dtype; keep the base calibration reference in fp32 internally.
