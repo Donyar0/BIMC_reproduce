@@ -7,6 +7,7 @@ from tqdm import tqdm
 from utils.evaluator import AccuracyEvaluator
 from utils.experiment_logger import log_metrics
 from models.bimc import BiMC
+from models.cdps_memory import IncrementalCDPS
 import numpy as np
 import time
 
@@ -19,6 +20,7 @@ class Runner:
         self.device = cfg.DEVICE.DEVICE_NAME
 
         self.model = BiMC(cfg, self.data_manager.template, self.device)
+        self.cdps = IncrementalCDPS(self.model.clip_model, cfg) if cfg.TRAINER.CDPS.ENABLED else None
 
         # device
         device_count = torch.cuda.device_count()
@@ -90,6 +92,10 @@ class Runner:
                                                              class_index=self.data_manager.class_index_in_task[i], 
                                                              calibrate_novel_vision_proto=self.cfg.TRAINER.BiMC.VISION_CALIBRATION,)
 
+            if self.cdps is not None:
+                # Use exactly this session's support loader; no old training images.
+                self.cdps.add_session(i, loader, self.data_manager.class_index_in_task[i])
+
             state_dict_list.append(current_state_dict)            
             merged_state_dict = self.merge_dicts(state_dict_list)
 
@@ -139,6 +145,8 @@ class Runner:
         
         test_loader = self.data_manager.get_dataloader(task_id, source='test', mode='test')
         all_logits = []
+        all_global_logits = []
+        all_local_logits = []
         all_targets = []
 
         for i, batch in enumerate(tqdm(test_loader)):
@@ -152,13 +160,35 @@ class Runner:
                                                    text_features,
                                                    beta=beta)
 
-            all_logits.append(logits)
-            all_targets.append(targets)
+            if self.cdps is not None:
+                class_ids = list(range(num_accumulated_class))
+                patch_prob = self.cdps.probabilities(data, class_ids)
+                global_prob = logits.float()
+                # BiMC outputs probabilities, not raw cosine logits.
+                # Renormalize because its base / incremental ensemble has separate mixing.
+                global_prob = global_prob / global_prob.sum(-1, keepdim=True).clamp_min(1e-12)
+                w = float(self.cfg.TRAINER.CDPS.GLOBAL_WEIGHT)
+                if not 0 <= w <= 1:
+                    raise ValueError("CDPS GLOBAL_WEIGHT must be in [0, 1].")
+                all_global_logits.append(global_prob.cpu())
+                all_local_logits.append(patch_prob.cpu())
+                logits = w * global_prob + (1. - w) * patch_prob
+            all_logits.append(logits.cpu())
+            all_targets.append(targets.cpu())
 
         all_logits = torch.cat(all_logits, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
 
-        eval_acc = self.evaluator.calc_accuracy(all_logits, all_targets, task_id) 
+        eval_acc = self.evaluator.calc_accuracy(all_logits, all_targets, task_id)
+        if self.cdps is not None:
+            global_acc = self.evaluator.calc_accuracy(torch.cat(all_global_logits), all_targets, task_id)
+            local_acc = self.evaluator.calc_accuracy(torch.cat(all_local_logits), all_targets, task_id)
+            print("CDPS ablation session %d: BiMC=%.2f, Patch=%.2f, Hybrid=%.2f (global_weight=%.2f)" %
+                  (task_id, global_acc["mean_acc"], local_acc["mean_acc"],
+                   eval_acc["mean_acc"], self.cfg.TRAINER.CDPS.GLOBAL_WEIGHT))
+            log_metrics({"bimc_only_acc": global_acc["mean_acc"],
+                         "cdps_only_acc": local_acc["mean_acc"],
+                         "hybrid_acc": eval_acc["mean_acc"]}, step=task_id) 
         print(f"Test acc mean: {eval_acc['mean_acc']}, task-wise acc: {eval_acc['task_acc']}")
         return eval_acc
     
