@@ -104,14 +104,16 @@ class Runner:
 
             core_model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
             if i == 0:
-                # Independent base training: vision first (allows text
-                # fusion_ce to use the actual inference visual prototype).
+                # Train text first so the fusion-trained Visual Adapter
+                # can use a fixed, fully-trained text classifier. The visual
+                # init and training RNG are isolated, preserving text-only
+                # comparison results.
+                core_model.train_base_text_adapter(current_state_dict)
                 if use_visual:
                     core_model.train_base_visual_adapter(current_state_dict)
                     current_state_dict["image_proto"] = core_model.vdt_visual_prototypes(
                         current_state_dict, task_id=i
                     )
-                core_model.train_base_text_adapter(current_state_dict)
             elif use_visual:
                 # Frozen visual adapter, new-class support images only.
                 current_state_dict["image_proto"] = core_model.vdt_visual_prototypes(
