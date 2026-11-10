@@ -233,6 +233,87 @@ class BiMC(nn.Module):
             param.requires_grad_(False)
         self.text_adapter_trained = True
 
+    def train_incremental_text_adapter(self, current_state, merged_state, task_id):
+        """Optional session-wise CE fine-tuning on NEW training shots only.
+
+        The model is base-trained first. At session t>0, all seen class text
+        descriptions act as competing classifier weights, but only the current
+        session's 5-shot image features/labels provide CE supervision.
+        No replay, distillation, test images, or extra losses are used.
+        Trainable Linear Adapter is refrozen before evaluation.
+        """
+        epochs = int(self.cfg.TRAINER.BiMC.VDT_INC_EPOCHS)
+        if self.text_adapter is None or task_id == 0 or epochs <= 0:
+            return
+        if not self.text_adapter_trained:
+            raise RuntimeError("Train base adapter before incremental fine-tuning")
+        lr = float(self.cfg.TRAINER.BiMC.VDT_INC_LR)
+        if lr <= 0 or epochs < 0:
+            raise ValueError("Incremental learning rate must be positive")
+        packed, mask, classes = pack_description_bank(
+            merged_state["vdt_features"].detach(),
+            merged_state["vdt_targets"].detach(),
+        )
+        expected = torch.arange(len(classes), device=classes.device)
+        if not torch.equal(classes, expected):
+            raise ValueError("Seen classes must be contiguous, zero-based IDs")
+        images = F.normalize(current_state["images_features"].detach().float(), dim=-1)
+        labels = current_state["images_targets"].detach().long()
+        current_ids = torch.as_tensor(current_state["class_index"], device=labels.device)
+        if images.numel() == 0 or not torch.isin(labels, current_ids).all():
+            raise ValueError("Incremental training images must be from the new session")
+        if labels.min() < 0 or labels.max() >= len(classes):
+            raise ValueError("Incremental labels do not match seen class classifier")
+
+        adapter = self.text_adapter
+        params_before = [p.detach().clone() for p in adapter.parameters()]
+        for p in adapter.parameters():
+            p.requires_grad_(True)
+        adapter.train()
+        optimizer = torch.optim.AdamW(
+            adapter.parameters(),
+            lr=lr,
+            weight_decay=self.cfg.TRAINER.BiMC.VDT_WEIGHT_DECAY,
+        )
+        batch_size = int(self.cfg.TRAINER.BiMC.VDT_BATCH_SIZE)
+        if batch_size <= 0:
+            raise ValueError("VDT_BATCH_SIZE must be positive")
+        try:
+            with torch.enable_grad():
+                for epoch in range(epochs):
+                    order = torch.randperm(images.size(0), device=images.device)
+                    loss_total = 0.0
+                    for start in range(0, images.size(0), batch_size):
+                        idx = order[start:start + batch_size]
+                        optimizer.zero_grad()
+                        classifier = adapter(packed, mask)
+                        logits = 100.0 * images[idx] @ classifier.t()
+                        loss = F.cross_entropy(logits, labels[idx])
+                        loss.backward()
+                        optimizer.step()
+                        loss_total += loss.detach().item() * idx.numel()
+                    print("VDT-Adapter incremental task={} epoch={}/{} CE={:.6f}".format(
+                        task_id, epoch + 1, epochs, loss_total / images.size(0)
+                    ))
+        finally:
+            adapter.eval()
+            for p in adapter.parameters():
+                p.requires_grad_(False)
+        with torch.no_grad():
+            delta_sq = sum(
+                (p.detach().float() - old.float()).square().sum().item()
+                for p, old in zip(adapter.parameters(), params_before)
+            )
+        print("VDT_INCREMENTAL_UPDATE_JSON:" + json.dumps({
+            "session": task_id,
+            "num_train_samples": int(images.size(0)),
+            "num_new_classes": int(current_ids.numel()),
+            "num_seen_classes": int(len(classes)),
+            "epochs": epochs,
+            "lr": lr,
+            "parameter_delta_l2": delta_sq ** 0.5,
+        }, sort_keys=True))
+
     def soft_calibration(self, base_protos, cur_protos):
         shift_weight = self.cfg.TRAINER.BiMC.LAMBDA_I
         tau = self.cfg.TRAINER.BiMC.TAU
