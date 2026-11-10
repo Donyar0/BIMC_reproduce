@@ -60,6 +60,9 @@ class BiMC(nn.Module):
             )
         self.text_adapter = adapter.to(self.device)
         self.text_adapter_trained = False
+        # Initialize for fixed mode; base-train pseudo-CV may overwrite it.
+        self.contrastive_strength = float(cfg.TRAINER.BiMC.VDT_NEGATIVE_STRENGTH)
+        self.cv_report = None
         print("VDT_MODE={} | trainable adapter parameters={}".format(
             mode, sum(p.numel() for p in self.text_adapter.parameters())
         ))
