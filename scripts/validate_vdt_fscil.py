@@ -73,8 +73,7 @@ def git_info(root):
     source_paths = ["main.py", "models/bimc.py",
                     "models/vdt_contrastive.py",
                     "models/vdt_pseudo_validation.py",
-                    "models/vdt_self_attention.py", "models/vdt_contrastive.py",
-                    "models/vdt_pseudo_validation.py",
+                    "models/vdt_self_attention.py",
                     "scripts/run_vdt_contrastive.py", "engine/engine.py"]
     source_hashes = {name: file_sha256(root / name)
                      for name in source_paths if (root / name).is_file()}
