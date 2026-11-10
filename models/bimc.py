@@ -68,12 +68,17 @@ class BiMC(nn.Module):
         self.visual_adapter_trained = False
         if cfg.TRAINER.BiMC.VDT_USE_VISUAL_ADAPTER:
             dim = int(self.clip_model.visual.output_dim)
-            self.visual_adapter = VisionSelfAttentionAdapter(
-                embed_dim=dim,
-                reduction=cfg.TRAINER.BiMC.VDT_VISUAL_REDUCTION,
-                ratio=cfg.TRAINER.BiMC.VDT_VISUAL_RATIO,
-                dropout=cfg.TRAINER.BiMC.VDT_VISUAL_DROPOUT,
-            ).to(self.device)
+            # Independent, reproducible initialization: text-only vs dual
+            # comparisons must not change Linear Adapter initialization.
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(int(cfg.SEED) + 91731)
+                visual_net = VisionSelfAttentionAdapter(
+                    embed_dim=dim,
+                    reduction=cfg.TRAINER.BiMC.VDT_VISUAL_REDUCTION,
+                    ratio=cfg.TRAINER.BiMC.VDT_VISUAL_RATIO,
+                    dropout=cfg.TRAINER.BiMC.VDT_VISUAL_DROPOUT,
+                )
+            self.visual_adapter = visual_net.to(self.device)
             print("VDT_VISUAL_ATTENTION | trainable parameters={}".format(
                 sum(p.numel() for p in self.visual_adapter.parameters())
             ))
@@ -257,7 +262,9 @@ class BiMC(nn.Module):
             self.base_vision_prototype = result.detach().clone()
         elif self.cfg.TRAINER.BiMC.VISION_CALIBRATION:
             result = self.soft_calibration(self.base_vision_prototype, result)
-        return result
+        # CLIP fp16 inference expects image prototypes in its image-feature
+        # dtype; keep the base calibration reference in fp32 internally.
+        return result.to(dtype=state["image_proto"].dtype)
 
     def train_base_text_adapter(self, base_state):
         """Train linear adapter on base-session images only; freeze in FSCIL."""
