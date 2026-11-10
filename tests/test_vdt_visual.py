@@ -95,7 +95,8 @@ class TestVisualAdapter(unittest.TestCase):
         torch.nn.Module.__init__(model)
         model.cfg = SimpleNamespace(TRAINER=SimpleNamespace(BiMC=SimpleNamespace(
             VDT_VISUAL_MAX_SUPPORT=0,
-            VISION_CALIBRATION=True, LAMBDA_I=0.1, TAU=16,
+            VISION_CALIBRATION=True, VDT_VISUAL_NOVEL_CALIBRATION=True,
+            LAMBDA_I=0.1, TAU=16,
         )))
         model.visual_adapter = VisionSelfAttentionAdapter(
             embed_dim=8, reduction=2, dropout=0.
@@ -122,6 +123,48 @@ class TestVisualAdapter(unittest.TestCase):
         self.assertEqual(out_new.dtype, torch.float16)
         self.assertEqual(tuple(out_new.shape), (1, 8))
         self.assertTrue(torch.isfinite(out_new).all())
+
+    def test_novel_visual_calibration_toggle_only_changes_novel_prototype(self):
+        from types import SimpleNamespace
+        from models.bimc import BiMC
+        model = BiMC.__new__(BiMC)
+        torch.nn.Module.__init__(model)
+        cfg = SimpleNamespace(
+            VDT_VISUAL_MAX_SUPPORT=0, VISION_CALIBRATION=True,
+            VDT_VISUAL_NOVEL_CALIBRATION=True,
+            LAMBDA_I=0.4, TAU=16,
+        )
+        model.cfg = SimpleNamespace(TRAINER=SimpleNamespace(BiMC=cfg))
+        model.visual_adapter = VisionSelfAttentionAdapter(
+            embed_dim=8, reduction=2, dropout=0.
+        ).eval()
+        model.visual_adapter_trained = True
+        for p in model.visual_adapter.parameters():
+            p.requires_grad_(False)
+        base = {
+            "images_features": self.images.half(),
+            "images_targets": self.labels,
+            "image_proto": torch.zeros(6, 8, dtype=torch.float16),
+            "class_index": list(range(6)),
+        }
+        new = {
+            "images_features": F.normalize(torch.randn(5, 8), dim=-1).half(),
+            "images_targets": torch.full((5,), 6, dtype=torch.long),
+            "image_proto": torch.zeros(1, 8, dtype=torch.float16),
+            "class_index": [6],
+        }
+        baseline_base = model.vdt_visual_prototypes(base, task_id=0)
+        enabled_new = model.vdt_visual_prototypes(new, task_id=1)
+        cfg.VDT_VISUAL_NOVEL_CALIBRATION = False
+        disabled_base = model.vdt_visual_prototypes(base, task_id=0)
+        disabled_new = model.vdt_visual_prototypes(new, task_id=1)
+        torch.testing.assert_close(baseline_base, disabled_base)
+        raw_new = aggregate_visual_classes(
+            model.visual_adapter, new["images_features"],
+            new["images_targets"], torch.tensor([6]),
+        ).to(dtype=torch.float16)
+        torch.testing.assert_close(disabled_new, raw_new)
+        self.assertFalse(torch.equal(enabled_new, disabled_new))
 
     def test_visual_fusion_logits_match_bimc_classifier(self):
         queries = F.normalize(torch.randn(6, 8), dim=-1)
