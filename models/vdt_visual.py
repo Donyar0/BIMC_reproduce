@@ -101,10 +101,46 @@ def sample_disjoint_visual_episode(features, targets, num_classes,
     return support, mask, queries, query_labels, support_idx, query_idx
 
 
+def visual_episode_logits(queries, visual_prototypes,
+                          objective="visual_ce", text_prototypes=None,
+                          beta=None, logit_scale=100.0):
+    """Use exactly the same normalized fused classifier as BiMC inference.
+
+    visual_ce:   query @ normalized visual prototypes
+    fusion_ce:   query @ normalized(beta * text + (1-beta) * visual)
+
+    Class text prototypes are detached: only visual attention is optimized
+    during the visual training phase. In original-BiMC mode text prototypes
+    are the *unnormalized* prompt/description interpolation (as at inference).
+    """
+    if objective not in ("visual_ce", "fusion_ce"):
+        raise ValueError("Unknown visual training objective: " + str(objective))
+    if queries.ndim != 2 or visual_prototypes.ndim != 2:
+        raise ValueError("Queries and prototypes must be 2D")
+    visual = F.normalize(visual_prototypes.float(), dim=-1)
+    if queries.shape[-1] != visual.shape[-1]:
+        raise ValueError("Mismatched CLIP embedding dimensions")
+    if objective == "fusion_ce":
+        if text_prototypes is None or beta is None:
+            raise ValueError("Fusion visual CE requires text prototypes and beta")
+        if text_prototypes.shape != visual.shape or not 0.0 <= float(beta) <= 1.0:
+            raise ValueError("Invalid text prototypes or fusion coefficient")
+        classifier = F.normalize(
+            float(beta) * text_prototypes.detach().float() +
+            (1.0 - float(beta)) * visual, dim=-1
+        )
+    else:
+        classifier = visual
+    return float(logit_scale) * (F.normalize(queries.detach().float(), dim=-1)
+                                 @ classifier.t())
+
+
 def train_visual_aggregator(adapter, features, targets, num_classes,
                             epochs=20, steps_per_epoch=10,
                             support_per_class=5, query_per_class=5,
-                            lr=1e-4, weight_decay=1e-4, seed=1):
+                            lr=1e-4, weight_decay=1e-4, seed=1,
+                            objective="visual_ce", text_prototypes=None,
+                            beta=None):
     """Train visual self-attention with episodic, class-level prototype CE.
 
     Only adapter parameters get gradients; both query and support CLIP
@@ -115,6 +151,16 @@ def train_visual_aggregator(adapter, features, targets, num_classes,
         raise ValueError("Invalid visual training epochs/steps/lr")
     if features.ndim != 2 or len(features) != len(targets):
         raise ValueError("Invalid base support features")
+    if objective not in ("visual_ce", "fusion_ce"):
+        raise ValueError("Unknown visual training objective")
+    if objective == "fusion_ce":
+        if text_prototypes is None or beta is None:
+            raise ValueError("fusion_ce needs frozen class text prototypes and beta")
+        if tuple(text_prototypes.shape) != (num_classes, features.shape[-1]):
+            raise ValueError("Class text prototypes must be [C,D]")
+        if not 0.0 <= float(beta) <= 1.0:
+            raise ValueError("Invalid fusion coefficient")
+        text_prototypes = text_prototypes.detach().float()
     class_ids = torch.unique(targets.long(),sorted=True)
     if not torch.equal(class_ids,torch.arange(num_classes,device=targets.device)):
         raise ValueError("Base training class IDs must be 0..C-1")
@@ -145,15 +191,18 @@ def train_visual_aggregator(adapter, features, targets, num_classes,
                         )
                         optimizer.zero_grad()
                         prototypes = adapter(supports,mask)
-                        logits = 100.0 * (queries @ prototypes.t())
+                        logits = visual_episode_logits(
+                            queries, prototypes, objective=objective,
+                            text_prototypes=text_prototypes, beta=beta,
+                        )
                         loss = F.cross_entropy(logits,labels)
                         loss.backward()
                         optimizer.step()
                         sum_loss += float(loss.detach())
                     mean_loss = sum_loss / steps_per_epoch
                     history.append(mean_loss)
-                    print("VISUAL_ADAPTER base epoch={}/{} episodic_CE={:.6f}".format(
-                        epoch+1,epochs,mean_loss
+                    print("VISUAL_ADAPTER base epoch={}/{} objective={} episodic_CE={:.6f}".format(
+                        epoch+1,epochs,objective,mean_loss
                     ))
     finally:
         adapter.eval()
