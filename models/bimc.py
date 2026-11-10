@@ -223,6 +223,35 @@ class BiMC(nn.Module):
         class_ids = torch.as_tensor(base_state["class_index"],device=labels.device)
         if not torch.equal(class_ids,torch.arange(len(class_ids),device=labels.device)):
             raise ValueError("Base class IDs must be contiguous and zero-based")
+        objective = str(self.cfg.TRAINER.BiMC.VDT_VISUAL_OBJECTIVE)
+        visual_text_prototypes = None
+        if objective == "fusion_ce":
+            # Build the SAME text branch used at BiMC inference. In the
+            # visual-only arm, original prompt/description interpolation is
+            # intentionally NOT normalized before fusion. In both, use
+            # the already base-trained, frozen Linear Adapter.
+            with torch.no_grad():
+                if self.text_adapter is None:
+                    weight = float(self.cfg.TRAINER.BiMC.VDT_ORIGINAL_LAMBDA_T)
+                    visual_text_prototypes = (
+                        (1.0 - weight) * base_state["text_features"].float()
+                        + weight * base_state["description_proto"].float()
+                    )
+                else:
+                    if not self.text_adapter_trained:
+                        raise RuntimeError(
+                            "Train text Adapter before visual fusion CE"
+                        )
+                    self.text_adapter.eval()
+                    packed, valid, ids = pack_description_bank(
+                        base_state["vdt_features"].detach(),
+                        base_state["vdt_targets"].detach(),
+                    )
+                    if not torch.equal(ids, class_ids):
+                        raise ValueError("Text and visual class orders differ")
+                    visual_text_prototypes = self.text_adapter(
+                        packed, valid
+                    ).detach().float()
         history = train_visual_aggregator(
             self.visual_adapter, features, labels,
             num_classes=len(class_ids),
@@ -233,10 +262,17 @@ class BiMC(nn.Module):
             lr=float(self.cfg.TRAINER.BiMC.VDT_VISUAL_LR),
             weight_decay=float(self.cfg.TRAINER.BiMC.VDT_WEIGHT_DECAY),
             seed=int(self.cfg.SEED),
+            objective=objective,
+            text_prototypes=visual_text_prototypes,
+            beta=float(self.cfg.DATASET.BETA),
         )
         self.visual_adapter_trained = True
         print("VDT_VISUAL_TRAIN_JSON:" + json.dumps({
             "training":"base_only_disjoint_episodic_support_query",
+            "objective":objective,
+            "text_mode":str(self.cfg.TRAINER.BiMC.VDT_MODE),
+            "beta":float(self.cfg.DATASET.BETA),
+            "text_prototypes_frozen":objective == "fusion_ce",
             "num_base_images":int(len(features)),
             "epochs":len(history),
             "steps_per_epoch":int(self.cfg.TRAINER.BiMC.VDT_VISUAL_STEPS),
