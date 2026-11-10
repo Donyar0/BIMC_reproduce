@@ -287,3 +287,81 @@ class, while default base inference uses all support images. This
 is intentional for 5-shot novel generalization, but a support-count
 distribution shift remains and should be reported. No results are
 claimed until actual GPU runs are complete.
+
+
+## New: Visual Adapter CE versus multimodal fused CE
+
+The pure visual attention module and FSCIL inference stay unchanged.
+Only the **base-session visual attention training loss** is switched:
+
+- `VDT_VISUAL_OBJECTIVE=visual_ce` (default): support images produce a
+  visual attention prototype; disjoint query images are classified with
+  `CE(100 * normalized_query @ normalized_visual_prototypes.T, y)`.
+- `VDT_VISUAL_OBJECTIVE=fusion_ce`: take those **same** visual
+  attention support prototypes and fuse with the class text classifier
+  exactly as BiMC inference does:
+  `P_c = normalize(beta*T_c + (1-beta)*V_c)`,
+  `L = CE(100 * normalized_query @ P.T, y)`.
+
+Text classifier `T` is **frozen and detached** throughout the visual
+episodic training. In `visual` mode it is the original BiMC interpolation
+`(1-VDT_ORIGINAL_LAMBDA_T)*prompt_proto +
+VDT_ORIGINAL_LAMBDA_T*description_proto`, without an extra
+pre-fusion normalization. In `both` mode the Linear Text Adapter is
+trained first on base images using `text_ce`, then frozen and reused for
+the visual `fusion_ce` loss.
+
+Visual support and query episodes still use disjoint base TRAIN samples
+(5 support + 5 separate query images **per class**). The two losses
+use the *same* visual attention architecture, episode sampler, fixed
+class order, optimizer, learning rate, epochs, seed, and inference
+fusion. CLIP remains frozen. The original BiMC visual soft calibration
+still runs **after visual aggregation** at incremental evaluation.
+
+### Minimal paired experiment — CUB200, seed 1
+
+```bash
+git fetch github
+git switch feature/bimc-vdt-self-attention
+git pull --ff-only github feature/bimc-vdt-self-attention
+python -m unittest tests.test_vdt_visual -v
+python -m unittest tests.test_vdt_linear -v
+python -m unittest tests.test_vdt_objective -v
+
+# Exactly TWO visual-only experiments (pure CE vs fused CE).
+python scripts/run_visual_objective_ablation.py --dataset cub200 --seed 1
+```
+
+Or execute individually:
+
+```bash
+python scripts/run_linear_baseline.py --dataset cub200 --seed 1 \
+  --ablation visual --visual-objective visual_ce
+python scripts/run_linear_baseline.py --dataset cub200 --seed 1 \
+  --ablation visual --visual-objective fusion_ce
+```
+
+Optional dual-Adapter paired comparison (two more independent runs):
+
+```bash
+python scripts/run_visual_objective_ablation.py \
+  --dataset cub200 --seed 1 --ablation both
+```
+
+Outputs: `output/visual_objective_ablation/<timestamp>/summary.csv`
+and `summary.json`, plus complete individual logs and run manifests.
+The `result.json` for each run reports `visual_objective`; training
+logs emit `VDT_VISUAL_TRAIN_JSON` with objective name and fusion beta.
+
+**Experimental interpretation:** no improvement in final CUB accuracy
+does not mean the visual attention fails to optimize: check episodic
+CE and class-wise errors. If `fusion_ce` improves Base but not novel,
+the multimodal training objective may not generalize. The experiment
+is a loss ablation, not new evidence that text/vision fusion inherently
+improves fine-grained recognition.
+
+**Note:** earlier *text* `--objective fusion_ce` still cannot be
+combined with the visual Adapter: text-side leave-one-out correction
+assumes visual mean prototypes, not attention aggregation.
+The new flag `--visual-objective fusion_ce` is separate, and supports
+both `--ablation visual` and `--ablation both`.
