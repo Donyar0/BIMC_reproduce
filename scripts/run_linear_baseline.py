@@ -157,7 +157,10 @@ def run(args):
     report = {
         "status": "success" if code == 0 and metrics is not None else "failed",
         "exit_code": code, "elapsed_seconds": round(time.monotonic()-start, 2),
-        "dataset": args.dataset, "seed": args.seed, "mode": args.mode,
+        "dataset": args.dataset, "seed": args.seed, "mode": text_mode,
+        "ablation": ablation,
+        "text_adapter_enabled": use_text,
+        "visual_adapter_enabled": use_visual,
         "incremental_epochs": args.inc_epochs, "incremental_lr": args.inc_lr,
         "metrics": metrics
     }
