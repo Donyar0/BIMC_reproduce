@@ -168,7 +168,7 @@ class TestCleanLinear(unittest.TestCase):
 
     def test_result_parser(self):
         log="BIAS_METRICS_JSON:{\"session\":0}\nFinal acc:[80.0,75.0]\nTask-wise acc:\ntask  0, acc:[80.0]\ntask  1, acc:[78.0,50.0]\n"
-        log += 'VDT_INCREMENTAL_UPDATE_JSON:{"session":1,"parameter_delta_l2":0.4}\\n'
+        log += 'VDT_INCREMENTAL_UPDATE_JSON:{"session":1,"parameter_delta_l2":0.4}' + chr(10)
         parsed=parse_run(log)
         self.assertEqual(parsed["last_acc"],75.)
         self.assertEqual(parsed["task_wise_acc"][-1],[78.,50.])
