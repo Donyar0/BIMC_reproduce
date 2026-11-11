@@ -174,3 +174,19 @@ python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/tra
 可添加原有的 `--use_swanlab` 等参数。该入口不会训练或修改原结果，另建 `eval_...` 结果目录及 `source_run.txt`。它重新读取测试数据并提取特征；无需重新提取训练/支持集协方差或描述 KNN 统计。须使用训练时相同的数据、随机种子、配置与 CLIP 权重。结果仍然是测试集结果；严格选参需要独立验证集，当前入口没有验证集支持。只加载可信来源的权重文件。
 
 如果旧版 PyTorch 的安全加载器无法读取自己训练的 checkpoint，可在上述命令添加 `--trusted_checkpoints`。该选项允许 pickle 执行代码，仅对来源可信的权重使用，不要用于下载的不明文件。
+
+### Unified Flow 的 calibText 文本原型
+
+双向 `unified_flow` 统一使用 `feature/calibText` 分支
+`0d9009cba330e3f579e7ec107fce7d805d7b2ad9` 的 LinearTextAdapter 聚合。
+输入为第一个类别 Prompt 与各条描述的文本拼接，经冻结 CLIP 编码，再执行
+残差线性投影、LayerNorm、掩码均值聚合和归一化。基础阶段使用训练图像的
+`text_ce`（logit scale 100）训练 Adapter；随后冻结，不进行增量 Adapter 更新。
+默认 VDT 参数与源分支一致。CLIP 不参与优化。
+
+校准原型统一进入 Flow 基础训练、增量适配与旧类均值回放、文本到视觉生成、
+Bank 的文本分支及反向查询评分。这里不再使用原来的 Prompt/Description
+线性混合。旧类 Bank 在后续阶段保持不变。单向 Flow 与原始 BiMC 不切换到 Adapter。
+结果目录额外保存 `calib_text.pt`，并在 Flow checkpoint 中标记原型方法；
+重评估直接读取已保存的校准文本 Bank，不重新训练 Adapter。
+旧版文本 Bank 不兼容这项替换，需要重新训练。

@@ -29,7 +29,8 @@ class UnifiedFlowRunner(Runner):
         output = Path(flow.OUTPUT_DIR) / cfg.DATASET.NAME.lower() / run_name
         output.mkdir(parents=True, exist_ok=False)
         (output / 'config.yaml').write_text(cfg.dump(), encoding='utf-8')
-        encoder_id = str((cfg.MODEL.BACKBONE.NAME, cfg.TRAINER.BiMC.PREC, str(cfg.DATASET)))
+        encoder_id = str((cfg.MODEL.BACKBONE.NAME, cfg.TRAINER.BiMC.PREC, str(cfg.DATASET),
+                          'calibText-linear-v1', str(cfg.TRAINER.BiMC)))
         rows, checkpoint, bank = [], None, None
         memory = None
         num_base = len(self.data_manager.class_index_in_task[0])
@@ -47,6 +48,15 @@ class UnifiedFlowRunner(Runner):
                 names, loader, class_index=class_ids,
                 calibrate_novel_vision_proto=cfg.TRAINER.BiMC.VISION_CALIBRATION,
                 calculate_covariance=False)
+            # Keep adapter dropout/shuffling from changing future support sampling.
+            devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+            with torch.random.fork_rng(devices=devices):
+                torch.manual_seed(cfg.SEED)
+                stats = model.calibrate_flow_text(stats, names, task_id)
+            if task_id == 0:
+                torch.save(dict(state_dict=model.text_adapter.state_dict(),
+                                source_commit='0d9009cba330e3f579e7ec107fce7d805d7b2ad9'),
+                           output / 'calib_text.pt')
             cache = from_task_statistics(stats, encoder_id, task_id)
             if cfg.TRAINER.BiMC.PROTOTYPE_CACHE_DIR:
                 cache_dir = Path(cfg.TRAINER.BiMC.PROTOTYPE_CACHE_DIR) / cfg.DATASET.NAME.lower() / run_name
@@ -64,6 +74,7 @@ class UnifiedFlowRunner(Runner):
                         lr=flow.LR, weight_decay=flow.WEIGHT_DECAY,
                         blocks=flow.BLOCKS, hidden=flow.HIDDEN or None,
                         target=flow.TARGET, seed=cfg.SEED, device=self.device)
+                checkpoint['text_prototype_method'] = 'calibText-linear-v1'
                 torch.save(checkpoint, output / 'base_flow.pt')
 
             if task_id > 0:
@@ -125,11 +136,15 @@ class UnifiedFlowRunner(Runner):
         with (run_dir / 'config.yaml').open() as handle:
             original = CfgNode.load_cfg(handle)
         cfg = self.cfg
+        if not hasattr(original.TRAINER.BiMC, 'VDT_EPOCHS'):
+            raise ValueError('Legacy text prototype run; retrain with calibText')
         # Refuse mismatched training/data settings; only scoring and logging may differ.
         for name in ('SEED', 'DATASET', 'MODEL', 'DATALOADER', 'DEVICE'):
             if getattr(original, name) != getattr(cfg, name):
                 raise ValueError(f'Saved run {name} differs from current configuration')
-        for name in ('PREC', 'VISION_CALIBRATION', 'LAMBDA_I', 'TAU', 'TEXT_CALIBRATION', 'LAMBDA_T'):
+        for name in ('PREC', 'VISION_CALIBRATION', 'LAMBDA_I', 'TAU', 'TEXT_CALIBRATION', 'LAMBDA_T',
+                     'VDT_RATIO', 'VDT_DROPOUT', 'VDT_EPOCHS', 'VDT_BATCH_SIZE',
+                     'VDT_LR', 'VDT_WEIGHT_DECAY', 'VDT_TRAIN_OBJECTIVE'):
             if getattr(original.TRAINER.BiMC, name) != getattr(cfg.TRAINER.BiMC, name):
                 raise ValueError(f'Saved run BiMC.{name} differs from current configuration')
         if original.FLOW.STEPS != cfg.FLOW.STEPS:
@@ -150,6 +165,8 @@ class UnifiedFlowRunner(Runner):
             # Only load trusted checkpoints created by this project.
             checkpoint = torch.load(run_dir / f'flow_session{task_id}.pt', map_location='cpu', weights_only=not trusted_checkpoints)
             saved = torch.load(run_dir / f'bank_session{task_id}.pt', map_location='cpu', weights_only=not trusted_checkpoints)
+            if checkpoint.get('text_prototype_method') != 'calibText-linear-v1':
+                raise ValueError('This run uses legacy text prototypes; retrain with calibText')
             expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1] for c in group]
             if saved['class_ids'] != expected or saved['encoder_id'] != checkpoint['encoder_id']:
                 raise ValueError('Saved checkpoint and bank are incompatible with dataset')

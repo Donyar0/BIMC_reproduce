@@ -99,6 +99,3 @@ def classify_bidirectional(model, image_features, bank, *, alpha, gamma):
     scores = gamma * visual + (1-gamma) * semantic
     ids = torch.tensor(bank['class_ids'], device=z.device)
     return ids[scores.argmax(-1)], scores
-
-
-@torch.no_grad()

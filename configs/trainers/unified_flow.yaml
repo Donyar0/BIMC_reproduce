@@ -29,8 +29,17 @@ TRAINER:
     LAMBDA_I: 0.1 
     TAU: 16        
 
-    TEXT_CALIBRATION: True
-    LAMBDA_T: 0.5
+    TEXT_CALIBRATION: False
+    LAMBDA_T: 0.0
+
+    # calibText: base-supervised Linear Adapter, frozen in incremental sessions.
+    VDT_RATIO: 0.2
+    VDT_DROPOUT: 0.1
+    VDT_EPOCHS: 20
+    VDT_BATCH_SIZE: 256
+    VDT_LR: 0.0001
+    VDT_WEIGHT_DECAY: 0.0001
+    VDT_TRAIN_OBJECTIVE: 'text_ce'
 
 
 
