@@ -44,8 +44,18 @@ def main():
         if args.trusted_checkpoints:
             command.append('--trusted_checkpoints')
         print(f'Running {solver}: {" ".join(command)}', flush=True)
-        with (output / f'{solver}.log').open('w', encoding='utf-8') as log:
-            subprocess.run(command, cwd=repo, stdout=log, stderr=subprocess.STDOUT, check=True)
+        log_path = output / f'{solver}.log'
+        try:
+            with log_path.open('w', encoding='utf-8') as log:
+                subprocess.run(command, cwd=repo, stdout=log, stderr=subprocess.STDOUT, check=True)
+        except subprocess.CalledProcessError as error:
+            # The child process writes its traceback to the per-solver log.
+            # Surface it so a foreground run explains the failure immediately.
+            lines = log_path.read_text(encoding='utf-8', errors='replace').splitlines()
+            print(f'\n{solver} failed; last lines of {log_path}:', file=sys.stderr)
+            print('\n'.join(lines[-80:]), file=sys.stderr)
+            raise RuntimeError(f'{solver} evaluation failed (exit {error.returncode}); '
+                               f'see {log_path}') from None
         after = set((output / solver / cfg.DATASET.NAME.lower()).glob('eval_*'))
         created = after - before
         if len(created) != 1:

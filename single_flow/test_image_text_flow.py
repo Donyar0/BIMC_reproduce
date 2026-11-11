@@ -164,6 +164,25 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(all(row['final_acc']=='60.0' for row in rows))
             self.assertTrue(all('--trusted_checkpoints' in command for command in commands))
 
+    def test_solver_ablation_reports_child_failure_from_log(self):
+        import sys
+        from yacs.config import CfgNode
+        from scripts import run_ode_solver_ablation
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir=Path(temp)
+            cfg=CfgNode({'DATASET':{'NAME':'synthetic'},'FLOW':{
+                'PREDICTION':'velocity','SOLVER':'euler','OUTPUT_DIR':'unused','STEPS':4}})
+            (run_dir/'config.yaml').write_text(cfg.dump())
+            def fail(command, **kwargs):
+                kwargs['stdout'].write('original checkpoint error\n')
+                raise run_ode_solver_ablation.subprocess.CalledProcessError(1,command)
+            argv=['script',str(run_dir),'--solvers','rk4']
+            with patch.object(sys,'argv',argv), patch.object(run_ode_solver_ablation.subprocess,'run',side_effect=fail):
+                with contextlib.redirect_stderr(io.StringIO()) as error_output:
+                    with self.assertRaisesRegex(RuntimeError,'rk4 evaluation failed'):
+                        run_ode_solver_ablation.main()
+            self.assertIn('original checkpoint error',error_output.getvalue())
+
     def test_two_session_training_once_and_saved_evaluation_both_modes(self):
         torch.set_num_threads(1)
         eye=torch.eye(4)
