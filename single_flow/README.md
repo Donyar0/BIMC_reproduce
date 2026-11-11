@@ -1,4 +1,4 @@
-# 复用 BIMC 原型的单流文本 → 伪视觉原型
+# 复用 BIMC 原型的单流融合文本 → BiMC 图文融合原型
 
 Flow 直接读取 BIMC 已计算的原型，不再加载 CLIP、编码文本或重新融合描述。
 `fm.py` 来自 FlowComposer，保留上游 MIT LICENSE；训练脚本为任务适配实现。
@@ -41,7 +41,9 @@ CIFAR100 和 MiniImageNet 各9阶段，CUB200 共11阶段（依据当前默认�
 
 只保存 bank 和模型即可评估，默认不保存逐样本训练缓存。启用
 PROTOTYPE_CACHE_DIR 时，新 Flow runner 会按数据集/运行时间分目录导出缓存。
-当前仍不将增量视觉原型融合到分类器。Flow 分类只用生成的伪视觉原型。
+Flow 的训练终点改为 BiMC 图文融合原型，而不再是单纯视觉原型。
+增量阶段生成时仅使用文本原型：新类真实视觉原型不用于 Flow 推理或二次融合。
+分类只用生成的伪图文融合原型。
 
 对比原 BIMC：同一 dataset YAML 改用 `configs/trainers/bimc.yaml` 即可。
 使用相同种子、CLIP、数据划分；Flow 训练的 torch RNG 单独隔离，不影响后续
@@ -58,6 +60,13 @@ PROTOTYPE_CACHE_DIR 时，新 Flow runner 会按数据集/运行时间分目录�
 
 `image_proto` 直接沿用 BIMC 的输出：基类为图像特征均值原型；增量类在
 VISION_CALIBRATION=True 时经 soft_calibration 校准。Flow 不重复计算或校准。
+
+Flow 的新训练终点为 BiMC 原始分类器使用的融合原型：
+`x1 = normalize(BETA * ((1-LAMBDA_T)*text_features + LAMBDA_T*description_proto) + (1-BETA)*image_proto)`
+（关闭 TEXT_CALIBRATION 时直接使用 text_features）。注意这里的文本部分是
+**归一化前**的文本混合，完全沿用 `forward_ours()`；增量视觉原型按 BiMC
+设置校准，而基类视觉原型是原始图像均值原型，不会额外自校准。
+缓存新增 `fused_prototypes`，旧的缓存必须重新生成。
 
 ## 导出缓存
 
@@ -81,6 +90,7 @@ Runner 在每个任务 build_task_statistics 后导出 `session_0.pt`、`session
 缓存字段：
 - `class_ids`：按行排列的类别编号。
 - `text_prototypes`、`visual_prototypes`：已经生成的 [C,D] 原型。
+- `fused_prototypes`：按 BiMC 原始 BETA 融合且归一化后的 [C,D] 训练终点。
 - `image_features`、`image_labels`：供可选 sample 模式使用。
 - `encoder_id`：包含 backbone、精度和数据配置；使用自定义 CLIP 权重时需自行补充权重版本。
 - `stage`：base 或 incremental；`split`：train。
@@ -99,15 +109,17 @@ python -m single_flow.s1_flow generate --checkpoint output/base_flow.pt --cache 
 python -m single_flow.s1_flow classify --cache test.pt --bank output/bank_session1.pt --out output/predictions.pt
 ```
 
-默认 prototype 模式直接将基类 text_prototypes 作为 x0、visual_prototypes 作为 x1；
-这个模式只需要两种原型，不需要逐样本特征。--target sample 使用现有 image_features
-作为终点，并用现成的 visual_prototypes 作为可选 CE 的分类参照。
+默认 prototype 模式直接将基类 text_prototypes 作为 x0、fused_prototypes 作为 x1；
+这个模式只需要文本原型和图文融合原型，不需要逐样本特征。--target sample
+按基类样本数重复上述类别级训练对，训练终点仍是 fused_prototypes，
+并不将单个 image_features 作为终点。可选 CE 也使用 fused_prototypes 分类参照。
 训练 xt=(1-t)x0+t*x1，监督速度 x1-x0；仅训练速度网络。
 默认只有速度平方误差（维度求和、batch 求均值），--ce-weight 可开启视觉原型 CE。
 prototype 模式每类每轮仅一对数据，默认100轮、batch64、24块只是未经真实实验验证的起点。
 
 增量阶段不训练。generate 只读取 encoder_id、class_ids、text_prototypes；
-缓存中的校准视觉原型被保留供后续实验使用，但目前不参与生成、分类融合或网络更新。
+缓存中的新类校准视觉原型仅作为 BiMC 原始统计量保留，
+不参与增量阶段的 Flow 生成、分类融合或网络更新。
 默认8步欧拉积分，最终归一化；每类一个确定性伪视觉原型。
 追加 bank 时旧类原型逐元素保留，重复类别编号报错；各阶段应使用同一模型与步数。
 模型/步数身份目前没有在 bank 中强制核对。

@@ -11,7 +11,9 @@ class PipelineTests(unittest.TestCase):
         torch.manual_seed(1)
         x = torch.eye(4)
         cls.cache = dict(stage='base', split='train', encoder_id='synthetic',
-                         class_ids=[10,20,30,40], text_prototypes=x, visual_prototypes=x.roll(1, dims=1), image_features=x.roll(1, dims=1),
+                         class_ids=[10,20,30,40], text_prototypes=x,
+                         visual_prototypes=x.roll(2, dims=1), fused_prototypes=x.roll(1, dims=1),
+                         image_features=x.roll(2, dims=1),
                          image_labels=torch.tensor([10,20,30,40]))
         with contextlib.redirect_stdout(io.StringIO()):
             cls.ck = fit(cls.cache, epochs=120, blocks=1, hidden=16, lr=0.01)
@@ -31,6 +33,21 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             generate(self.ck,self.cache,existing=bank)
 
+    def test_fused_target_is_not_visual_only(self):
+        # Changing the visual-only prototype cannot change the Flow training.
+        alternate = dict(self.cache, visual_prototypes=self.cache['visual_prototypes'].flip(0))
+        with contextlib.redirect_stdout(io.StringIO()):
+            ck_a = fit(self.cache, epochs=2, blocks=1, hidden=8, seed=7)
+            ck_b = fit(alternate, epochs=2, blocks=1, hidden=8, seed=7)
+            ck_c = fit(dict(self.cache, fused_prototypes=self.cache['visual_prototypes']),
+                       epochs=2, blocks=1, hidden=8, seed=7)
+        self.assertEqual(ck_a['flow_target'], 'bimc_fused')
+        self.assertEqual(ck_a['loss_history'], ck_b['loss_history'])
+        for key in ck_a['state_dict']:
+            self.assertTrue(torch.equal(ck_a['state_dict'][key], ck_b['state_dict'][key]))
+        self.assertTrue(any(not torch.equal(ck_a['state_dict'][k], ck_c['state_dict'][k])
+                            for k in ck_a['state_dict']))
+
     def test_reject_leakage(self):
         for changes in [dict(stage='incremental'),dict(split='test')]:
             with self.assertRaises(ValueError):
@@ -48,11 +65,13 @@ class PipelineTests(unittest.TestCase):
         from bimc_cache import from_task_statistics
         stats = dict(class_index=[10,20,30,40], text_proto=self.cache['text_prototypes'],
                      image_proto=self.cache['visual_prototypes'],
+                     fused_proto=self.cache['fused_prototypes'],
                      images_features=self.cache['image_features'],
                      images_targets=self.cache['image_labels'])
         cache = from_task_statistics(stats, 'synthetic', 0)
         self.assertTrue(torch.equal(cache['visual_prototypes'], stats['image_proto']))
         self.assertTrue(torch.equal(cache['text_prototypes'], stats['text_proto']))
+        self.assertTrue(torch.equal(cache['fused_prototypes'], stats['fused_proto']))
         # Prototype mode must work without any sample features/labels.
         del cache['image_features'], cache['image_labels']
         with contextlib.redirect_stdout(io.StringIO()):
@@ -63,6 +82,8 @@ class PipelineTests(unittest.TestCase):
             fit(from_task_statistics(stats,'synthetic',1),epochs=1,blocks=1)
         with self.assertRaises(ValueError):
             from_task_statistics(dict(stats,class_index=[20,10,30,40]),'synthetic',0)
+        with self.assertRaisesRegex(ValueError, 'fused_proto'):
+            from_task_statistics({k:v for k,v in stats.items() if k != 'fused_proto'}, 'synthetic', 0)
 
     def test_bimc_shared_text_formula(self):
         # Load just the pure method via AST; no CLIP weights or CUDA needed.
@@ -71,16 +92,25 @@ class PipelineTests(unittest.TestCase):
         from types import SimpleNamespace
         source = ast.parse((Path(__file__).resolve().parents[1]/'models/bimc.py').read_text())
         cls = next(n for n in source.body if isinstance(n,ast.ClassDef) and n.name=='BiMC')
-        method = next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='fused_text_prototype')
-        namespace = {}
-        exec(compile(ast.Module(body=[method],type_ignores=[]),'<method>','exec'), namespace)
+        methods = [n for n in cls.body if isinstance(n,ast.FunctionDef) and
+                   n.name in ('fused_text_prototype', 'fused_visual_text_prototype')]
+        namespace = {'F': torch.nn.functional}
+        exec(compile(ast.Module(body=methods,type_ignores=[]),'<methods>','exec'), namespace)
         cfg = SimpleNamespace(TEXT_CALIBRATION=True,LAMBDA_T=0.3)
         obj = SimpleNamespace(cfg=SimpleNamespace(TRAINER=SimpleNamespace(BiMC=cfg)))
         text,desc,image = torch.randn(3,4),torch.randn(3,4),torch.randn(3,4)
         mixed = namespace['fused_text_prototype'](obj,text,desc)
         self.assertTrue(torch.equal(mixed,0.7*text+0.3*desc))
+        beta = 0.65
+        obj.fused_text_prototype = lambda t,d: namespace['fused_text_prototype'](obj,t,d)
+        actual = namespace['fused_visual_text_prototype'](obj,text,desc,image,beta)
+        expected = torch.nn.functional.normalize(beta*mixed+(1-beta)*image, dim=-1)
+        self.assertTrue(torch.allclose(actual,expected))
         cfg.TEXT_CALIBRATION=False
         self.assertTrue(torch.equal(namespace['fused_text_prototype'](obj,text,desc),text))
+        actual = namespace['fused_visual_text_prototype'](obj,text,desc,image,beta)
+        expected = torch.nn.functional.normalize(beta*text+(1-beta)*image, dim=-1)
+        self.assertTrue(torch.allclose(actual,expected))
 
 if __name__ == '__main__':
     unittest.main()

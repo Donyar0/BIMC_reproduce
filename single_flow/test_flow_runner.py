@@ -47,6 +47,7 @@ class RunnerTests(unittest.TestCase):
             def build_task_statistics(self,names,loader,class_index,**kwargs):
                 ids = torch.as_tensor(class_index)
                 return dict(class_index=class_index,text_proto=eye[ids],image_proto=eye[ids],
+                            fused_proto=eye[ids],
                             images_features=eye[ids],images_targets=ids)
             def extract_img_feature(self,images):
                 return images

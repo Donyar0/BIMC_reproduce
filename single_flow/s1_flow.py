@@ -1,4 +1,4 @@
-"""Single text-prototype -> visual flow. Adapted from FlowComposer s1_flow.py.
+"""Single fused-text -> BiMC fused-prototype flow. Adapted from FlowComposer s1_flow.py.
 CLIP stays outside the optimizer; only base training images may enter fit().
 """
 import argparse
@@ -46,12 +46,13 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
         raise ValueError('target must be prototype or sample')
     torch.manual_seed(seed)
     ids, text = text_cache(cache)
-    visual = unit(cache['visual_prototypes']).cpu()
-    if visual.shape != text.shape:
-        raise ValueError('Visual prototype rows and dimensions must match text/class_ids')
-    # Consume BIMC prototypes directly; do not recompute means or calibration.
+    fused = unit(cache['fused_prototypes']).cpu()
+    if fused.shape != text.shape:
+        raise ValueError('BiMC fused-prototype rows and dimensions must match text/class_ids')
+    # BIMC computes the normalized image/text fusion using its own BETA.
+    # Both training modes use this fused target, never the visual-only prototype.
     if target == 'prototype':
-        sources, targets, y = text, visual, torch.arange(len(ids))
+        sources, targets, y = text, fused, torch.arange(len(ids))
     else:
         images = unit(cache['image_features']).cpu()
         labels = cache['image_labels'].detach().cpu()
@@ -61,14 +62,16 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
             raise ValueError('Only listed base classes are allowed; each needs images')
         row = {c: i for i, c in enumerate(ids)}
         y = torch.tensor([row[c] for c in labels.tolist()])
-        sources, targets = text[y], images
+        # Sample mode repeats each class-level fusion target by its image count.
+        # It does NOT use individual image features as Flow endpoints.
+        sources, targets = text[y], fused[y]
     loader = DataLoader(TensorDataset(sources, targets, y), batch_size=batch_size,
                         shuffle=True, generator=torch.Generator().manual_seed(seed))
     arch = dict(in_channels=text.shape[1], model_channels=hidden or text.shape[1],
                 out_channels=text.shape[1], num_res_blocks=blocks)
     model = DeepFlowMatchingNet(**arch).to(device).train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    candidates = visual.to(device)
+    candidates = fused.to(device)
     history = []
     for epoch in range(epochs):
         total, count = 0., 0
@@ -78,7 +81,7 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
             xt = (1-t)*x0 + t*x1
             pred_v = model(xt, t)
             loss = ((pred_v - (x1-x0))**2).sum(-1).mean()
-            # Optional NEW visual-prototype CE, not the author's text CE.
+            # Optional CE uses the same BiMC fused endpoints as the Flow target.
             if ce_weight:
                 endpoint = F.normalize(xt + (1-t)*pred_v, dim=-1)
                 loss = loss + ce_weight*F.cross_entropy(endpoint @ candidates.T / temperature, label)
@@ -91,10 +94,11 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
             count += len(x0)
         history.append(total/count)
         print(f'epoch={epoch+1} loss={history[-1]:.6f}', flush=True)
-    return dict(format_version=2, state_dict={k:v.detach().cpu().clone() for k,v in model.state_dict().items()},
+    return dict(format_version=3, flow_target='bimc_fused', state_dict={k:v.detach().cpu().clone() for k,v in model.state_dict().items()},
                 architecture=arch, encoder_id=cache['encoder_id'], base_class_ids=ids,
                 training=dict(epochs=epochs, batch_size=batch_size, lr=lr, weight_decay=weight_decay,
-                              target=target, ce_weight=ce_weight, temperature=temperature, seed=seed),
+                              target=target, target_space='bimc_fused',
+                              ce_weight=ce_weight, temperature=temperature, seed=seed),
                 loss_history=history)
 
 

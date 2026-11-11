@@ -133,6 +133,12 @@ class BiMC(nn.Module):
                   if self.cfg.TRAINER.BiMC.TEXT_CALIBRATION else 0.0)
         return (1 - weight) * text_features + weight * description_proto
 
+    def fused_visual_text_prototype(self, text_features, description_proto, image_proto, beta):
+        """Use exactly the original BiMC normalized image/text fusion."""
+        return F.normalize(
+            beta * self.fused_text_prototype(text_features, description_proto)
+            + (1 - beta) * image_proto, dim=-1)
+
     def soft_calibration(self, base_protos, cur_protos):
         shift_weight = self.cfg.TRAINER.BiMC.LAMBDA_I
         tau = self.cfg.TRAINER.BiMC.TAU
@@ -195,6 +201,8 @@ class BiMC(nn.Module):
 
         return {
             'text_proto': F.normalize(self.fused_text_prototype(text_features, description_proto), dim=-1),
+            'fused_proto': self.fused_visual_text_prototype(
+                text_features, description_proto, images_proto, self.cfg.DATASET.BETA),
             'description_proto': description_proto,
             'description_features': description_features,
             'description_targets': description_targets,
@@ -270,9 +278,9 @@ class BiMC(nn.Module):
         img_feat = self.extract_img_feature(images)
         img_feat = F.normalize(img_feat, dim=-1)
 
-        # Keep the original unnormalized text mixture for BIMC's visual fusion.
-        fused_proto = beta * self.fused_text_prototype(text_features, description_proto) + (1 - beta) * image_proto
-        fused_proto = F.normalize(fused_proto, dim=-1)  
+        # Shared fusion formula: identical to the Flow training target.
+        fused_proto = self.fused_visual_text_prototype(
+            text_features, description_proto, image_proto, beta)
         logits_proto_fused = img_feat @ fused_proto.t()
         prob_fused_proto = F.softmax(logits_proto_fused, dim=-1)
 
