@@ -58,9 +58,7 @@ class FlowRunner(Runner):
                         lr=flow.LR, weight_decay=flow.WEIGHT_DECAY,
                         blocks=flow.BLOCKS, hidden=flow.HIDDEN or None,
                         target=flow.TARGET, ce_weight=flow.CE_WEIGHT,
-                        temperature=flow.TEMPERATURE,
-                        prediction=flow.PREDICTION, endpoint_t_max=flow.ENDPOINT_T_MAX,
-                        seed=cfg.SEED, device=self.device)
+                        temperature=flow.TEMPERATURE, seed=cfg.SEED, device=self.device)
                 torch.save(checkpoint, output / 'base_flow.pt')
 
             bank = generate(checkpoint, cache, steps=flow.STEPS, device=self.device, existing=bank)

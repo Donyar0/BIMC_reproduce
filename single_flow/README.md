@@ -50,41 +50,6 @@ Flow 的训练终点改为 BiMC 图文融合原型，而不再是单纯视觉原
 数据加载随机状态。结果需要在真实数据上运行，仓库没有预填实验准确率。
 默认超参数未经三个数据集验证，应使用基类验证数据选参。
 
-## 消融实验：直接预测终点，仍使用速度损失
-
-增加了独立配置 `configs/trainers/single_flow_endpoint.yaml`，原配置
-`single_flow.yaml` 仍使用速度输出，两者保持同样的文本起点、BiMC 图文融合终点、
-网络、训练轮数、学习率、损失函数及 8 步 Euler 解算器。训练与推理一致：
-
-- `PREDICTION: velocity`：网络直接输出 `v_hat`。
-- `PREDICTION: endpoint`：网络直接输出 `x1_hat`，经
-  `v_hat = (x1_hat - xt) / (1-t)` 换算为速度；
-  **FM Loss 仍然是 `||v_hat - (x1-x0)||²`**。
-  不直接对 `x1_hat` 做 MSE 监督。
-- 可选 CE 损失用 `x1_hat` 或从速度还原的终点计算，默认两组均为 0。
-
-因为终点参数化包含 `1/(1-t)`，仅 endpoint 模式的训练采样
-`t ~ U[0, ENDPOINT_T_MAX)`，默认 `ENDPOINT_T_MAX=0.875`，
-避免在 `t→1` 时速度换算数值放大。默认 8 步 Euler 的最后一步时间为
-`t=7/8`，对应覆盖范围；更改步数时应重新检查时间范围。
-最终积分、归一化和全部已见类别分类方式保持不变。
-端点模式的第 8 次 Euler 更新等于当步预测的 `x1_hat`，是公式的直接结果。
-
-推荐在三个数据集上对比完全相同设置的两组：
-
-```bash
-# 原速度输出（对照）
-python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/trainers/single_flow.yaml
-# 新终点输出 + 速度监督
-python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/trainers/single_flow_endpoint.yaml
-```
-
-终点实验的结果单独保存在 `output/single_flow_endpoint`，不会覆盖原对照。
-独立命令也支持 `python -m single_flow.s1_flow train ... --prediction endpoint --endpoint-t-max 0.875`；
-模型 checkpoint 记录输出模式，生成过程根据 checkpoint 自动选择换算。
-从旧版 checkpoint 读取时默认按速度输出以保持兼容。
-整个新增实验尚需在真实 GPU 数据集上验证其效果。
-
 ## 原型来源
 
 `models/bimc.py` 的 `fused_text_prototype()` 是 BIMC 原有的文本混合公式：
