@@ -17,7 +17,7 @@ DATALOADER:
 MODEL:
   BACKBONE:
     NAME: "ViT-B/16"  #  RN50  RN101  ViT-B/32  ViT-B/16  ViT-L/14
-  
+
 
 TRAINER:
   BiMC:
@@ -26,8 +26,8 @@ TRAINER:
     PROTOTYPE_CACHE_DIR: ""  # e.g. output/bimc_prototypes; export training/support statistics
 
     VISION_CALIBRATION: True
-    LAMBDA_I: 0.1 
-    TAU: 16        
+    LAMBDA_I: 0.1
+    TAU: 16
 
     TEXT_CALIBRATION: True
     LAMBDA_T: 0.5
