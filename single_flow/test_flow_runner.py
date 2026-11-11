@@ -64,7 +64,7 @@ class RunnerTests(unittest.TestCase):
                 TRAINER=NS(BiMC=NS(PREC='fp32',VISION_CALIBRATION=True,PROTOTYPE_CACHE_DIR='')),
                 FLOW=NS(OUTPUT_DIR=directory,EPOCHS=2,BATCH_SIZE=4,LR=0.001,
                         WEIGHT_DECAY=0.,BLOCKS=1,HIDDEN=8,TARGET='prototype',
-                        PREDICTION='endpoint',ENDPOINT_T_MAX=0.875,CE_WEIGHT=0.,
+                        PREDICTION='velocity',ENDPOINT_T_MAX=0.875,CE_WEIGHT=0.,
                         TEMPERATURE=0.07,STEPS=2),dump=lambda:'synthetic: true\n')
             runner.model=Model(); runner.device='cpu'; runner.is_distributed=False
             runner.data_manager=Data(); runner.evaluator=evaluator(Data.class_index_in_task)
@@ -85,9 +85,9 @@ class RunnerTests(unittest.TestCase):
             bank0=torch.load(result_path.parent/'bank_session0.pt',weights_only=True)
             bank1=torch.load(result_path.parent/'bank_session1.pt',weights_only=True)
             self.assertTrue(torch.equal(bank0['prototypes'],bank1['prototypes'][:2]))
-            self.assertEqual(bank0['prediction'], 'endpoint')
+            self.assertEqual(bank0['prediction'], 'velocity')
             ck = torch.load(result_path.parent/'base_flow.pt',weights_only=True)
-            self.assertEqual(ck['prediction'], 'endpoint')
+            self.assertEqual(ck['prediction'], 'velocity')
 
     def test_old_classes_compete_with_new_classes(self):
         evaluator=load_class(ROOT/'utils/evaluator.py','AccuracyEvaluator',{'torch':torch,'np':np})
