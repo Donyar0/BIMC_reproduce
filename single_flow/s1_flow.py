@@ -36,23 +36,32 @@ def text_cache(cache):
 
 
 def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
-        blocks=24, hidden=None, target='prototype', ce_weight=0.0,
-        temperature=0.07, seed=0, device='cpu'):
+        blocks=24, hidden=None, target='prototype', endpoint='bimc_fused',
+        ce_weight=0.0, temperature=0.07, seed=0, device='cpu'):
     if cache.get('stage') != 'base' or cache.get('split') != 'train':
         raise ValueError('Training accepts only stage=base, split=train caches')
     if epochs < 1 or batch_size < 1 or blocks < 1 or lr <= 0 or weight_decay < 0 or ce_weight < 0 or temperature <= 0:
         raise ValueError('Invalid training hyperparameters')
     if target not in ('prototype', 'sample'):
         raise ValueError('target must be prototype or sample')
+    if endpoint not in ('bimc_fused', 'visual_prototype', 'visual_sample'):
+        raise ValueError('endpoint must be bimc_fused, visual_prototype, or visual_sample')
+    if endpoint == 'visual_sample' and target != 'sample':
+        raise ValueError('visual_sample endpoint requires target=sample')
+    if endpoint == 'visual_prototype' and target != 'prototype':
+        raise ValueError('visual_prototype endpoint requires target=prototype')
     torch.manual_seed(seed)
     ids, text = text_cache(cache)
-    fused = unit(cache['fused_prototypes']).cpu()
-    if fused.shape != text.shape:
-        raise ValueError('BiMC fused-prototype rows and dimensions must match text/class_ids')
-    # BIMC computes the normalized image/text fusion using its own BETA.
-    # Both training modes use this fused target, never the visual-only prototype.
+    # Endpoints have distinct semantics; the text starting point is unchanged.
+    # visual_prototype is the base-class image mean in BiMC, and visual_sample
+    # uses each individual normalized CLIP training image as x1.
+    class_endpoints = unit(cache[
+        'fused_prototypes' if endpoint == 'bimc_fused' else 'visual_prototypes'
+    ]).cpu()
+    if class_endpoints.shape != text.shape:
+        raise ValueError('Class endpoint shape must match text/class_ids')
     if target == 'prototype':
-        sources, targets, y = text, fused, torch.arange(len(ids))
+        sources, targets, y = text, class_endpoints, torch.arange(len(ids))
     else:
         images = unit(cache['image_features']).cpu()
         labels = cache['image_labels'].detach().cpu()
@@ -62,16 +71,17 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
             raise ValueError('Only listed base classes are allowed; each needs images')
         row = {c: i for i, c in enumerate(ids)}
         y = torch.tensor([row[c] for c in labels.tolist()])
-        # Sample mode repeats each class-level fusion target by its image count.
-        # It does NOT use individual image features as Flow endpoints.
-        sources, targets = text[y], fused[y]
+        sources = text[y]
+        targets = images if endpoint == 'visual_sample' else class_endpoints[y]
     loader = DataLoader(TensorDataset(sources, targets, y), batch_size=batch_size,
                         shuffle=True, generator=torch.Generator().manual_seed(seed))
     arch = dict(in_channels=text.shape[1], model_channels=hidden or text.shape[1],
                 out_channels=text.shape[1], num_res_blocks=blocks)
     model = DeepFlowMatchingNet(**arch).to(device).train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    candidates = fused.to(device)
+    # Optional CE compares against class prototypes, even if FM trains on
+    # individual image endpoints. Defaults to CE_WEIGHT=0 (pure FM).
+    candidates = class_endpoints.to(device)
     history = []
     for epoch in range(epochs):
         total, count = 0., 0
@@ -81,7 +91,7 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
             xt = (1-t)*x0 + t*x1
             pred_v = model(xt, t)
             loss = ((pred_v - (x1-x0))**2).sum(-1).mean()
-            # Optional CE uses the same BiMC fused endpoints as the Flow target.
+            # Optional CE uses class prototypes in the endpoint's target space.
             if ce_weight:
                 endpoint = F.normalize(xt + (1-t)*pred_v, dim=-1)
                 loss = loss + ce_weight*F.cross_entropy(endpoint @ candidates.T / temperature, label)
@@ -94,10 +104,10 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
             count += len(x0)
         history.append(total/count)
         print(f'epoch={epoch+1} loss={history[-1]:.6f}', flush=True)
-    return dict(format_version=3, flow_target='bimc_fused', state_dict={k:v.detach().cpu().clone() for k,v in model.state_dict().items()},
+    return dict(format_version=3, flow_target=endpoint, state_dict={k:v.detach().cpu().clone() for k,v in model.state_dict().items()},
                 architecture=arch, encoder_id=cache['encoder_id'], base_class_ids=ids,
                 training=dict(epochs=epochs, batch_size=batch_size, lr=lr, weight_decay=weight_decay,
-                              target=target, target_space='bimc_fused',
+                              target=target, target_space=endpoint,
                               ce_weight=ce_weight, temperature=temperature, seed=seed),
                 loss_history=history)
 
@@ -166,6 +176,8 @@ def main():
                              ('ce-weight',0.,float),('temperature',0.07,float),('seed',0,int)]:
         train.add_argument('--'+name, default=default, type=typ)
     train.add_argument('--target', choices=['prototype','sample'], default='prototype')
+    train.add_argument('--endpoint', choices=['bimc_fused','visual_prototype','visual_sample'],
+                       default='bimc_fused')
     gen = sub.add_parser('generate', help='Frozen inference, including incremental sessions')
     gen.add_argument('--checkpoint', required=True)
     gen.add_argument('--cache', required=True)

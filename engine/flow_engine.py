@@ -40,6 +40,7 @@ class FlowRunner(Runner):
         print(f'Results directory: {output}')
         print(f'Start inferencing on all tasks: [0, {self.data_manager.num_tasks - 1}]')
         print(f'VDT text adapter (Flow source/target text): {adapter_enabled}')
+        print(f'Flow training endpoint: {getattr(flow, "ENDPOINT", "bimc_fused")}')
 
         for task_id in range(self.data_manager.num_tasks):
             start = time.time()
@@ -89,7 +90,9 @@ class FlowRunner(Runner):
                         cache, epochs=flow.EPOCHS, batch_size=flow.BATCH_SIZE,
                         lr=flow.LR, weight_decay=flow.WEIGHT_DECAY,
                         blocks=flow.BLOCKS, hidden=flow.HIDDEN or None,
-                        target=flow.TARGET, ce_weight=flow.CE_WEIGHT,
+                        target=flow.TARGET,
+                        endpoint=getattr(flow, 'ENDPOINT', 'bimc_fused'),
+                        ce_weight=flow.CE_WEIGHT,
                         temperature=flow.TEMPERATURE, seed=cfg.SEED, device=self.device)
                 if adapter_enabled:
                     checkpoint['text_adapter_sha256'] = adapter_sha

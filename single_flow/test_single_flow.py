@@ -48,6 +48,41 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(any(not torch.equal(ck_a['state_dict'][k], ck_c['state_dict'][k])
                             for k in ck_a['state_dict']))
 
+    def test_endpoint_ablation_uses_correct_visual_targets(self):
+        # The visual-only modes must ignore the BiMC fused prototype.
+        base = dict(self.cache)
+        changed_fused = dict(base, fused_prototypes=base['fused_prototypes'].flip(0))
+        with contextlib.redirect_stdout(io.StringIO()):
+            a = fit(base, epochs=2, blocks=1, hidden=8, seed=4,
+                    target='prototype', endpoint='visual_prototype')
+            b = fit(changed_fused, epochs=2, blocks=1, hidden=8, seed=4,
+                    target='prototype', endpoint='visual_prototype')
+            c = fit(base, epochs=2, blocks=1, hidden=8, seed=4,
+                    target='sample', endpoint='visual_sample')
+            # Moving individual images without changing visual mean prototypes
+            # must affect individual-sample FM but not class-prototype FM.
+            changed_images = dict(base, image_features=base['image_features'].roll(1, dims=1))
+            d = fit(changed_images, epochs=2, blocks=1, hidden=8, seed=4,
+                    target='sample', endpoint='visual_sample')
+        self.assertEqual(a['flow_target'], 'visual_prototype')
+        self.assertEqual(c['flow_target'], 'visual_sample')
+        self.assertEqual(a['training']['target_space'], 'visual_prototype')
+        self.assertEqual(c['training']['target_space'], 'visual_sample')
+        self.assertEqual(a['loss_history'], b['loss_history'])
+        self.assertNotEqual(c['loss_history'], d['loss_history'])
+        for key in a['state_dict']:
+            self.assertTrue(torch.equal(a['state_dict'][key], b['state_dict'][key]))
+        with self.assertRaisesRegex(ValueError, 'requires target=sample'):
+            fit(base, epochs=1, blocks=1, endpoint='visual_sample')
+        with self.assertRaisesRegex(ValueError, 'requires target=prototype'):
+            fit(base, epochs=1, blocks=1, target='sample', endpoint='visual_prototype')
+        with self.assertRaisesRegex(ValueError, 'endpoint must be'):
+            fit(base, epochs=1, blocks=1, endpoint='unknown')
+        with contextlib.redirect_stdout(io.StringIO()):
+            sample_ce = fit(base, epochs=1, blocks=1, hidden=8, seed=4,
+                            target='sample', endpoint='visual_sample', ce_weight=.1)
+        self.assertTrue(torch.isfinite(torch.tensor(sample_ce['loss_history'])).all())
+
     def test_reject_leakage(self):
         for changes in [dict(stage='incremental'),dict(split='test')]:
             with self.assertRaises(ValueError):

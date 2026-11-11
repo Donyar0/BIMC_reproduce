@@ -63,6 +63,25 @@ class TextToVisualAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'fingerprint'):
             generate(ck,dict(novel,text_adapter_sha256='wrong'),steps=2,existing=bank)
 
+    def test_visual_endpoints_keep_adapted_source(self):
+        from single_flow.s1_flow import text_cache
+        with contextlib.redirect_stdout(io.StringIO()):
+            adapter = train_base_text_adapter(self.desc, self.desc_ids,
+                self.images, self.labels, [0,1,2], self.cfg, 1, 'cpu')
+        text=adapted_prototypes(adapter,self.desc,self.desc_ids,[0,1,2])
+        base=dict(stage='base',split='train',encoder_id='synthetic',
+                  class_ids=[0,1,2],visual_prototypes=F.normalize(torch.randn(3,8),dim=-1),
+                  image_features=self.images,image_labels=self.labels)
+        cache=replace_flow_cache_text(base,text,.65)
+        cache['text_adapter_sha256']=fingerprint(adapter)
+        torch.testing.assert_close(text_cache(cache)[1],text.cpu())
+        for target,endpoint in [('prototype','visual_prototype'),('sample','visual_sample')]:
+            with contextlib.redirect_stdout(io.StringIO()):
+                ck=fit(cache,epochs=2,blocks=1,hidden=8,seed=3,
+                       target=target,endpoint=endpoint)
+            self.assertEqual(ck['flow_target'],endpoint)
+            self.assertNotIn('prediction',ck)  # unchanged velocity prediction
+
     def test_invalid_beta_and_class_ids(self):
         cache=dict(class_ids=[0],visual_prototypes=torch.ones(1,8))
         with self.assertRaises(ValueError):
