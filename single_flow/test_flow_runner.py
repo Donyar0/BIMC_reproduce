@@ -62,8 +62,7 @@ class RunnerTests(unittest.TestCase):
             runner.cfg = NS(SEED=1,DATASET=NS(NAME='synthetic'),MODEL=NS(BACKBONE=NS(NAME='synthetic')),
                 TRAINER=NS(BiMC=NS(PREC='fp32',VISION_CALIBRATION=True,PROTOTYPE_CACHE_DIR='')),
                 FLOW=NS(OUTPUT_DIR=directory,EPOCHS=2,BATCH_SIZE=4,LR=0.001,
-                        WEIGHT_DECAY=0.,BLOCKS=1,HIDDEN=8,TARGET='prototype',CE_WEIGHT=0.,
-                        TEMPERATURE=0.07,STEPS=2),dump=lambda:'synthetic: true\n')
+                        WEIGHT_DECAY=0.,BLOCKS=1,HIDDEN=8,TARGET='prototype',STEPS=2),dump=lambda:'synthetic: true\n')
             runner.model=Model(); runner.device='cpu'; runner.is_distributed=False
             runner.data_manager=Data(); runner.evaluator=evaluator(Data.class_index_in_task)
             runner.acc_list=[]; runner.task_acc_list=[]

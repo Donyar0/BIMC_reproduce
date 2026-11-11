@@ -47,9 +47,6 @@ FLOW:
   BLOCKS: 24
   HIDDEN: 0  # 0 uses CLIP feature dimension
   TARGET: "sample"
-  CE_WEIGHT: 0.0
-  CYCLE_WEIGHT: 0.0  # text -> one-step visual -> text regularizer; 0 disables
-  TEMPERATURE: 0.07
   STEPS: 8
   OUTPUT_DIR: "output/unified_flow"
   ADAPT_STEPS: 100
@@ -59,4 +56,3 @@ FLOW:
   BETA_INC: 0.5  # validation search: 0.3 to 0.6
   GAMMA: 0.5  # validation search: 0.4 to 0.7
   LOGIT_SCALE: 1.0  # multiplier before softmax; tune on validation data
-  BASE_MARGIN: 0.0  # subtract from base-class scores in incremental sessions

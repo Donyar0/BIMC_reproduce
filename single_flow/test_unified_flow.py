@@ -1,6 +1,6 @@
 import unittest
 import torch
-from single_flow.s1_flow import fit, text_cycle_loss
+from single_flow.s1_flow import fit
 from single_flow.unified_flow import adapt, build_bank, classify_bidirectional, load_model, real_means, ensemble_scores, prepare_ensemble
 
 
@@ -31,34 +31,20 @@ class UnifiedFlowTests(unittest.TestCase):
         self.assertEqual(scores.shape, (3, 3))
         self.assertTrue(torch.isfinite(scores).all())
 
-    def test_text_cycle_has_gradients_and_zero_weight_keeps_training(self):
-        from single_flow.fm import DeepFlowMatchingNet
+    def test_fm_only_training_is_deterministic(self):
         torch.set_num_threads(1)
-        torch.manual_seed(19)
-        model = DeepFlowMatchingNet(in_channels=3, model_channels=8,
-                                    out_channels=3, num_res_blocks=1)
-        with torch.no_grad():
-            model.final_layer.linear.weight.normal_(std=0.1)
-        text = torch.nn.functional.normalize(torch.randn(4, 3), dim=-1)
-        loss = text_cycle_loss(model, text)
-        self.assertTrue(torch.isfinite(loss))
-        loss.backward()
-        self.assertTrue(any(p.grad is not None and torch.isfinite(p.grad).all()
-                            and p.grad.abs().sum() > 0 for p in model.parameters()))
         eye = torch.eye(3)
         base = dict(stage='base', split='train', encoder_id='test', class_ids=[0, 1],
                     text_prototypes=eye[:2], visual_prototypes=eye[:2],
                     image_features=eye[:2], image_labels=torch.tensor([0, 1]))
         kwargs = dict(epochs=2, batch_size=2, blocks=1, hidden=8,
                       target='sample', seed=9)
-        original = fit(base, **kwargs)
-        disabled = fit(base, cycle_weight=0.0, **kwargs)
-        enabled = fit(base, cycle_weight=0.1, **kwargs)
-        self.assertTrue(all(torch.equal(original['state_dict'][k], disabled['state_dict'][k])
-                            for k in original['state_dict']))
-        self.assertTrue(any(not torch.equal(original['state_dict'][k], enabled['state_dict'][k])
-                            for k in original['state_dict']))
-        self.assertEqual(enabled['training']['cycle_weight'], 0.1)
+        first = fit(base, **kwargs)
+        repeat = fit(base, **kwargs)
+        self.assertTrue(all(torch.equal(first['state_dict'][k], repeat['state_dict'][k])
+                            for k in first['state_dict']))
+        self.assertTrue(all(torch.isfinite(torch.tensor(first['loss_history']))))
+        self.assertEqual(first['training']['target'], 'sample')
 
     def test_bank_appends_only_new_classes_and_freezes_old_prototypes(self):
         from unittest.mock import patch

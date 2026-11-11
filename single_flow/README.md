@@ -101,9 +101,9 @@ python -m single_flow.s1_flow classify --cache test.pt --bank output/bank_sessio
 
 默认 prototype 模式直接将基类 text_prototypes 作为 x0、visual_prototypes 作为 x1；
 这个模式只需要两种原型，不需要逐样本特征。--target sample 使用现有 image_features
-作为终点，并用现成的 visual_prototypes 作为可选 CE 的分类参照。
+作为终点，并用现成的 visual_prototypes 作为单样本训练模式的目标。
 训练 xt=(1-t)x0+t*x1，监督速度 x1-x0；仅训练速度网络。
-默认只有速度平方误差（维度求和、batch 求均值），--ce-weight 可开启视觉原型 CE。
+仅优化速度平方误差（维度求和、batch 求均值），没有额外分类损失。
 prototype 模式每类每轮仅一对数据，默认100轮、batch64、24块只是未经真实实验验证的起点。
 
 增量阶段不训练。generate 只读取 encoder_id、class_ids、text_prototypes；
@@ -127,7 +127,7 @@ python -m unittest discover -s single_flow -v
 ```
 
 8项测试覆盖三个数据集配置、两阶段完整合成流程、全部已见类别竞争，以及：原型直接输入、导出行序、增量拒绝训练、旧 bank 保留、
-非连续标签、sample/CE 路径，以及共用文本融合公式。未运行真实数据集或 GPU 训练。
+非连续标签、sample 路径，以及共用文本融合公式。未运行真实数据集或 GPU 训练。
 
 ## 双向共享 Flow 实验
 
@@ -143,7 +143,7 @@ python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/tra
 
 双向余弦得分先在全部已见类别上做 softmax。启用 `TRAINER.BiMC.USING_ENSEMBLE` 时，沿用 BiMC 的融合方式：基类概率与马氏距离概率融合，增量类概率与描述特征 KNN 概率融合，权重为数据集配置的 `ENSEMBLE_ALPHA`。协方差来自各阶段真实训练/支持图像的 BiMC 收缩协方差，按阶段类别数加权；马氏距离使用双向 Flow 校准后的视觉原型。当前 Flow 对相同文本原型输出确定结果，重复生成不能提供可靠的类内协方差，因此不将重复伪原型用于估计协方差。
 
-`FLOW.LOGIT_SCALE` 是双向余弦得分 softmax 前的正数乘数，默认 1 保持原行为；它与训练损失中的 `FLOW.TEMPERATURE` 相互独立。可在验证集比较 1、5、10 等值，并联合搜索 `FLOW.GAMMA`（例如 0.4、0.5、0.6、0.7）和 `FLOW.BETA_INC`（例如 0.3、0.4、0.5、0.6）。无 Ensemble 时正数缩放不改变 argmax；启用 Ensemble 时会改变 Flow 分支与协方差、KNN 概率的相对影响。softmax 温度不能保证各分支校准一致，需在验证集检查基类和增量类准确率。不要用测试阶段结果选择参数。
+`FLOW.LOGIT_SCALE` 是双向余弦得分 softmax 前的正数乘数，默认 1 保持原行为；训练中不再使用分类温度参数。可在验证集比较 1、5、10 等值，并联合搜索 `FLOW.GAMMA`（例如 0.4、0.5、0.6、0.7）和 `FLOW.BETA_INC`（例如 0.3、0.4、0.5、0.6）。无 Ensemble 时正数缩放不改变 argmax；启用 Ensemble 时会改变 Flow 分支与协方差、KNN 概率的相对影响。softmax 温度不能保证各分支校准一致，需在验证集检查基类和增量类准确率。不要用测试阶段结果选择参数。
 ### 当前双向 Flow 默认分数与 SwanLab 追踪
 
 `unified_flow.yaml` 现在默认设置 `USING_ENSEMBLE: True`；若要复现纯 UR-Flow 评分，将其设为 `False`。CIFAR100 的 `ENSEMBLE_ALPHA` 在 `configs/datasets/cifar100.yaml` 中配置。基类使用 UR-Flow + 马氏距离，增量类使用 UR-Flow + 类别描述最大相似度。马氏距离的协方差伪逆和原型二次项每个 Session 仅计算一次，结果与原始公式的 softmax 数值等价。

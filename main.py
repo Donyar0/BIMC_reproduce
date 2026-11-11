@@ -80,9 +80,6 @@ def extend_cfg(cfg):
     cfg.FLOW.BLOCKS = 24
     cfg.FLOW.HIDDEN = 0
     cfg.FLOW.TARGET = 'prototype'
-    cfg.FLOW.CE_WEIGHT = 0.0
-    cfg.FLOW.CYCLE_WEIGHT = 0.0
-    cfg.FLOW.TEMPERATURE = 0.07
     cfg.FLOW.STEPS = 8
     cfg.FLOW.OUTPUT_DIR = 'output/single_flow'
     cfg.FLOW.ADAPT_STEPS = 100
@@ -92,7 +89,6 @@ def extend_cfg(cfg):
     cfg.FLOW.BETA_INC = 0.5
     cfg.FLOW.GAMMA = 0.5
     cfg.FLOW.LOGIT_SCALE = 1.0
-    cfg.FLOW.BASE_MARGIN = 0.0
 
 
 

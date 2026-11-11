@@ -1,9 +1,8 @@
 """Shared text-to-visual flow and reverse query calibration."""
-import math
 import torch
 import torch.nn.functional as F
 from .fm import DeepFlowMatchingNet
-from .s1_flow import unit, text_cycle_loss
+from .s1_flow import unit
 
 
 def real_means(cache):
@@ -18,13 +17,10 @@ def load_model(checkpoint, device):
     return model
 
 
-def adapt(checkpoint, cache, memory, *, steps, batch_size, lr, weight_decay, device,
-          cycle_weight=0.0):
+def adapt(checkpoint, cache, memory, *, steps, batch_size, lr, weight_decay, device):
     """Fit current support examples and replay one real mean per old class."""
     if steps < 0 or batch_size < 1 or lr <= 0:
         raise ValueError('Invalid adaptation parameters')
-    if not math.isfinite(cycle_weight) or cycle_weight < 0:
-        raise ValueError('cycle_weight must be finite and non-negative')
     if cache['encoder_id'] != checkpoint['encoder_id']:
         raise ValueError('Encoder mismatch')
     ids = cache['class_ids']
@@ -35,25 +31,21 @@ def adapt(checkpoint, cache, memory, *, steps, batch_size, lr, weight_decay, dev
     targets = torch.cat([memory['real'], unit(cache['image_features']).cpu()])
     model = load_model(checkpoint, device).train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    fm_total, cycle_total = 0.0, 0.0
+    fm_total = 0.0
     for _ in range(steps):
         idx = torch.randint(len(sources), (batch_size,))
         x0, x1 = sources[idx].to(device), targets[idx].to(device)
         t = torch.rand(len(idx), 1, device=device)
         fm_loss = (model((1-t)*x0+t*x1, t) - (x1-x0)).square().sum(-1).mean()
-        cycle_loss = text_cycle_loss(model, x0) if cycle_weight else None
-        loss = fm_loss + cycle_weight * cycle_loss if cycle_loss is not None else fm_loss
+        loss = fm_loss
         if not torch.isfinite(loss):
             raise RuntimeError('Nonfinite flow adaptation loss')
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
         fm_total += fm_loss.item()
-        if cycle_loss is not None:
-            cycle_total += cycle_loss.item()
     if steps:
-        print(f'adapt steps={steps} fm_loss={fm_total/steps:.6f} '
-              f'cycle_loss={cycle_total/steps:.6f}', flush=True)
+        print(f'adapt steps={steps} fm_loss={fm_total/steps:.6f}', flush=True)
     result = dict(checkpoint)
     result['state_dict'] = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
     return result

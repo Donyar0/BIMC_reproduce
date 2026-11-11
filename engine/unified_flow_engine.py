@@ -67,9 +67,7 @@ class UnifiedFlowRunner(Runner):
                         cache, epochs=flow.EPOCHS, batch_size=flow.BATCH_SIZE,
                         lr=flow.LR, weight_decay=flow.WEIGHT_DECAY,
                         blocks=flow.BLOCKS, hidden=flow.HIDDEN or None,
-                        target=flow.TARGET, ce_weight=flow.CE_WEIGHT,
-                        temperature=flow.TEMPERATURE, seed=cfg.SEED, device=self.device,
-                        cycle_weight=flow.CYCLE_WEIGHT)
+                        target=flow.TARGET, seed=cfg.SEED, device=self.device)
                 torch.save(checkpoint, output / 'base_flow.pt')
 
             if task_id > 0:
@@ -78,8 +76,7 @@ class UnifiedFlowRunner(Runner):
                     torch.manual_seed(cfg.SEED + task_id)
                     checkpoint = adapt(checkpoint, cache, memory, steps=flow.ADAPT_STEPS,
                                        batch_size=flow.BATCH_SIZE, lr=flow.ADAPT_LR,
-                                       weight_decay=flow.WEIGHT_DECAY, device=self.device,
-                                       cycle_weight=flow.CYCLE_WEIGHT)
+                                       weight_decay=flow.WEIGHT_DECAY, device=self.device)
             current = dict(class_ids=cache['class_ids'], text=cache['text_prototypes'].float(),
                            real=real_means(cache), encoder_id=checkpoint['encoder_id'])
             if memory is None:
@@ -203,10 +200,6 @@ class UnifiedFlowRunner(Runner):
                     for c in group]
         if bank['class_ids'] != expected or expected != list(range(len(expected))):
             raise ValueError('BIMC evaluator requires ordered, contiguous seen-class IDs')
-        margin = self.cfg.FLOW.BASE_MARGIN
-        if not np.isfinite(margin) or margin < 0:
-            raise ValueError('FLOW.BASE_MARGIN must be finite and non-negative')
-        num_base = len(self.data_manager.class_index_in_task[0])
         loader = self.data_manager.get_dataloader(task_id, source='test', mode='test')
         scores, targets = [], []
         velocity = load_model(checkpoint=self._checkpoint, device=self.device).eval()
@@ -230,11 +223,6 @@ class UnifiedFlowRunner(Runner):
                     self.cfg.DATASET.ENSEMBLE_ALPHA, self.cfg.FLOW.LOGIT_SCALE)
             else:
                 logits = torch.softmax(logits * self.cfg.FLOW.LOGIT_SCALE, dim=-1)
-            # Scores are fused probabilities (or softmax scores without ensemble).
-            # Adjust only the base-vs-incremental decision in incremental sessions.
-            if task_id > 0 and margin > 0:
-                logits = logits.clone()
-                logits[:, :num_base] -= margin
             scores.append(logits.cpu())
             targets.append(labels.cpu())
         if not scores:
