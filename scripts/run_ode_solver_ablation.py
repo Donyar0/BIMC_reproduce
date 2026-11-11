@@ -13,6 +13,8 @@ def main():
     parser.add_argument('run_dir', type=Path, help='Completed image-to-text Flow run')
     parser.add_argument('--data_cfg', default='configs/datasets/cifar100.yaml')
     parser.add_argument('--use_swanlab', action='store_true')
+    parser.add_argument('--trusted_checkpoints', action='store_true',
+                        help='Allow pickle loading only for checkpoints you trust')
     parser.add_argument('--solvers', nargs='+', choices=('euler', 'midpoint', 'heun', 'rk4'),
                         default=('euler', 'midpoint', 'heun', 'rk4'))
     args = parser.parse_args()
@@ -39,6 +41,8 @@ def main():
                    '--eval_run', str(run_dir)]
         if args.use_swanlab:
             command.append('--use_swanlab')
+        if args.trusted_checkpoints:
+            command.append('--trusted_checkpoints')
         print(f'Running {solver}: {" ".join(command)}', flush=True)
         with (output / f'{solver}.log').open('w', encoding='utf-8') as log:
             subprocess.run(command, cwd=repo, stdout=log, stderr=subprocess.STDOUT, check=True)

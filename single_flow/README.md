@@ -257,3 +257,5 @@ python scripts/run_ode_solver_ablation.py \
 `eval_seconds` 的 `summary.csv`。用时包含特征提取和 Bank 重建。
 可以用 `--solvers euler rk4` 只比较指定求解器。四种求解器计算量不同，
 比较准确率时也应关注推理时间。
+自己训练且来源可信的旧版权重若需要 pickle 加载，可在脚本命令后添加
+`--trusted_checkpoints`，该选项会传给每一次重评估。

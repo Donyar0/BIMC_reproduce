@@ -143,23 +143,26 @@ class RunnerTests(unittest.TestCase):
         from scripts import run_ode_solver_ablation
         with tempfile.TemporaryDirectory() as temp:
             run_dir=Path(temp)
+            commands=[]
             cfg=CfgNode({'DATASET':{'NAME':'synthetic'},'FLOW':{
                 'PREDICTION':'velocity','SOLVER':'euler','OUTPUT_DIR':'unused','STEPS':4}})
             (run_dir/'config.yaml').write_text(cfg.dump())
             def fake_run(command, **kwargs):
+                commands.append(command)
                 with open(command[command.index('--train_cfg')+1]) as handle:
                     selected=CfgNode.load_cfg(handle)
                 target=Path(selected.FLOW.OUTPUT_DIR)/'synthetic'/'eval_fake'
                 target.mkdir(parents=True)
                 (target/'metrics.json').write_text(json.dumps({
                     'final_acc':60.,'avg_acc':70.,'sessions':[{'elapsed_time':1.25}]}))
-            argv=['script',str(run_dir),'--solvers','euler','rk4']
+            argv=['script',str(run_dir),'--solvers','euler','rk4','--trusted_checkpoints']
             with patch.object(sys,'argv',argv), patch.object(run_ode_solver_ablation.subprocess,'run',side_effect=fake_run):
                 run_ode_solver_ablation.main()
             with (run_dir/'ode_solver_ablation'/'summary.csv').open() as handle:
                 rows=list(csv.DictReader(handle))
             self.assertEqual([row['solver'] for row in rows],['euler','rk4'])
             self.assertTrue(all(row['final_acc']=='60.0' for row in rows))
+            self.assertTrue(all('--trusted_checkpoints' in command for command in commands))
 
     def test_two_session_training_once_and_saved_evaluation_both_modes(self):
         torch.set_num_threads(1)
