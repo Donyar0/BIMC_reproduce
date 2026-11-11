@@ -141,12 +141,12 @@ python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/tra
 
 `ADAPT_STEPS`、`ADAPT_LR`、`ALPHA`、`BETA_BASE`、`BETA_INC` 和 `GAMMA` 控制微调和融合，初值是实验起点，应使用验证数据选择。`ADAPT_STEPS: 0` 可关闭增量微调。实验需要 GPU、数据集、CLIP 权重及配置中的正确数据路径；该方法的效果需要真实数据验证。
 
-双向余弦得分先在全部已见类别上做 softmax。启用 `TRAINER.BiMC.USING_ENSEMBLE` 时，沿用 BiMC 的融合方式：基类概率与马氏距离概率融合，增量类概率与描述特征 KNN 概率融合，权重为数据集配置的 `ENSEMBLE_ALPHA`。协方差来自各阶段真实训练/支持图像的 BiMC 收缩协方差，按阶段类别数加权；马氏距离使用双向 Flow 校准后的视觉原型。当前 Flow 对相同文本原型输出确定结果，重复生成不能提供可靠的类内协方差，因此不将重复伪原型用于估计协方差。
+双向 Flow 仅使用视觉 Bank 余弦分数与反向校准文本余弦分数，经 `FLOW.GAMMA` 融合。该 Flow 流程不计算协方差、不使用马氏距离、描述 KNN 或 BiMC Ensemble；Prompt + Description 仍用于构建融合文本原型。独立的原始 BiMC baseline 未改动。
 
-`FLOW.LOGIT_SCALE` 是双向余弦得分 softmax 前的正数乘数，默认 1 保持原行为；训练中不再使用分类温度参数。可在验证集比较 1、5、10 等值，并联合搜索 `FLOW.GAMMA`（例如 0.4、0.5、0.6、0.7）和 `FLOW.BETA_INC`（例如 0.3、0.4、0.5、0.6）。无 Ensemble 时正数缩放不改变 argmax；启用 Ensemble 时会改变 Flow 分支与协方差、KNN 概率的相对影响。softmax 温度不能保证各分支校准一致，需在验证集检查基类和增量类准确率。不要用测试阶段结果选择参数。
+`FLOW.LOGIT_SCALE` 是双向余弦得分 softmax 前的正数乘数，默认 1 保持原行为；训练中不再使用分类温度参数。可在验证集比较 1、5、10 等值，并联合搜索 `FLOW.GAMMA`（例如 0.4、0.5、0.6、0.7）和 `FLOW.BETA_INC`（例如 0.3、0.4、0.5、0.6）。在当前纯双向 Flow 分类中，正数 logit 缩放不改变 argmax，因此不影响准确率。仍需在验证集检查基类和增量类准确率。不要用测试阶段结果选择参数。
 ### 当前双向 Flow 默认分数与 SwanLab 追踪
 
-`unified_flow.yaml` 现在默认设置 `USING_ENSEMBLE: True`；若要复现纯 UR-Flow 评分，将其设为 `False`。CIFAR100 的 `ENSEMBLE_ALPHA` 在 `configs/datasets/cifar100.yaml` 中配置。基类使用 UR-Flow + 马氏距离，增量类使用 UR-Flow + 类别描述最大相似度。马氏距离的协方差伪逆和原型二次项每个 Session 仅计算一次，结果与原始公式的 softmax 数值等价。
+当前 `unified_flow.yaml` 只执行纯双向 UR-Flow 分类；不读取数据集 `ENSEMBLE_ALPHA`。不计算协方差或马氏距离，保留原始 BiMC baseline 作为独立对照。
 
 在仓库根目录运行，且先用 `swanlab login` 登录（首次使用）：
 
@@ -164,13 +164,13 @@ SwanLab 配置中自动保存全部 YAML 配置、数据集和训练配置路径
 
 ### 不重新训练地评估已有权重
 
-训练结果目录必须包含原始 `config.yaml` 以及每阶段的 `flow_session*.pt`、`bank_session*.pt`。在原训练配置的副本中修改 `ALPHA`、`GAMMA`、`BETA_BASE`、`BETA_INC` 或 `LOGIT_SCALE`（也可以切换 `USING_ENSEMBLE`），然后运行：
+训练结果目录必须包含原始 `config.yaml` 以及每阶段的 `flow_session*.pt`、`bank_session*.pt`。在原训练配置的副本中修改 `ALPHA`、`GAMMA`、`BETA_BASE`、`BETA_INC` 或 `LOGIT_SCALE`，然后运行：
 
 ```bash
 python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/trainers/unified_flow.yaml \
   --eval_run output/unified_flow/cifar100/原训练目录
 ```
 
-可添加原有的 `--use_swanlab` 等参数。该入口不会训练或修改原结果，另建 `eval_...` 结果目录及 `source_run.txt`。它重新读取测试数据并提取特征；启用 Ensemble 时还会重新提取训练/支持集统计，并与已保存的真实原型核对。须使用训练时相同的数据、随机种子、配置与 CLIP 权重。结果仍然是测试集结果；严格选参需要独立验证集，当前入口没有验证集支持。只加载可信来源的权重文件。
+可添加原有的 `--use_swanlab` 等参数。该入口不会训练或修改原结果，另建 `eval_...` 结果目录及 `source_run.txt`。它重新读取测试数据并提取特征；无需重新提取训练/支持集协方差或描述 KNN 统计。须使用训练时相同的数据、随机种子、配置与 CLIP 权重。结果仍然是测试集结果；严格选参需要独立验证集，当前入口没有验证集支持。只加载可信来源的权重文件。
 
 如果旧版 PyTorch 的安全加载器无法读取自己训练的 checkpoint，可在上述命令添加 `--trusted_checkpoints`。该选项允许 pickle 执行代码，仅对来源可信的权重使用，不要用于下载的不明文件。

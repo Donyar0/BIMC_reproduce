@@ -148,7 +148,7 @@ class BiMC(nn.Module):
     
 
     def build_task_statistics(self, class_names, loader,
-                         class_index, calibrate_novel_vision_proto=False):
+                         class_index, calibrate_novel_vision_proto=False, calculate_covariance=True):
         
             
         def shrink_cov(cov, alpha1=1.0, alpha2=0.0):
@@ -183,16 +183,7 @@ class BiMC(nn.Module):
             self.base_vision_prototype = images_proto
 
 
-        cov_images = torch.cov(images_features.T)
-
-        if cls_begin_index == 0:
-            cov_images = shrink_cov(cov_images, alpha1=self.cfg.TRAINER.BiMC.GAMMA_BASE) 
-        else:
-            cov_images = shrink_cov(cov_images, alpha1=self.cfg.TRAINER.BiMC.GAMMA_INC)
-
-        
-        print('finish loading covariance')
-
+        result = {
         return {
             'text_proto': F.normalize(self.fused_text_prototype(text_features, description_proto), dim=-1),
             'description_proto': description_proto,
@@ -205,11 +196,20 @@ class BiMC(nn.Module):
             'image_proto': images_proto,
             'images_features': images_features,
             'images_targets': images_targets,
-            'cov_image': cov_images,
             
             'class_index': class_index,
             'sample_cnt': len(images_features)
         }
+        # The UR-Flow runner disables covariance; legacy BiMC can still use it.
+        if calculate_covariance:
+            cov_images = torch.cov(images_features.T)
+            if cls_begin_index == 0:
+                cov_images = shrink_cov(cov_images, alpha1=self.cfg.TRAINER.BiMC.GAMMA_BASE)
+            else:
+                cov_images = shrink_cov(cov_images, alpha1=self.cfg.TRAINER.BiMC.GAMMA_INC)
+            result['cov_image'] = cov_images
+            print('finish loading covariance')
+        return result
 
    
 
