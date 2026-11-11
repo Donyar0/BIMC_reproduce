@@ -62,11 +62,35 @@ class NumericalTests(unittest.TestCase):
             def __call__(self,x,t): return torch.tensor([[-1.,1.,0.]]).expand_as(x)
         x0=torch.tensor([[1.,0.,0.]])
         x1=torch.tensor([[0.,1.,0.]])
-        self.assertTrue(torch.allclose(transport(Constant(),x0,8),x1,atol=1e-6))
-        self.assertTrue(torch.allclose(transport(Constant(),x1,8,reverse=True),x0,atol=1e-6))
+        for solver in ('euler', 'midpoint', 'heun', 'rk4'):
+            self.assertTrue(torch.allclose(transport(Constant(),x0,8,solver=solver),x1,atol=1e-6))
+            self.assertTrue(torch.allclose(transport(Constant(),x1,8,reverse=True,solver=solver),x0,atol=1e-6))
         bank=dict(class_ids=[0,1],text=torch.eye(3)[:2],prototypes=torch.eye(3)[:2])
         _,score=classify_bidirectional(Constant(),x0,bank,alpha=1,gamma=0,steps=8)
         self.assertTrue(torch.allclose(score,torch.tensor([[0.,1.]]),atol=1e-6))
+
+    def test_rk4_accuracy_and_solver_cost(self):
+        class TimeField:
+            def __init__(self): self.calls=0
+            def __call__(self,x,t):
+                self.calls+=1
+                return torch.cat((t,torch.zeros_like(t)),dim=1)
+        source=torch.tensor([[0.,1.]])
+        exact=F.normalize(torch.tensor([[.5,1.]]),dim=-1)
+        costs={'euler':1,'midpoint':2,'heun':2,'rk4':4}
+        for solver,cost in costs.items():
+            field=TimeField()
+            forward=transport(field,source,2,solver=solver)
+            self.assertEqual(field.calls,2*cost)
+            if solver!='euler':
+                self.assertTrue(torch.allclose(forward,exact,atol=1e-6))
+            field=TimeField()
+            backward=transport(field,torch.tensor([[.5,1.]]),2,reverse=True,solver=solver)
+            self.assertEqual(field.calls,2*cost)
+            if solver!='euler':
+                self.assertTrue(torch.allclose(backward,source,atol=1e-6))
+        with self.assertRaisesRegex(ValueError,'SOLVER'):
+            transport(TimeField(),source,2,solver='bad')
 
     def test_original_bimc_fusion(self):
         ns=dict(torch=torch,nn=torch.nn,F=F)
@@ -113,6 +137,30 @@ class NumericalTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_solver_ablation_script_writes_comparable_summary(self):
+        import sys
+        from yacs.config import CfgNode
+        from scripts import run_ode_solver_ablation
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir=Path(temp)
+            cfg=CfgNode({'DATASET':{'NAME':'synthetic'},'FLOW':{
+                'PREDICTION':'velocity','SOLVER':'euler','OUTPUT_DIR':'unused','STEPS':4}})
+            (run_dir/'config.yaml').write_text(cfg.dump())
+            def fake_run(command, **kwargs):
+                with open(command[command.index('--train_cfg')+1]) as handle:
+                    selected=CfgNode.load_cfg(handle)
+                target=Path(selected.FLOW.OUTPUT_DIR)/'synthetic'/'eval_fake'
+                target.mkdir(parents=True)
+                (target/'metrics.json').write_text(json.dumps({
+                    'final_acc':60.,'avg_acc':70.,'sessions':[{'elapsed_time':1.25}]}))
+            argv=['script',str(run_dir),'--solvers','euler','rk4']
+            with patch.object(sys,'argv',argv), patch.object(run_ode_solver_ablation.subprocess,'run',side_effect=fake_run):
+                run_ode_solver_ablation.main()
+            with (run_dir/'ode_solver_ablation'/'summary.csv').open() as handle:
+                rows=list(csv.DictReader(handle))
+            self.assertEqual([row['solver'] for row in rows],['euler','rk4'])
+            self.assertTrue(all(row['final_acc']=='60.0' for row in rows))
+
     def test_two_session_training_once_and_saved_evaluation_both_modes(self):
         torch.set_num_threads(1)
         eye=torch.eye(4)
@@ -175,6 +223,14 @@ class RunnerTests(unittest.TestCase):
                 before=runner.acc_list.copy(); runner.acc_list=[];runner.task_acc_list=[]
                 with contextlib.redirect_stdout(io.StringIO()):runner.evaluate_saved(run_dir)
                 self.assertEqual(runner.acc_list,before)
+                cfg.FLOW.SOLVER='rk4'
+                runner.acc_list=[];runner.task_acc_list=[]
+                with contextlib.redirect_stdout(io.StringIO()):runner.evaluate_saved(run_dir)
+                self.assertEqual(len(runner.acc_list),2)
+                cfg.FLOW.STEPS=8
+                runner.acc_list=[];runner.task_acc_list=[]
+                with contextlib.redirect_stdout(io.StringIO()):runner.evaluate_saved(run_dir)
+                self.assertEqual(len(runner.acc_list),2)
                 cfg.FLOW.PREDICTION='endpoint' if mode=='velocity' else 'velocity'
                 with self.assertRaisesRegex(ValueError,'PREDICTION'):
                     runner.evaluate_saved(run_dir)

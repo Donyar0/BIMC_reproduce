@@ -81,6 +81,7 @@ def extend_cfg(cfg):
     cfg.FLOW.HIDDEN = 0
     cfg.FLOW.TARGET = 'prototype'
     cfg.FLOW.STEPS = 8
+    cfg.FLOW.SOLVER = 'euler'
     cfg.FLOW.OUTPUT_DIR = 'output/single_flow'
     cfg.FLOW.ADAPT_STEPS = 100
     cfg.FLOW.ADAPT_LR = 0.0002

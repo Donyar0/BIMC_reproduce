@@ -90,21 +90,41 @@ def fit(cache, loader, encode_images, *, epochs, lr, weight_decay, blocks, hidde
 
 
 @torch.no_grad()
-def transport(model, features, steps, reverse=False):
+def transport(model, features, steps, reverse=False, solver='euler'):
     if steps < 1:
         raise ValueError('Integration steps must be positive')
+    if solver not in ('euler', 'midpoint', 'heun', 'rk4'):
+        raise ValueError('SOLVER must be euler, midpoint, heun or rk4')
     x = features.float().clone()
+    step = (-1 if reverse else 1) / steps
     for k in range(steps):
         time = 1-k/steps if reverse else k/steps
-        t = torch.full((len(x), 1), time, device=x.device)
-        x = x + (-1 if reverse else 1)*model(x, t)/steps
+        def field(state, at):
+            t = torch.full((len(state), 1), at, device=state.device)
+            return model(state, t)
+
+        k1 = field(x, time)
+        if solver == 'euler':
+            update = k1
+        elif solver == 'midpoint':
+            update = field(x + step*k1/2, time + step/2)
+        elif solver == 'heun':
+            k2 = field(x + step*k1, time + step)
+            update = (k1 + k2)/2
+        else:
+            k2 = field(x + step*k1/2, time + step/2)
+            k3 = field(x + step*k2/2, time + step/2)
+            k4 = field(x + step*k3, time + step)
+            update = (k1 + 2*k2 + 2*k3 + k4)/6
+        x = x + step*update
         if not torch.isfinite(x).all():
             raise RuntimeError('Nonfinite Flow integration')
     return F.normalize(x, dim=-1)
 
 
 @torch.no_grad()
-def build_bank(checkpoint, memory, *, steps, num_base, beta_base, beta_inc, device, previous_bank=None):
+def build_bank(checkpoint, memory, *, steps, num_base, beta_base, beta_inc, device,
+               previous_bank=None, solver='euler'):
     if steps < 1 or not all(0 <= b <= 1 for b in (beta_base, beta_inc)):
         raise ValueError('Invalid bank integration/fusion parameters')
     if memory['encoder_id'] != checkpoint['encoder_id']:
@@ -118,7 +138,8 @@ def build_bank(checkpoint, memory, *, steps, num_base, beta_base, beta_inc, devi
             raise ValueError('New classes overlap prior bank')
     model = load_model(checkpoint, device).eval()
     # Training direction is image -> text: visual generation integrates backwards.
-    generated = transport(model, memory['text'].to(device), steps, reverse=True).cpu()
+    generated = transport(model, memory['text'].to(device), steps,
+                          reverse=True, solver=solver).cpu()
     beta = torch.full((len(generated), 1), beta_inc)
     beta[:num_base] = beta_base
     current = dict(class_ids=list(memory['class_ids']), text=memory['text'].cpu().clone(),
@@ -133,11 +154,12 @@ def build_bank(checkpoint, memory, *, steps, num_base, beta_base, beta_inc, devi
 
 
 @torch.no_grad()
-def classify_bidirectional(model, image_features, bank, *, alpha, gamma, steps):
+def classify_bidirectional(model, image_features, bank, *, alpha, gamma, steps,
+                           solver='euler'):
     if not 0 <= alpha <= 1 or not 0 <= gamma <= 1:
         raise ValueError('alpha and gamma must be in [0,1]')
     z = unit(image_features)
-    mapped = transport(model, z, steps)
+    mapped = transport(model, z, steps, solver=solver)
     semantic_query = F.normalize((1-alpha)*z+alpha*mapped, dim=-1)
     scores = gamma*(z @ bank['prototypes'].to(z.device).T) + (1-gamma)*(semantic_query @ bank['text'].to(z.device).T)
     ids = torch.tensor(bank['class_ids'], device=z.device)

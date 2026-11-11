@@ -42,6 +42,7 @@ FLOW:
   BLOCKS: 24
   HIDDEN: 0  # 0 uses CLIP feature dimension
   STEPS: 8
+  SOLVER: "euler"  # euler, midpoint, heun, rk4; inference only
   OUTPUT_DIR: "output/unified_flow_image_text_velocity"
   ADAPT_STEPS: 0
   ALPHA: 1.0  # full forward image-to-text integration

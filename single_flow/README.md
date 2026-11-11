@@ -229,3 +229,31 @@ python main.py --data_cfg configs/datasets/cifar100.yaml \
 终点→速度公式及梯度、两方向积分、像素增强、冻结 CLIP、拒绝增量训练，
 以及两组配置的两阶段运行、相同权重、旧 Bank 保留与重评估。
 未执行真实数据集/GPU 准确率实验。
+
+### 推理阶段 ODE 求解器对比
+
+`FLOW.SOLVER` 可选 `euler`（默认）、`midpoint`、`heun`、`rk4`。
+每步速度场调用次数分别为 1、2、2、4，正向图像到文本与反向文本到视觉
+使用同一个求解器和 `FLOW.STEPS`。训练损失与网络权重不受求解器设置影响。
+`TIME_EPS` 的截断仍作用于终点预测模式和速度预测模式的速度场接口，
+所以四种求解器遵循相同的时间边界规则。
+
+已有本版本的完整训练目录可以直接重评估，无需重新训练。重评估会用所选
+求解器从已保存的文本与真实视觉原型重新生成每阶段视觉 Bank；它不会直接
+沿用原目录中由 Euler 生成的视觉原型。`FLOW.STEPS` 也可在重评估中修改。
+
+在仓库根目录运行四组实验（默认按顺序执行）：
+
+```bash
+python scripts/run_ode_solver_ablation.py \
+  output/unified_flow_image_text_velocity/cifar100/你的训练目录 \
+  --data_cfg configs/datasets/cifar100.yaml --use_swanlab
+```
+
+对于终点预测网络，将路径替换为
+`output/unified_flow_image_text_endpoint/cifar100/你的训练目录`。
+脚本在该训练目录的 `ode_solver_ablation/` 中保存四份配置、各组日志、
+评估结果，以及列出 `final_acc`、`avg_acc` 和整个重评估用时
+`eval_seconds` 的 `summary.csv`。用时包含特征提取和 Bank 重建。
+可以用 `--solvers euler rk4` 只比较指定求解器。四种求解器计算量不同，
+比较准确率时也应关注推理时间。

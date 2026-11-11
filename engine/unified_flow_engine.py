@@ -26,6 +26,8 @@ class UnifiedFlowRunner(Runner):
         flow = cfg.FLOW
         if flow.ADAPT_STEPS != 0:
             raise ValueError('Image-to-text Flow is base-only; set ADAPT_STEPS: 0')
+        if flow.SOLVER not in ('euler', 'midpoint', 'heun', 'rk4'):
+            raise ValueError('Unknown FLOW.SOLVER')
         if not cfg.TRAINER.BiMC.TEXT_CALIBRATION:
             raise ValueError('Enable original BiMC description fusion: TEXT_CALIBRATION: True')
         if not np.isfinite(flow.LOGIT_SCALE) or flow.LOGIT_SCALE <= 0:
@@ -86,7 +88,8 @@ class UnifiedFlowRunner(Runner):
             bank = build_bank(checkpoint, current, steps=flow.STEPS,
                               num_base=num_base if task_id == 0 else 0,
                               beta_base=flow.BETA_BASE, beta_inc=flow.BETA_INC,
-                              device=self.device, previous_bank=bank)
+                              device=self.device, previous_bank=bank,
+                              solver=flow.SOLVER)
             torch.save(checkpoint, output / f'flow_session{task_id}.pt')
             torch.save(bank, output / f'bank_session{task_id}.pt')
             del stats, cache, loader
@@ -133,9 +136,13 @@ class UnifiedFlowRunner(Runner):
         for name in ('PREC', 'VISION_CALIBRATION', 'LAMBDA_I', 'TAU', 'TEXT_CALIBRATION', 'LAMBDA_T'):
             if getattr(original.TRAINER.BiMC, name) != getattr(cfg.TRAINER.BiMC, name):
                 raise ValueError(f'Saved run BiMC.{name} differs from current configuration')
-        for name in ('STEPS', 'PREDICTION', 'TIME_EPS'):
+        for name in ('PREDICTION', 'TIME_EPS'):
             if getattr(original.FLOW, name) != getattr(cfg.FLOW, name):
                 raise ValueError(f'FLOW.{name} must match the saved run')
+        if cfg.FLOW.SOLVER not in ('euler', 'midpoint', 'heun', 'rk4'):
+            raise ValueError('Unknown FLOW.SOLVER')
+        if cfg.FLOW.STEPS < 1:
+            raise ValueError('FLOW.STEPS must be positive')
         if not np.isfinite(cfg.FLOW.LOGIT_SCALE) or cfg.FLOW.LOGIT_SCALE <= 0:
             raise ValueError('FLOW.LOGIT_SCALE must be finite and positive')
         output = Path(cfg.FLOW.OUTPUT_DIR) / cfg.DATASET.NAME.lower() / (
@@ -147,6 +154,7 @@ class UnifiedFlowRunner(Runner):
         model.eval().requires_grad_(False)
         rows = []
         num_base = len(self.data_manager.class_index_in_task[0])
+        bank = None
         for task_id in range(self.data_manager.num_tasks):
             start = time.time()
             # Only load trusted checkpoints created by this project.
@@ -160,13 +168,21 @@ class UnifiedFlowRunner(Runner):
             expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1] for c in group]
             if saved['class_ids'] != expected or saved['encoder_id'] != checkpoint['encoder_id']:
                 raise ValueError('Saved checkpoint and bank are incompatible with dataset')
-            # Stored generated/text/real vectors allow all beta values without training.
-            beta = torch.full((len(expected), 1), cfg.FLOW.BETA_INC)
-            beta[:num_base] = cfg.FLOW.BETA_BASE
             if not (0 <= cfg.FLOW.BETA_BASE <= 1 and 0 <= cfg.FLOW.BETA_INC <= 1):
                 raise ValueError('Beta values must be between 0 and 1')
-            bank = dict(saved, prototypes=torch.nn.functional.normalize(
-                (1-beta)*saved['real'].float() + beta*saved['generated'].float(), dim=-1))
+            # Rebuild every session with the selected solver. Reusing saved
+            # generated vectors would mix solvers in the visual score.
+            ids = self.data_manager.class_index_in_task[task_id]
+            count = len(ids)
+            current = dict(class_ids=[int(i) for i in ids],
+                           text=saved['text'][-count:].float(),
+                           real=saved['real'][-count:].float(),
+                           encoder_id=checkpoint['encoder_id'])
+            bank = build_bank(checkpoint, current, steps=cfg.FLOW.STEPS,
+                              num_base=num_base if task_id == 0 else 0,
+                              beta_base=cfg.FLOW.BETA_BASE, beta_inc=cfg.FLOW.BETA_INC,
+                              device=self.device, previous_bank=bank,
+                              solver=cfg.FLOW.SOLVER)
             self._checkpoint = checkpoint
             acc = self.inference_task_flow(task_id, bank, model)
             self.acc_list.append(acc['mean_acc'])
@@ -198,7 +214,8 @@ class UnifiedFlowRunner(Runner):
             features = model.extract_img_feature(images)
             _, logits = classify_bidirectional(velocity, features, device_bank,
                                                alpha=self.cfg.FLOW.ALPHA, gamma=self.cfg.FLOW.GAMMA,
-                                               steps=self.cfg.FLOW.STEPS)
+                                               steps=self.cfg.FLOW.STEPS,
+                                               solver=self.cfg.FLOW.SOLVER)
             logits = torch.softmax(logits * self.cfg.FLOW.LOGIT_SCALE, dim=-1)
             scores.append(logits.cpu())
             targets.append(labels.cpu())
