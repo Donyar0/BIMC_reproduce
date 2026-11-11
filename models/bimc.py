@@ -184,7 +184,6 @@ class BiMC(nn.Module):
 
 
         result = {
-        return {
             'text_proto': F.normalize(self.fused_text_prototype(text_features, description_proto), dim=-1),
             'description_proto': description_proto,
             'description_features': description_features,
