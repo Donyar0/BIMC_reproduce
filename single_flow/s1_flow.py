@@ -109,6 +109,9 @@ def generate(checkpoint, cache, steps=8, device='cpu', existing=None):
         raise ValueError('steps must be positive')
     if cache['encoder_id'] != checkpoint['encoder_id']:
         raise ValueError('Encoder mismatch')
+    adapter_sha = checkpoint.get('text_adapter_sha256')
+    if adapter_sha != cache.get('text_adapter_sha256'):
+        raise ValueError('Flow checkpoint and text adapter prototype fingerprint mismatch')
     ids, text = text_cache(cache)
     model = DeepFlowMatchingNet(**checkpoint['architecture']).to(device)
     model.load_state_dict(checkpoint['state_dict'])
@@ -120,7 +123,11 @@ def generate(checkpoint, cache, steps=8, device='cpu', existing=None):
         t = torch.full((len(x),1), k/steps, device=device)
         x = x + model(x,t)/steps
     result = dict(class_ids=ids, prototypes=unit(x).cpu(), encoder_id=cache['encoder_id'])
+    if adapter_sha is not None:
+        result['text_adapter_sha256'] = adapter_sha
     if existing is not None:
+        if existing.get('text_adapter_sha256') != adapter_sha:
+            raise ValueError('Cannot append a bank from a different text adapter')
         old_ids = ids_checked(existing['class_ids'])
         old = unit(existing['prototypes'])
         if existing['encoder_id'] != result['encoder_id'] or old.shape != (len(old_ids), x.shape[1]):

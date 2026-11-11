@@ -84,6 +84,15 @@ def extend_cfg(cfg):
     cfg.FLOW.TEMPERATURE = 0.07
     cfg.FLOW.STEPS = 8
     cfg.FLOW.OUTPUT_DIR = 'output/single_flow'
+    # Optional base-trained VDT text adapter for text-to-visual Flow.
+    cfg.FLOW.TEXT_ADAPTER = CN()
+    cfg.FLOW.TEXT_ADAPTER.ENABLED = False
+    cfg.FLOW.TEXT_ADAPTER.RATIO = 0.2
+    cfg.FLOW.TEXT_ADAPTER.DROPOUT = 0.1
+    cfg.FLOW.TEXT_ADAPTER.EPOCHS = 20
+    cfg.FLOW.TEXT_ADAPTER.BATCH_SIZE = 256
+    cfg.FLOW.TEXT_ADAPTER.LR = 0.0001
+    cfg.FLOW.TEXT_ADAPTER.WEIGHT_DECAY = 0.0001
 
 
 
