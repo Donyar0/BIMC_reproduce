@@ -63,7 +63,8 @@ class RunnerTests(unittest.TestCase):
             runner.cfg = NS(SEED=1,DATASET=NS(NAME='synthetic'),MODEL=NS(BACKBONE=NS(NAME='synthetic')),
                 TRAINER=NS(BiMC=NS(PREC='fp32',VISION_CALIBRATION=True,PROTOTYPE_CACHE_DIR='')),
                 FLOW=NS(OUTPUT_DIR=directory,EPOCHS=2,BATCH_SIZE=4,LR=0.001,
-                        WEIGHT_DECAY=0.,BLOCKS=1,HIDDEN=8,TARGET='prototype',CE_WEIGHT=0.,
+                        WEIGHT_DECAY=0.,BLOCKS=1,HIDDEN=8,TARGET='prototype',
+                        PREDICTION='endpoint',ENDPOINT_T_MAX=0.875,CE_WEIGHT=0.,
                         TEMPERATURE=0.07,STEPS=2),dump=lambda:'synthetic: true\n')
             runner.model=Model(); runner.device='cpu'; runner.is_distributed=False
             runner.data_manager=Data(); runner.evaluator=evaluator(Data.class_index_in_task)
@@ -84,6 +85,9 @@ class RunnerTests(unittest.TestCase):
             bank0=torch.load(result_path.parent/'bank_session0.pt',weights_only=True)
             bank1=torch.load(result_path.parent/'bank_session1.pt',weights_only=True)
             self.assertTrue(torch.equal(bank0['prototypes'],bank1['prototypes'][:2]))
+            self.assertEqual(bank0['prediction'], 'endpoint')
+            ck = torch.load(result_path.parent/'base_flow.pt',weights_only=True)
+            self.assertEqual(ck['prediction'], 'endpoint')
 
     def test_old_classes_compete_with_new_classes(self):
         evaluator=load_class(ROOT/'utils/evaluator.py','AccuracyEvaluator',{'torch':torch,'np':np})
@@ -103,12 +107,14 @@ class RunnerTests(unittest.TestCase):
         namespace={'CN':CfgNode}
         exec(compile(ast.Module(body=functions,type_ignores=[]),'main.py','exec'),namespace)
         for dataset, sessions in [('cifar100',9),('cub200',11),('miniimagenet',9)]:
-            for trainer in ['single_flow','bimc']:
+            for trainer in ['single_flow','single_flow_endpoint','bimc']:
                 cfg=namespace['setup_cfg'](str(ROOT/f'configs/datasets/{dataset}.yaml'),
                                           str(ROOT/f'configs/trainers/{trainer}.yaml'))
                 self.assertEqual(1+(cfg.DATASET.NUM_CLASSES-cfg.DATASET.NUM_INIT_CLS)//cfg.DATASET.NUM_INC_CLS,sessions)
-                if trainer=='single_flow':
+                if trainer.startswith('single_flow'):
                     self.assertEqual(cfg.METHOD,'single_flow')
+                    self.assertEqual(cfg.FLOW.PREDICTION,
+                                     'endpoint' if trainer == 'single_flow_endpoint' else 'velocity')
 
 
 if __name__ == '__main__':

@@ -80,6 +80,8 @@ def extend_cfg(cfg):
     cfg.FLOW.BLOCKS = 24
     cfg.FLOW.HIDDEN = 0
     cfg.FLOW.TARGET = 'prototype'
+    cfg.FLOW.PREDICTION = 'velocity'
+    cfg.FLOW.ENDPOINT_T_MAX = 0.875
     cfg.FLOW.CE_WEIGHT = 0.0
     cfg.FLOW.TEMPERATURE = 0.07
     cfg.FLOW.STEPS = 8

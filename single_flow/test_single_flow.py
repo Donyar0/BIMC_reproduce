@@ -2,7 +2,7 @@ import contextlib
 import io
 import unittest
 import torch
-from s1_flow import fit, generate, classify
+from s1_flow import fit, generate, classify, output_to_velocity
 
 class PipelineTests(unittest.TestCase):
     @classmethod
@@ -32,6 +32,44 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(torch.equal(merged['prototypes'][:4],bank['prototypes']))
         with self.assertRaises(ValueError):
             generate(self.ck,self.cache,existing=bank)
+
+    def test_endpoint_velocity_identity(self):
+        x0 = torch.tensor([[1., 0., 0., 0.]])
+        x1 = torch.tensor([[0., 1., 0., 0.]])
+        for t_value in (0.0, 0.2, 0.875):
+            t = torch.tensor([[t_value]])
+            xt = (1-t)*x0 + t*x1
+            predicted_v = output_to_velocity(x1, xt, t, 'endpoint')
+            self.assertTrue(torch.allclose(predicted_v, x1-x0, atol=1e-6))
+            self.assertTrue(torch.allclose(output_to_velocity(predicted_v, xt, t),
+                                           predicted_v))
+        with self.assertRaises(ValueError):
+            output_to_velocity(x1, x0, torch.zeros(1, 1), 'invalid')
+
+    def test_endpoint_training_and_generation(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            endpoint_ck = fit(self.cache, epochs=12, blocks=1, hidden=16,
+                              lr=0.003, prediction='endpoint', ce_weight=0.1,
+                              endpoint_t_max=0.875, seed=13)
+        self.assertEqual(endpoint_ck['prediction'], 'endpoint')
+        self.assertEqual(endpoint_ck['training']['target_space'], 'bimc_fused')
+        self.assertTrue(torch.isfinite(torch.tensor(endpoint_ck['loss_history'])).all())
+        end_bank = generate(endpoint_ck, self.cache, steps=8)
+        self.assertEqual(end_bank['prediction'], 'endpoint')
+        self.assertTrue(torch.isfinite(end_bank['prototypes']).all())
+        self.assertTrue(torch.allclose(end_bank['prototypes'].norm(dim=-1),
+                                       torch.ones(4), atol=1e-5))
+        next_cache = dict(self.cache, class_ids=[50], text_prototypes=torch.ones(1, 4))
+        combined = generate(endpoint_ck, next_cache, existing=end_bank)
+        self.assertTrue(torch.equal(combined['prototypes'][:4], end_bank['prototypes']))
+        with self.assertRaisesRegex(ValueError, 'different prediction/steps'):
+            generate(self.ck, next_cache, existing=end_bank)
+        with self.assertRaisesRegex(ValueError, 'different prediction/steps'):
+            generate(endpoint_ck, next_cache, steps=4, existing=end_bank)
+        with self.assertRaises(ValueError):
+            fit(self.cache, epochs=1, blocks=1, prediction='endpoint', endpoint_t_max=1.0)
+        with self.assertRaises(ValueError):
+            fit(self.cache, epochs=1, blocks=1, prediction='unknown')
 
     def test_fused_target_is_not_visual_only(self):
         # Changing the visual-only prototype cannot change the Flow training.

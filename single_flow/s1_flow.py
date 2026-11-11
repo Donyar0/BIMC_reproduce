@@ -35,15 +35,33 @@ def text_cache(cache):
     return ids, text
 
 
+def output_to_velocity(model_output, xt, t, prediction='velocity'):
+    """Convert the direct network output to the velocity supervised by FM.
+
+    For the linear path xt=(1-t)*x0+t*x1, a predicted endpoint x1_hat
+    implies v_hat=(x1_hat-xt)/(1-t). The caller keeps t strictly below 1.
+    """
+    if prediction == 'velocity':
+        return model_output
+    if prediction == 'endpoint':
+        return (model_output - xt) / (1 - t)
+    raise ValueError('prediction must be velocity or endpoint')
+
+
 def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
         blocks=24, hidden=None, target='prototype', ce_weight=0.0,
-        temperature=0.07, seed=0, device='cpu'):
+        temperature=0.07, prediction='velocity', endpoint_t_max=0.875,
+        seed=0, device='cpu'):
     if cache.get('stage') != 'base' or cache.get('split') != 'train':
         raise ValueError('Training accepts only stage=base, split=train caches')
     if epochs < 1 or batch_size < 1 or blocks < 1 or lr <= 0 or weight_decay < 0 or ce_weight < 0 or temperature <= 0:
         raise ValueError('Invalid training hyperparameters')
     if target not in ('prototype', 'sample'):
         raise ValueError('target must be prototype or sample')
+    if prediction not in ('velocity', 'endpoint'):
+        raise ValueError('prediction must be velocity or endpoint')
+    if not 0 < endpoint_t_max < 1:
+        raise ValueError('endpoint_t_max must be strictly between 0 and 1')
     torch.manual_seed(seed)
     ids, text = text_cache(cache)
     fused = unit(cache['fused_prototypes']).cpu()
@@ -78,12 +96,20 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
         for x0, x1, label in loader:
             x0, x1, label = x0.to(device), x1.to(device), label.to(device)
             t = torch.rand(len(x0), 1, device=device)
+            if prediction == 'endpoint':
+                # Avoid the 1/(1-t) singularity and match the last 8-step
+                # Euler evaluation time t=7/8 by default.
+                t = t * endpoint_t_max
             xt = (1-t)*x0 + t*x1
-            pred_v = model(xt, t)
+            model_output = model(xt, t)
+            pred_v = output_to_velocity(model_output, xt, t, prediction)
+            # Both parameterizations are trained using the same velocity MSE.
             loss = ((pred_v - (x1-x0))**2).sum(-1).mean()
-            # Optional CE uses the same BiMC fused endpoints as the Flow target.
+            # Optional CE classifies the implied endpoint for both modes.
             if ce_weight:
-                endpoint = F.normalize(xt + (1-t)*pred_v, dim=-1)
+                pred_endpoint = (model_output if prediction == 'endpoint'
+                                 else xt + (1-t)*pred_v)
+                endpoint = F.normalize(pred_endpoint, dim=-1)
                 loss = loss + ce_weight*F.cross_entropy(endpoint @ candidates.T / temperature, label)
             if not torch.isfinite(loss):
                 raise RuntimeError('Nonfinite loss')
@@ -94,11 +120,13 @@ def fit(cache, *, epochs=100, batch_size=64, lr=2e-4, weight_decay=1e-4,
             count += len(x0)
         history.append(total/count)
         print(f'epoch={epoch+1} loss={history[-1]:.6f}', flush=True)
-    return dict(format_version=3, flow_target='bimc_fused', state_dict={k:v.detach().cpu().clone() for k,v in model.state_dict().items()},
+    return dict(format_version=4, flow_target='bimc_fused', prediction=prediction,
+                state_dict={k:v.detach().cpu().clone() for k,v in model.state_dict().items()},
                 architecture=arch, encoder_id=cache['encoder_id'], base_class_ids=ids,
                 training=dict(epochs=epochs, batch_size=batch_size, lr=lr, weight_decay=weight_decay,
                               target=target, target_space='bimc_fused',
-                              ce_weight=ce_weight, temperature=temperature, seed=seed),
+                              ce_weight=ce_weight, temperature=temperature,
+                              prediction=prediction, endpoint_t_max=endpoint_t_max, seed=seed),
                 loss_history=history)
 
 
@@ -115,11 +143,17 @@ def generate(checkpoint, cache, steps=8, device='cpu', existing=None):
     model.eval().requires_grad_(False)
     if text.shape[1] != model.in_channels:
         raise ValueError('Feature dimension mismatch')
+    prediction = checkpoint.get('prediction', checkpoint.get('training', {}).get('prediction', 'velocity'))
+    if prediction not in ('velocity', 'endpoint'):
+        raise ValueError('Unsupported prediction mode in checkpoint')
     x = text.to(device)
     for k in range(steps):
         t = torch.full((len(x),1), k/steps, device=device)
-        x = x + model(x,t)/steps
-    result = dict(class_ids=ids, prototypes=unit(x).cpu(), encoder_id=cache['encoder_id'])
+        model_output = model(x, t)
+        velocity = output_to_velocity(model_output, x, t, prediction)
+        x = x + velocity/steps
+    result = dict(class_ids=ids, prototypes=unit(x).cpu(), encoder_id=cache['encoder_id'],
+                  prediction=prediction, steps=steps)
     if existing is not None:
         old_ids = ids_checked(existing['class_ids'])
         old = unit(existing['prototypes'])
@@ -127,6 +161,8 @@ def generate(checkpoint, cache, steps=8, device='cpu', existing=None):
             raise ValueError('Incompatible existing bank')
         if set(old_ids) & set(ids):
             raise ValueError('Refusing to overwrite existing class prototypes')
+        if existing.get('prediction', prediction) != prediction or existing.get('steps', steps) != steps:
+            raise ValueError('Cannot append prototypes generated with different prediction/steps')
         result['class_ids'] = old_ids + ids
         # Preserve old prototypes exactly, without regenerating or renormalizing.
         result['prototypes'] = torch.cat([existing['prototypes'].cpu(), result['prototypes']])
@@ -159,6 +195,8 @@ def main():
                              ('ce-weight',0.,float),('temperature',0.07,float),('seed',0,int)]:
         train.add_argument('--'+name, default=default, type=typ)
     train.add_argument('--target', choices=['prototype','sample'], default='prototype')
+    train.add_argument('--prediction', choices=['velocity','endpoint'], default='velocity')
+    train.add_argument('--endpoint-t-max', type=float, default=0.875)
     gen = sub.add_parser('generate', help='Frozen inference, including incremental sessions')
     gen.add_argument('--checkpoint', required=True)
     gen.add_argument('--cache', required=True)
