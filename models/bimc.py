@@ -3,8 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import models.clip.clip as clip
 import json
-from models.vdt_linear import LinearTextAdapter, pack_description_bank
-from models.vdt_objective import linear_adapter_ce, support_feature_moments
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -44,14 +42,6 @@ class BiMC(nn.Module):
         self.text_proto = None
         self.description_proto = None
         self.vision_proto = None
-        self.text_adapter = None
-        self.text_adapter_trained = False
-        self.visual_adapter = None
-        if cfg.METHOD.lower() == 'unified_flow':
-            self.text_adapter = LinearTextAdapter(
-                embed_dim=int(self.clip_model.text_projection.shape[1]),
-                ratio=cfg.TRAINER.BiMC.VDT_RATIO,
-                dropout=cfg.TRAINER.BiMC.VDT_DROPOUT).to(self.device)
 
 
     @torch.no_grad()
@@ -329,133 +319,3 @@ class BiMC(nn.Module):
         data = data.to(self.device)
         targets = targets.to(self.device)
         return data, targets
-
-    def inference_vdt_features(self, class_names, gpt_path, cls_begin_index):
-        """Encode name-conditioned descriptions for the CLIP-A-self adapter.
-
-        The original BiMC standalone description features are retained for KNN.
-        A VDT prompt consists of a class prompt followed by a description.
-        """
-        with open(gpt_path, "r") as handle:
-            descriptions_by_name = json.load(handle)
-        descriptions_by_name = {
-            str(k).lower().replace("_", " ").replace("-", " "): v
-            for k, v in descriptions_by_name.items()
-        }
-        all_features, all_labels = [], []
-        for offset, name in enumerate(class_names):
-            normalized_name = str(name).lower().replace("_", " ").replace("-", " ")
-            descriptions = descriptions_by_name[normalized_name]
-            if not descriptions:
-                raise ValueError("No descriptions available for class " + str(name))
-            class_prompt = self.template[0].format(normalized_name)
-            # Each description is already a complete sentence in BiMC's JSON.
-            # The prompt uses text-level concatenation, not feature concatenation.
-            prompts = [class_prompt + " " + str(desc) for desc in descriptions]
-            parts = []
-            for start in range(0, len(prompts), 64):
-                tokens = clip.tokenize(prompts[start:start + 64], truncate=True).to(self.device)
-                encoded = self.clip_model.encode_text(tokens)
-                parts.append(F.normalize(encoded, dim=-1))
-            feature = torch.cat(parts, dim=0)
-            all_features.append(feature)
-            all_labels.append(torch.full(
-                (feature.size(0),), cls_begin_index + offset,
-                dtype=torch.long, device=feature.device
-            ))
-        return torch.cat(all_features, dim=0), torch.cat(all_labels, dim=0)
-
-    def vdt_prototypes(self, features, labels):
-        if self.text_adapter is None:
-            raise RuntimeError("Text calibration is only available in linear mode")
-        packed, mask, classes = pack_description_bank(features, labels)
-        return self.text_adapter(packed, mask), classes
-
-    def train_base_text_adapter(self, base_state):
-        """Train linear adapter on base-session images only; freeze in FSCIL."""
-        if self.text_adapter is None:
-            print("VDT_MODE=original: no text adapter to train")
-            return
-        self.text_adapter.train()
-        for param in self.clip_model.parameters():
-            param.requires_grad_(False)
-        optimizer = torch.optim.AdamW(
-            self.text_adapter.parameters(),
-            lr=self.cfg.TRAINER.BiMC.VDT_LR,
-            weight_decay=self.cfg.TRAINER.BiMC.VDT_WEIGHT_DECAY
-        )
-        image_features = F.normalize(base_state['images_features'].detach().float(), dim=-1)
-        targets = base_state['images_targets'].detach().long()
-        packed, mask, classes = pack_description_bank(
-            base_state['vdt_features'].detach(), base_state['vdt_targets']
-        )
-        if not torch.equal(classes, torch.arange(len(classes), device=classes.device)):
-            raise ValueError("Base classes must have contiguous zero-based labels")
-        num_images = image_features.size(0)
-        objective = str(self.cfg.TRAINER.BiMC.VDT_TRAIN_OBJECTIVE)
-        if objective == "fusion_ce" and self.visual_adapter is not None:
-            raise ValueError(
-                "fusion_ce + visual attention requires an attention-aware "
-                "leave-one-out positive prototype; run the three-arm "
-                "comparison with --objective text_ce"
-            )
-        beta = float(self.cfg.DATASET.BETA)
-        if objective == "fusion_ce":
-            visual = base_state["image_proto"].detach().float()
-            support_sums, support_counts = support_feature_moments(
-                image_features, targets, len(classes)
-            )
-        else:
-            visual, support_sums, support_counts = None, None, None
-        print("VDT_BASE_OBJECTIVE_JSON:" + json.dumps({
-            "objective": objective, "beta": beta,
-            "leave_one_out_positive": objective == "fusion_ce",
-        }, sort_keys=True))
-        batch_size = int(self.cfg.TRAINER.BiMC.VDT_BATCH_SIZE)
-        if batch_size < 1:
-            raise ValueError("VDT_BATCH_SIZE must be positive")
-        with torch.enable_grad():
-            for epoch in range(int(self.cfg.TRAINER.BiMC.VDT_EPOCHS)):
-                order = torch.randperm(num_images, device=image_features.device)
-                epoch_loss = 0.0
-                for start in range(0, num_images, batch_size):
-                    idx = order[start:start + batch_size]
-                    optimizer.zero_grad()
-                    class_weights = self.text_adapter(packed, mask)
-                    loss = linear_adapter_ce(
-                        image_features[idx], targets[idx], class_weights,
-                        visual_prototypes=visual, beta=beta, mode=objective,
-                        support_sums=support_sums, support_counts=support_counts,
-                    )
-                    loss.backward()
-                    optimizer.step()
-                    epoch_loss += loss.detach().item() * idx.numel()
-                print("VDT-Adapter base epoch={}/{} CE={:.6f}".format(
-                    epoch + 1, self.cfg.TRAINER.BiMC.VDT_EPOCHS,
-                    epoch_loss / num_images
-                ))
-        self.text_adapter.eval()
-        for param in self.text_adapter.parameters():
-            param.requires_grad_(False)
-        self.text_adapter_trained = True
-
-
-    @torch.no_grad()
-    def calibrate_flow_text(self, stats, class_names, task_id):
-        """Use the base-trained calibText aggregator for every Flow text consumer."""
-        features, labels = self.inference_vdt_features(
-            class_names, self.cfg.DATASET.GPT_PATH, int(stats['class_index'][0]))
-        if task_id == 0:
-            if int(self.cfg.TRAINER.BiMC.VDT_EPOCHS) < 1:
-                raise ValueError('calibText requires positive base training epochs')
-            # The runner freezes the full model before extracting CLIP features.
-            self.text_adapter.requires_grad_(True)
-            self.train_base_text_adapter(dict(stats, vdt_features=features, vdt_targets=labels))
-        if not self.text_adapter_trained:
-            raise RuntimeError('Train calibText on the base session first')
-        self.text_adapter.eval()
-        prototypes, classes = self.vdt_prototypes(features, labels)
-        expected = torch.as_tensor(stats['class_index'], device=classes.device)
-        if not torch.equal(classes, expected):
-            raise ValueError('calibText class ordering differs from Flow cache')
-        return dict(stats, text_proto=prototypes.detach())

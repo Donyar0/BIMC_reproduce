@@ -129,64 +129,103 @@ python -m unittest discover -s single_flow -v
 8项测试覆盖三个数据集配置、两阶段完整合成流程、全部已见类别竞争，以及：原型直接输入、导出行序、增量拒绝训练、旧 bank 保留、
 非连续标签、sample 路径，以及共用文本融合公式。未运行真实数据集或 GPU 训练。
 
-## 双向共享 Flow 实验
+## 双向 Flow：增强图像 → 原始 BiMC 融合文本
 
-使用 `configs/trainers/unified_flow.yaml` 运行：
+当前 `unified_flow` 的起点为增强图像经冻结 CLIP 提取并归一化的特征，
+终点为原始 BiMC 文本原型：
 
-```bash
-python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/trainers/unified_flow.yaml
+```text
+x0 = normalize(CLIP_image(augment(image)))
+x1 = normalize((1-LAMBDA_T)*prompt_proto + LAMBDA_T*description_proto)
+xt = (1-t)*x0 + t*x1
+v_target = x1-x0
 ```
 
-此配置以基类单样本视觉特征训练共享速度场；增量阶段混合当前支持集样本与旧类文本/真实视觉均值原型重放，更新 Flow 后重新生成全部已见类原型。分类时将生成原型与真实视觉均值按基类和增量类的权重融合，同时对测试特征进行一次反向 Euler 校准，并加权融合视觉与文本余弦分数。每阶段保存 Flow 和原型 bank；仅保留历史类均值，不保存历史图像特征。
+不使用 calibText Linear Adapter；`TEXT_CALIBRATION: True`、`LAMBDA_T: 0.5`
+恢复原始 Prompt/Description 融合。CLIP 全程冻结。
 
-`ADAPT_STEPS`、`ADAPT_LR`、`ALPHA`、`BETA_BASE`、`BETA_INC` 和 `GAMMA` 控制微调和融合，初值是实验起点，应使用验证数据选择。`ADAPT_STEPS: 0` 可关闭增量微调。实验需要 GPU、数据集、CLIP 权重及配置中的正确数据路径；该方法的效果需要真实数据验证。
+只有基础阶段进行 Flow 训练。旋转（默认 ±15°）、水平翻转、随机遮挡
+（默认概率 0.5、面积 2%–20%）和高斯噪声（概率 0.5、标准差 0.03）
+在像素空间进行，再归一化为 CLIP 输入；每轮重新随机生成，不缓存固定增强视图。
+支持集的真实原型与测试图像仍使用干净的测试变换。
+基础训练沿用该阶段已经选择的图像子集，增强不会重新抽取支持样本。
 
-双向 Flow 仅使用视觉 Bank 余弦分数与反向校准文本余弦分数，经 `FLOW.GAMMA` 融合。该 Flow 流程不计算协方差、不使用马氏距离、描述 KNN 或 BiMC Ensemble；Prompt + Description 仍用于构建融合文本原型。独立的原始 BiMC baseline 未改动。
+增量阶段仅提取当前支持集统计、追加类别 Bank 和评估，**不微调 Flow**，
+不回放旧样本，不训练文本 Adapter。所有 `flow_session*.pt` 的网络参数相同。
+`ADAPT_STEPS` 必须为 0。
 
-`FLOW.LOGIT_SCALE` 是双向余弦得分 softmax 前的正数乘数，默认 1 保持原行为；训练中不再使用分类温度参数。可在验证集比较 1、5、10 等值，并联合搜索 `FLOW.GAMMA`（例如 0.4、0.5、0.6、0.7）和 `FLOW.BETA_INC`（例如 0.3、0.4、0.5、0.6）。在当前纯双向 Flow 分类中，正数 logit 缩放不改变 argmax，因此不影响准确率。仍需在验证集检查基类和增量类准确率。不要用测试阶段结果选择参数。
-### 当前双向 Flow 默认分数与 SwanLab 追踪
+### 速度预测与终点预测对比
 
-当前 `unified_flow.yaml` 只执行纯双向 UR-Flow 分类；不读取数据集 `ENSEMBLE_ALPHA`。不计算协方差或马氏距离，保留原始 BiMC baseline 作为独立对照。
+| 配置文件 | 网络输出 | 计算速度 | 损失 |
+|---|---|---|---|
+| `configs/trainers/unified_flow.yaml` | `v_hat` | 网络输出本身 | `mean(sum((v_hat-(x1-x0))**2))` |
+| `configs/trainers/unified_flow_endpoint.yaml` | `x1_hat` | `(x1_hat-xt)/(1-t)` | 相同速度损失 |
 
-在仓库根目录运行，且先用 `swanlab login` 登录（首次使用）：
+终点预测模式不对网络输出归一化，也不额外加终点 MSE。
+两组使用相同种子、网络、增强、优化器和时间分布；只改变输出参数化及结果目录。
+为避免 `t=1` 的除零，两组训练均采样 `t∈[0,1-TIME_EPS)`（默认 `TIME_EPS=0.05`）。
+推理在同一速度场接口中将时间上限限制为 `1-TIME_EPS`。
+终点预测的速度损失等价于按 `1/(1-t)^2` 加权的终点误差，这个权重是换算公式的结果。
+
+### 双向推理
+
+图像查询从 `t=0` 正向积分到文本空间，与融合文本原型计算余弦分数；
+文本原型从 `t=1` 反向积分生成视觉原型，再与真实支持图像均值融合构成视觉 Bank。
+后者与干净查询图像计算视觉余弦分数。
+`GAMMA` 融合视觉分数和文本分数；`ALPHA` 混合原图像特征与正向积分结果，
+默认 1 表示完整使用图像到文本映射。`BETA_BASE/BETA_INC` 是生成视觉原型的权重。
+
+反向生成使用负步长，时间顺序也随之反转，不再沿用旧的文本→视觉正向积分。
+反向首步的 `t=1` 使用上述时间上限近似；终点预测在终点附近的反向生成
+可能对 `TIME_EPS` 和积分步数敏感，需要在验证数据上检查。
+不计算协方差、马氏距离、描述 KNN 或 BiMC Ensemble。
+正数 `LOGIT_SCALE` 只改变 softmax 概率，不改变 argmax。
+
+### 后台运行
+
+先更新数据集 YAML 的 ROOT，在仓库根目录、已安装依赖的环境中执行：
 
 ```bash
-python main.py --data_cfg configs/datasets/cifar100.yaml \\
-  --train_cfg configs/trainers/unified_flow.yaml \\
-  --use_swanlab --swanlab_project BIMC_reproduce \\
-  --swanlab_experiment UR-Flow-CIFAR100-seed1 \\
-  --swanlab_mode online
+mkdir -p logs
+# 两组依次运行，避免在同一 GPU 同时占用显存。
+nohup env CUDA_VISIBLE_DEVICES=0 bash scripts/run_image_text_ablation.sh \
+  configs/datasets/cifar100.yaml --use_swanlab \
+  > logs/image_text_ablation.log 2>&1 < /dev/null &
+echo $!
+tail -f logs/image_text_ablation.log
 ```
 
-SwanLab 配置中自动保存全部 YAML 配置、数据集和训练配置路径，以及 `git.git_branch`、`git.git_commit`、`git.git_dirty`、`git.git_remote_url` 和 `git.git_commit_url`。其中 GitHub 链接仅在 origin 为 GitHub 仓库时构建，避免记录包含凭证的远程 URL。每阶段的准确率、基类和增量类指标以及最终准确率由 `log_metrics` 上传；本地仍保存 `config.yaml`、`metrics.csv`、`metrics.json`。
-
-运行前建议 `git status --short` 确认工作区干净，并在 SwanLab 配置里核对 `git.git_commit`。不要在运行中途更新分支，否则同一次实验中的代码版本可能变化。
-
-### 不重新训练地评估已有权重
-
-训练结果目录必须包含原始 `config.yaml` 以及每阶段的 `flow_session*.pt`、`bank_session*.pt`。在原训练配置的副本中修改 `ALPHA`、`GAMMA`、`BETA_BASE`、`BETA_INC` 或 `LOGIT_SCALE`，然后运行：
+也可单独运行任一配置：
 
 ```bash
-python main.py --data_cfg configs/datasets/cifar100.yaml --train_cfg configs/trainers/unified_flow.yaml \
-  --eval_run output/unified_flow/cifar100/原训练目录
+python -u main.py --data_cfg configs/datasets/cifar100.yaml \
+  --train_cfg configs/trainers/unified_flow.yaml --use_swanlab
+python -u main.py --data_cfg configs/datasets/cifar100.yaml \
+  --train_cfg configs/trainers/unified_flow_endpoint.yaml --use_swanlab
 ```
 
-可添加原有的 `--use_swanlab` 等参数。该入口不会训练或修改原结果，另建 `eval_...` 结果目录及 `source_run.txt`。它重新读取测试数据并提取特征；无需重新提取训练/支持集协方差或描述 KNN 统计。须使用训练时相同的数据、随机种子、配置与 CLIP 权重。结果仍然是测试集结果；严格选参需要独立验证集，当前入口没有验证集支持。只加载可信来源的权重文件。
+两组结果分别写入 `output/unified_flow_image_text_velocity/` 和
+`output/unified_flow_image_text_endpoint/`；每个目录按数据集、种子和时间区分运行。
+保存 `config.yaml`、`base_flow.pt`、每阶段的 Flow/Bank、`metrics.csv` 和 `metrics.json`。
+SwanLab 记录完整配置、Git 提交信息和阶段准确率。
 
-如果旧版 PyTorch 的安全加载器无法读取自己训练的 checkpoint，可在上述命令添加 `--trusted_checkpoints`。该选项允许 pickle 执行代码，仅对来源可信的权重使用，不要用于下载的不明文件。
+### 重评估与兼容性
 
-### Unified Flow 的 calibText 文本原型
+```bash
+python main.py --data_cfg configs/datasets/cifar100.yaml \
+  --train_cfg configs/trainers/unified_flow.yaml \
+  --eval_run output/unified_flow_image_text_velocity/cifar100/原训练目录
+```
 
-双向 `unified_flow` 统一使用 `feature/calibText` 分支
-`0d9009cba330e3f579e7ec107fce7d805d7b2ad9` 的 LinearTextAdapter 聚合。
-输入为第一个类别 Prompt 与各条描述的文本拼接，经冻结 CLIP 编码，再执行
-残差线性投影、LayerNorm、掩码均值聚合和归一化。基础阶段使用训练图像的
-`text_ce`（logit scale 100）训练 Adapter；随后冻结，不进行增量 Adapter 更新。
-默认 VDT 参数与源分支一致。CLIP 不参与优化。
+仅可重评估此版本产生的相同预测模式权重；旧的文本→图像/单向/calibText 权重
+必须重新训练。重评估时使用训练时的数据、CLIP、文本融合参数、积分步数、
+`PREDICTION` 与 `TIME_EPS`，可调整评分参数及 Beta；不会进行训练。
+严格选参应使用独立验证数据，不能用测试集选择最优设置。
+只加载可信权重；旧版 PyTorch 如需不受限 pickle 加载，显式使用 `--trusted_checkpoints`。
 
-校准原型统一进入 Flow 基础训练、增量适配与旧类均值回放、文本到视觉生成、
-Bank 的文本分支及反向查询评分。这里不再使用原来的 Prompt/Description
-线性混合。旧类 Bank 在后续阶段保持不变。单向 Flow 与原始 BiMC 不切换到 Adapter。
-结果目录额外保存 `calib_text.pt`，并在 Flow checkpoint 中标记原型方法；
-重评估直接读取已保存的校准文本 Bank，不重新训练 Adapter。
-旧版文本 Bank 不兼容这项替换，需要重新训练。
+### 验证
+
+`test_image_text_flow.py` 用合成特征和像素验证原始 BiMC 文本融合、
+终点→速度公式及梯度、两方向积分、像素增强、冻结 CLIP、拒绝增量训练，
+以及两组配置的两阶段运行、相同权重、旧 Bank 保留与重评估。
+未执行真实数据集/GPU 准确率实验。

@@ -71,13 +71,6 @@ def extend_cfg(cfg):
     cfg.TRAINER.BiMC.GAMMA_BASE = -1.0
     cfg.TRAINER.BiMC.GAMMA_INC = -1.0
     cfg.TRAINER.BiMC.USING_ENSEMBLE = False
-    cfg.TRAINER.BiMC.VDT_RATIO = 0.2
-    cfg.TRAINER.BiMC.VDT_DROPOUT = 0.1
-    cfg.TRAINER.BiMC.VDT_EPOCHS = 20
-    cfg.TRAINER.BiMC.VDT_BATCH_SIZE = 256
-    cfg.TRAINER.BiMC.VDT_LR = 0.0001
-    cfg.TRAINER.BiMC.VDT_WEIGHT_DECAY = 0.0001
-    cfg.TRAINER.BiMC.VDT_TRAIN_OBJECTIVE = 'text_ce'
 
     cfg.FLOW = CN()
     cfg.FLOW.EPOCHS = 100
@@ -96,6 +89,13 @@ def extend_cfg(cfg):
     cfg.FLOW.BETA_INC = 0.5
     cfg.FLOW.GAMMA = 0.5
     cfg.FLOW.LOGIT_SCALE = 1.0
+    cfg.FLOW.PREDICTION = 'velocity'
+    cfg.FLOW.TIME_EPS = 0.05
+    cfg.FLOW.AUGMENT = CN()
+    cfg.FLOW.AUGMENT.ROTATION = 15.0
+    cfg.FLOW.AUGMENT.ERASE_P = 0.5
+    cfg.FLOW.AUGMENT.NOISE_P = 0.5
+    cfg.FLOW.AUGMENT.NOISE_STD = 0.03
 
 
 
