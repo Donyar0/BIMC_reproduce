@@ -1,4 +1,4 @@
-"""Base-only Flow training with BIMC's dataset splits and accuracy evaluator."""
+"""FM-only image-to-text Flow with optional incremental FM adaptation."""
 import csv
 import json
 import time
@@ -29,14 +29,6 @@ class UnifiedFlowRunner(Runner):
             raise ValueError('Enable original BiMC description fusion: TEXT_CALIBRATION: True')
         if not np.isfinite(flow.LOGIT_SCALE) or flow.LOGIT_SCALE <= 0:
             raise ValueError('FLOW.LOGIT_SCALE must be finite and positive')
-        if (not all(np.isfinite(weight) and weight >= 0 for weight in (
-                flow.FM_WEIGHT, flow.CYCLE_WEIGHT, flow.PSEUDO_VELOCITY_WEIGHT,
-                flow.PSEUDO_TEXT_WEIGHT)) or flow.PSEUDO_STEPS < 1 or
-                flow.FM_WEIGHT+flow.CYCLE_WEIGHT+flow.PSEUDO_VELOCITY_WEIGHT+
-                flow.PSEUDO_TEXT_WEIGHT <= 0):
-            raise ValueError('Invalid Flow loss weights or pseudo integration steps')
-        if (flow.PSEUDO_VELOCITY_WEIGHT or flow.PSEUDO_TEXT_WEIGHT) and flow.PREDICTION != 'velocity':
-            raise ValueError('Pseudo prototype losses require velocity prediction')
         model = self.model.module if self.is_distributed else self.model
         model.eval().requires_grad_(False)
         run_name = f'seed_{cfg.SEED}_{datetime.now().strftime("%Y%m%d_%H%M%S_%f")}'
@@ -69,7 +61,7 @@ class UnifiedFlowRunner(Runner):
                 torch.save(cache, cache_dir / f'session_{task_id}.pt')
 
             if task_id == 0:
-                print('Training Flow on base classes only...')
+                print('Training FM-only Flow on base classes...')
                 # run() is no_grad for CLIP/statistics; explicitly enable Flow training.
                 # Isolate torch RNG so training does not alter subsequent data loading.
                 devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -80,11 +72,6 @@ class UnifiedFlowRunner(Runner):
                         blocks=flow.BLOCKS, hidden=flow.HIDDEN or None,
                         prediction=flow.PREDICTION, time_eps=flow.TIME_EPS,
                         seed=cfg.SEED, device=self.device,
-                        cycle_weight=flow.CYCLE_WEIGHT, cycle_steps=flow.CYCLE_STEPS,
-                        fm_weight=flow.FM_WEIGHT,
-                        pseudo_velocity_weight=flow.PSEUDO_VELOCITY_WEIGHT,
-                        pseudo_text_weight=flow.PSEUDO_TEXT_WEIGHT,
-                        pseudo_steps=flow.PSEUDO_STEPS,
                         warmup_ratio=flow.WARMUP_RATIO,
                         min_lr_ratio=flow.MIN_LR_RATIO)
                 torch.save(checkpoint, output / 'base_flow.pt')
@@ -95,11 +82,6 @@ class UnifiedFlowRunner(Runner):
                     checkpoint = adapt(checkpoint, cache, memory,
                         steps=flow.ADAPT_STEPS, batch_size=flow.BATCH_SIZE,
                         lr=flow.ADAPT_LR, weight_decay=flow.WEIGHT_DECAY,
-                        cycle_weight=flow.CYCLE_WEIGHT, cycle_steps=flow.CYCLE_STEPS,
-                        fm_weight=flow.FM_WEIGHT,
-                        pseudo_velocity_weight=flow.PSEUDO_VELOCITY_WEIGHT,
-                        pseudo_text_weight=flow.PSEUDO_TEXT_WEIGHT,
-                        pseudo_steps=flow.PSEUDO_STEPS,
                         warmup_ratio=flow.WARMUP_RATIO,
                         min_lr_ratio=flow.MIN_LR_RATIO,
                         seed=cfg.SEED+task_id, device=self.device)
@@ -170,14 +152,13 @@ class UnifiedFlowRunner(Runner):
         for name in ('PREDICTION', 'TIME_EPS'):
             if getattr(original.FLOW, name) != getattr(cfg.FLOW, name):
                 raise ValueError(f'FLOW.{name} must match the saved run')
-        for name, default in (('CYCLE_WEIGHT', 0.0), ('CYCLE_STEPS', 8),
-                              ('ADAPT_STEPS', 0)):
-            if getattr(original.FLOW, name, default) != getattr(cfg.FLOW, name):
-                raise ValueError(f'FLOW.{name} must match the saved run')
-        for name, default in (('FM_WEIGHT', 1.0), ('PSEUDO_VELOCITY_WEIGHT', 0.0),
-                              ('PSEUDO_TEXT_WEIGHT', 0.0), ('PSEUDO_STEPS', 8)):
-            if getattr(original.FLOW, name, default) != getattr(cfg.FLOW, name):
-                raise ValueError(f'FLOW.{name} must match the saved run')
+        if (getattr(original.FLOW, 'CYCLE_WEIGHT', 0) != 0 or
+                getattr(original.FLOW, 'PSEUDO_VELOCITY_WEIGHT', 0) != 0 or
+                getattr(original.FLOW, 'PSEUDO_TEXT_WEIGHT', 0) != 0 or
+                getattr(original.FLOW, 'FM_WEIGHT', 1) != 1):
+            raise ValueError('Saved run used a different training objective, not FM-only')
+        if getattr(original.FLOW, 'ADAPT_STEPS', 0) != cfg.FLOW.ADAPT_STEPS:
+            raise ValueError('FLOW.ADAPT_STEPS must match the saved run')
         if cfg.FLOW.SOLVER not in ('euler', 'midpoint', 'heun', 'rk4'):
             raise ValueError('Unknown FLOW.SOLVER')
         if cfg.FLOW.STEPS < 1:
@@ -199,6 +180,12 @@ class UnifiedFlowRunner(Runner):
             # Only load trusted checkpoints created by this project.
             checkpoint = torch.load(run_dir / f'flow_session{task_id}.pt', map_location='cpu', weights_only=not trusted_checkpoints)
             saved = torch.load(run_dir / f'bank_session{task_id}.pt', map_location='cpu', weights_only=not trusted_checkpoints)
+            training = checkpoint.get('training', {})
+            if (training.get('cycle_weight', 0) != 0 or
+                    training.get('pseudo_velocity_weight', 0) != 0 or
+                    training.get('pseudo_text_weight', 0) != 0 or
+                    training.get('fm_weight', 1) != 1):
+                raise ValueError('Saved checkpoint used a different training objective, not FM-only')
             if (checkpoint.get('text_prototype_method') != METHOD or
                     checkpoint.get('flow_direction') != DIRECTION or
                     checkpoint.get('prediction') != cfg.FLOW.PREDICTION or

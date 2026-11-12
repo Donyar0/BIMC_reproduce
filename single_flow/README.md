@@ -1,8 +1,5 @@
 # 复用 BIMC 原型的单流文本 → 伪视觉原型
 
-伪视觉／伪文本双损失的独立配置与运行方式见
-[README_pseudo_pair.md](README_pseudo_pair.md)。
-
 Flow 直接读取 BIMC 已计算的原型，不再加载 CLIP、编码文本或重新融合描述。
 `fm.py` 来自 FlowComposer，保留上游 MIT LICENSE；训练脚本为任务适配实现。
 环境：Python 3.10+、PyTorch 2.6+；运行 BIMC 还需仓库原有依赖、数据和 CLIP 权重。
@@ -147,7 +144,7 @@ v_target = x1-x0
 不使用 calibText Linear Adapter；`TEXT_CALIBRATION: True`、`LAMBDA_T: 0.5`
 恢复原始 Prompt/Description 融合。CLIP 全程冻结。
 
-只有基础阶段进行 Flow 训练。训练图像使用与原型统计相同的固定预处理
+基础阶段训练 Flow；增量阶段是否继续训练由 `ADAPT_STEPS` 决定。训练图像使用与原型统计相同的固定预处理
 （Resize、CenterCrop、Normalize）；CLIP 特征提取一次后缓存在内存中。
 训练每轮随机抽取已缓存的正常图像特征，不进行旋转、遮挡、加噪声、
 随机裁剪或随机翻转。基础阶段仍使用原本选定的训练图像集合。
@@ -155,6 +152,8 @@ v_target = x1-x0
 默认 `ADAPT_STEPS: 0`，增量阶段只提取支持集统计、追加类别 Bank 并评估；
 可选的增量训练组会以新类支持样本和每个旧类一个真实均值更新 Flow，
 再重新生成全部已见类别的视觉原型。CLIP 和文本原型保持冻结。
+两个阶段都只优化图像特征到原始 BiMC 融合文本原型的 FM 速度误差，
+没有伪原型对齐、循环约束或分类损失。
 
 ### 速度预测与终点预测对比
 
@@ -227,9 +226,9 @@ python main.py --data_cfg configs/datasets/cifar100.yaml \
 
 ### 验证
 
-`test_image_text_flow.py` 用合成特征和像素验证原始 BiMC 文本融合、
-终点→速度公式及梯度、两方向积分、正常图像特征缓存、拒绝增量训练，
-以及两组配置的两阶段运行、相同权重、旧 Bank 保留与重评估。
+`test_image_text_flow.py` 用合成特征验证原始 BiMC 文本融合、
+终点→速度公式及梯度、两方向积分、正常图像特征缓存、
+单损失 FM、增量冻结与继续训练、旧 Bank 保留与重评估。
 未执行真实数据集/GPU 准确率实验。
 
 ### 推理阶段 ODE 求解器对比
@@ -262,49 +261,37 @@ python scripts/run_ode_solver_ablation.py \
 自己训练且来源可信的旧版权重若需要 pickle 加载，可在脚本命令后添加
 `--trusted_checkpoints`，该选项会传给每一次重评估。
 
-### 图像原型循环约束与增量训练实验
+### 单损失 FM：增量冻结与继续训练
 
-`unified_flow_cycle.yaml` 在原有 Flow Matching (FM) 速度损失外增加
-基类图像原型循环约束。每个训练 batch 取其中类别的正常视觉原型 `p0`，
-先做一次完整时间步的速度更新，得到伪文本特征：
+`unified_flow.yaml` 在增量阶段冻结 Flow，`unified_flow_incremental.yaml`
+在每个增量阶段用当前新类支持图像特征和每个旧类一个真实视觉均值回放，
+继续优化同一个图像→真实融合文本的 FM 损失。更新后重新生成全部已见类的
+视觉 Bank；每个 Session 保存自己的 `flow_session*.pt`。CLIP 始终冻结。
 
 ```text
-pseudo_text = normalize(p0 + vθ(p0, t=0))
-recovered = reverse_euler(pseudo_text, steps=CYCLE_STEPS)
-L_cycle = mean(||normalize(recovered)-p0||²)
-L_total = L_FM + CYCLE_WEIGHT*L_cycle
+x_t = (1-t)*x_image + t*T_class
+L_FM = mean ||v_theta(x_t,t) - (T_class-x_image)||²
 ```
 
-反向积分使用**同一个**速度网络及 `TIME_EPS` 端点规则，
-梯度经过伪文本和全部反向步骤回传。伪文本采用一次速度更新，
-而反向路径按 `CYCLE_STEPS` 积分；这样约束了起点预测速度与整条反向路径的一致性。
-`CYCLE_WEIGHT: 0.0` 是无循环约束对照，`0.1` 是实验初始值。
-循环训练只使用基类训练图像统计，不读取测试集。
-
-`unified_flow_cycle_incremental.yaml` 保留上述循环损失，并在增量阶段
-使用当前新类支持图像特征与旧类真实均值回放进行 FM 和原型循环训练。
-更新后的 Flow 会重新生成全部已见类的视觉 Bank；每个 Session 保存不同的
-`flow_session*.pt`。基础阶段与增量阶段都不训练 CLIP。
-
-基础阶段的 `LR` 与增量阶段的 `ADAPT_LR` 是**峰值学习率**，不是固定值。
+基础阶段的 `LR` 与增量阶段的 `ADAPT_LR` 是峰值学习率。
 每次优化更新前，学习率先线性预热，再按余弦曲线下降到峰值的
 `MIN_LR_RATIO`（默认 0.01）。`WARMUP_RATIO` 默认 0.05；
 基础训练按 `EPOCHS × 每轮批次数` 调度，增量阶段按 `ADAPT_STEPS`
 调度。实际学习率保存在 checkpoint 的 `lr_history` 和
-`incremental_training[*].lr` 中。这个调度同样用于无循环约束对照，
-以保持学习率策略一致。
+`incremental_training[*].lr` 中。
 
-三组配置可在仓库根目录依次运行：
+两组配置可在仓库根目录分别运行：
 
 ```bash
-bash scripts/run_image_text_cycle_ablation.sh \
-  configs/datasets/cub200.yaml --use_swanlab
+python -u main.py --data_cfg configs/datasets/cub200.yaml \
+  --train_cfg configs/trainers/unified_flow.yaml --use_swanlab
+
+python -u main.py --data_cfg configs/datasets/cub200.yaml \
+  --train_cfg configs/trainers/unified_flow_incremental.yaml --use_swanlab
 ```
 
 对应的输出目录分别是
 `output/unified_flow_image_text_clean_velocity/`、
-`output/unified_flow_image_text_clean_velocity_cycle/` 和
-`output/unified_flow_image_text_clean_velocity_cycle_incremental/`。
-这是三个分别训练的实验；旧权重不能补出循环约束的训练效果。
-脚本依次运行，若任一实验失败会停止，阶段日志写在 `logs/image_text_cycle_.../`。
-实际准确率需用数据集验证，`CYCLE_WEIGHT` 与学习率参数应通过验证集选取。
+`output/unified_flow_image_text_fm_incremental/`。它们是两个独立训练实验；
+伪原型双损失和循环约束产生的旧权重不能代替这次的单损失训练。
+实际准确率和学习率超参数需用验证集检验。

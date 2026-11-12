@@ -1,4 +1,4 @@
-"""Image-to-BiMC-text Flow and prototype-pair training objectives."""
+"""Clean image features -> original BiMC fused text, with FM-only training."""
 import math
 import torch
 import torch.nn.functional as F
@@ -38,44 +38,6 @@ def load_model(checkpoint, device):
     return VelocityField(network, checkpoint['prediction'], checkpoint['time_eps'])
 
 
-def cycle_reconstruction(field, image_prototypes, steps):
-    """One forward velocity update, then a differentiable reverse Euler path."""
-    if steps < 1:
-        raise ValueError('CYCLE_STEPS must be positive')
-    p0 = F.normalize(image_prototypes.float(), dim=-1)
-    zero = p0.new_zeros((len(p0), 1))
-    pseudo_text = F.normalize(p0 + field(p0, zero), dim=-1)
-    reconstructed = pseudo_text
-    for k in range(steps):
-        t = p0.new_full((len(p0), 1), 1-k/steps)
-        reconstructed = reconstructed - field(reconstructed, t)/steps
-    return pseudo_text, F.normalize(reconstructed, dim=-1)
-
-
-def pseudo_prototype_losses(field, visual_prototypes, text_prototypes, steps, time_eps):
-    """Match pseudo-visual -> pseudo-text velocity and anchor pseudo-text to BiMC text."""
-    if (steps < 1 or visual_prototypes.ndim != 2 or
-            visual_prototypes.shape != text_prototypes.shape):
-        raise ValueError('Pseudo prototype pairs must be matching [C,D] tensors')
-
-    def integrate_from(start, reverse):
-        state = F.normalize(start.float(), dim=-1)
-        dt = (-1.0 if reverse else 1.0)/steps
-        for k in range(steps):
-            time = 1-k/steps if reverse else k/steps
-            t = state.new_full((len(state),1), time)
-            state = state + dt*field(state,t)
-        return F.normalize(state,dim=-1)
-
-    pseudo_text = integrate_from(visual_prototypes,reverse=False)
-    pseudo_visual = integrate_from(text_prototypes,reverse=True)
-    t = torch.rand(len(pseudo_text),1,device=pseudo_text.device)*(1-time_eps)
-    xt = (1-t)*pseudo_visual+t*pseudo_text
-    pseudo_velocity_loss = (field(xt,t)-(pseudo_text-pseudo_visual)).square().sum(-1).mean()
-    text_align_loss = (1-F.cosine_similarity(pseudo_text,text_prototypes,dim=-1)).mean()
-    return pseudo_velocity_loss, text_align_loss
-
-
 def scheduled_lr(optimizer, step, total_steps, peak_lr, warmup_ratio, min_lr_ratio):
     """Linear warmup followed by cosine decay, for both training stages."""
     if not (0 <= step < total_steps and peak_lr > 0 and
@@ -93,33 +55,23 @@ def scheduled_lr(optimizer, step, total_steps, peak_lr, warmup_ratio, min_lr_rat
 
 
 def fit(cache, *, epochs, batch_size, lr, weight_decay, blocks, hidden,
-        prediction, time_eps, seed, device, cycle_weight=0.0, cycle_steps=8,
-        warmup_ratio=0.05, min_lr_ratio=0.01, fm_weight=1.0,
-        pseudo_velocity_weight=0.0, pseudo_text_weight=0.0, pseudo_steps=8):
+        prediction, time_eps, seed, device,
+        warmup_ratio=0.05, min_lr_ratio=0.01):
     if cache.get('stage') != 'base' or cache.get('split') != 'train':
         raise ValueError('Flow training accepts base training images only')
     if epochs < 1 or batch_size < 1 or blocks < 1 or lr <= 0 or weight_decay < 0:
         raise ValueError('Invalid Flow training parameters')
     if prediction not in ('velocity', 'endpoint') or not 0 < time_eps < 0.5:
         raise ValueError('Invalid prediction parameterization/time epsilon')
-    if cycle_weight < 0 or cycle_steps < 1:
-        raise ValueError('Invalid cycle loss settings')
-    if (fm_weight < 0 or pseudo_velocity_weight < 0 or pseudo_text_weight < 0 or
-            pseudo_steps < 1 or fm_weight+cycle_weight+pseudo_velocity_weight+pseudo_text_weight <= 0):
-        raise ValueError('At least one valid Flow loss weight is required')
-    if (pseudo_velocity_weight or pseudo_text_weight) and prediction != 'velocity':
-        raise ValueError('Pseudo prototype losses require velocity prediction')
     torch.manual_seed(seed)
     ids, text = text_cache(cache)
     if ids != list(range(len(ids))):
         raise ValueError('Base class IDs must be contiguous and zero-based')
     text = text.to(device)
     images = unit(cache['image_features']).cpu()
-    image_prototypes = unit(cache['visual_prototypes']).to(device)
     labels = cache['image_labels'].long().cpu()
     if (labels.ndim != 1 or len(labels) != len(images) or
-            images.shape[1] != text.shape[1] or
-            image_prototypes.shape != text.shape or set(labels.tolist()) != set(ids)):
+            images.shape[1] != text.shape[1] or set(labels.tolist()) != set(ids)):
         raise ValueError('Clean base image features must cover exactly the base classes')
     loader = DataLoader(TensorDataset(images, labels), batch_size=batch_size,
                         shuffle=True, generator=torch.Generator().manual_seed(seed))
@@ -128,64 +80,34 @@ def fit(cache, *, epochs, batch_size, lr, weight_decay, blocks, hidden,
                 out_channels=dim, num_res_blocks=blocks)
     network = DeepFlowMatchingNet(**arch).to(device).train()
     optimizer = torch.optim.AdamW(network.parameters(), lr=lr, weight_decay=weight_decay)
-    history, cycle_history, total_history, lr_history = [], [], [], []
-    pseudo_velocity_history, pseudo_text_history = [], []
-    field = VelocityField(network, prediction, time_eps)
+    history, lr_history = [], []
     total_steps = epochs*len(loader)
     update_step = 0
     for epoch in range(epochs):
-        total, cycle_total, full_total, count = 0., 0., 0., 0
-        pseudo_velocity_total = pseudo_text_total = 0.0
+        total, count = 0., 0
         for x0, batch_labels in loader:
             x0 = x0.to(device)
-            fm_loss = x0.new_zeros(())
-            if fm_weight:
-                x1 = text[batch_labels.to(device)]
-                t = torch.rand(len(x0), 1, device=device) * (1-time_eps)
-                xt = (1-t)*x0 + t*x1
-                pred_v = velocity_from_output(network(xt, t), xt, t, prediction, time_eps)
-                fm_loss = (pred_v-(x1-x0)).square().sum(-1).mean()
-            cycle_loss = fm_loss.new_zeros(())
-            pseudo_velocity_loss = fm_loss.new_zeros(())
-            pseudo_text_loss = fm_loss.new_zeros(())
-            if cycle_weight or pseudo_velocity_weight or pseudo_text_weight:
-                selected = batch_labels.unique().to(device)
-                p0 = image_prototypes[selected]
-            if cycle_weight:
-                _, recovered = cycle_reconstruction(field, p0, cycle_steps)
-                cycle_loss = (recovered-p0).square().sum(-1).mean()
-            if pseudo_velocity_weight or pseudo_text_weight:
-                pseudo_velocity_loss,pseudo_text_loss = pseudo_prototype_losses(
-                    field,p0,text[selected],pseudo_steps,time_eps)
-            loss = (fm_weight*fm_loss + cycle_weight*cycle_loss +
-                    pseudo_velocity_weight*pseudo_velocity_loss +
-                    pseudo_text_weight*pseudo_text_loss)
-            if not torch.isfinite(loss):
+            x1 = text[batch_labels.to(device)]
+            t = torch.rand(len(x0), 1, device=device) * (1-time_eps)
+            xt = (1-t)*x0 + t*x1
+            pred_v = velocity_from_output(network(xt, t), xt, t, prediction, time_eps)
+            fm_loss = (pred_v-(x1-x0)).square().sum(-1).mean()
+            if not torch.isfinite(fm_loss):
                 raise RuntimeError('Nonfinite image-to-text FM loss')
             current_lr = scheduled_lr(optimizer, update_step, total_steps, lr,
                                       warmup_ratio, min_lr_ratio)
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            fm_loss.backward()
             optimizer.step()
             update_step += 1
             total += fm_loss.item()*len(x0)
-            cycle_total += cycle_loss.item()*len(x0)
-            pseudo_velocity_total += pseudo_velocity_loss.item()*len(x0)
-            pseudo_text_total += pseudo_text_loss.item()*len(x0)
-            full_total += loss.item()*len(x0)
             count += len(x0)
         if not count:
             raise ValueError('Empty base training loader')
         history.append(total/count)
-        cycle_history.append(cycle_total/count)
-        pseudo_velocity_history.append(pseudo_velocity_total/count)
-        pseudo_text_history.append(pseudo_text_total/count)
-        total_history.append(full_total/count)
         lr_history.append(current_lr)
         print(f'epoch={epoch+1} prediction={prediction} fm_loss={history[-1]:.6f} '
-              f'cycle_loss={cycle_history[-1]:.6f} '
-              f'pseudo_velocity={pseudo_velocity_history[-1]:.6f} '
-              f'pseudo_text={pseudo_text_history[-1]:.6f} lr={current_lr:.8g}', flush=True)
+              f'lr={current_lr:.8g}', flush=True)
     return dict(format_version=6, architecture=arch,
                 state_dict={k:v.detach().cpu().clone() for k,v in network.state_dict().items()},
                 encoder_id=cache['encoder_id'], base_class_ids=ids,
@@ -194,32 +116,18 @@ def fit(cache, *, epochs, batch_size, lr, weight_decay, blocks, hidden,
                 training=dict(epochs=epochs, batch_size=batch_size, lr=lr,
                               weight_decay=weight_decay, seed=seed,
                               base_only=True, input_features='clean_base_images',
-                              cycle_weight=cycle_weight, cycle_steps=cycle_steps,
-                              fm_weight=fm_weight,
-                              pseudo_velocity_weight=pseudo_velocity_weight,
-                              pseudo_text_weight=pseudo_text_weight,
-                              pseudo_steps=pseudo_steps,
+                              objective='fm_only',
                               lr_schedule='warmup_cosine', warmup_ratio=warmup_ratio,
                               min_lr_ratio=min_lr_ratio),
-                loss_history=history, cycle_loss_history=cycle_history,
-                pseudo_velocity_loss_history=pseudo_velocity_history,
-                pseudo_text_loss_history=pseudo_text_history,
-                total_loss_history=total_history, lr_history=lr_history)
+                loss_history=history, lr_history=lr_history)
 
 
 def adapt(checkpoint, cache, memory, *, steps, batch_size, lr, weight_decay,
-          cycle_weight, cycle_steps, warmup_ratio, min_lr_ratio, seed, device,
-          fm_weight=1.0, pseudo_velocity_weight=0.0,
-          pseudo_text_weight=0.0, pseudo_steps=8):
+          warmup_ratio, min_lr_ratio, seed, device):
     """Update Flow with new support samples and one old-class mean per class."""
     if (cache.get('stage') != 'incremental' or steps < 1 or batch_size < 1 or
             lr <= 0 or weight_decay < 0 or cache['encoder_id'] != checkpoint['encoder_id']):
         raise ValueError('Invalid incremental Flow cache or settings')
-    if (fm_weight < 0 or pseudo_velocity_weight < 0 or pseudo_text_weight < 0 or
-            pseudo_steps < 1 or fm_weight+cycle_weight+pseudo_velocity_weight+pseudo_text_weight <= 0):
-        raise ValueError('At least one valid incremental Flow loss weight is required')
-    if (pseudo_velocity_weight or pseudo_text_weight) and checkpoint['prediction'] != 'velocity':
-        raise ValueError('Pseudo prototype losses require velocity prediction')
     new_ids = list(cache['class_ids'])
     old_ids = list(memory['class_ids'])
     if set(new_ids) & set(old_ids):
@@ -237,66 +145,35 @@ def adapt(checkpoint, cache, memory, *, steps, batch_size, lr, weight_decay,
     row_labels = torch.tensor([len(old_ids)+new_rows[int(label)] for label in labels])
     sources = torch.cat((old_visual, images))
     targets = torch.cat((old_text, new_text[row_labels-len(old_ids)]))
-    # One clean mean per class supplies the prototype-pair objective.
-    new_means = unit(torch.stack([images[labels == class_id].mean(0) for class_id in new_ids]))
-    prototypes = torch.cat((old_visual, new_means)).to(device)
-    prototype_text = torch.cat((old_text,new_text)).to(device)
-    sample_rows = torch.cat((torch.arange(len(old_ids)), row_labels))
     network = DeepFlowMatchingNet(**checkpoint['architecture']).to(device).train()
     network.load_state_dict(checkpoint['state_dict'])
     field = VelocityField(network, checkpoint['prediction'], checkpoint['time_eps'])
     optimizer = torch.optim.AdamW(network.parameters(), lr=lr, weight_decay=weight_decay)
     generator = torch.Generator().manual_seed(seed)
-    loss_history, cycle_history, lr_history = [], [], []
-    pseudo_velocity_history, pseudo_text_history = [], []
+    loss_history, lr_history = [], []
     for step in range(steps):
         selected = torch.randint(len(sources), (batch_size,), generator=generator)
         x0 = sources[selected].to(device)
-        fm_loss = x0.new_zeros(())
-        if fm_weight:
-            x1 = targets[selected].to(device)
-            t = torch.rand(len(x0), 1, device=device)*(1-checkpoint['time_eps'])
-            xt = (1-t)*x0+t*x1
-            velocity = field(xt,t)
-            fm_loss = (velocity-(x1-x0)).square().sum(-1).mean()
-        cycle_loss = fm_loss.new_zeros(())
-        pseudo_velocity_loss = fm_loss.new_zeros(())
-        pseudo_text_loss = fm_loss.new_zeros(())
-        if cycle_weight or pseudo_velocity_weight or pseudo_text_weight:
-            rows = sample_rows[selected].unique().to(device)
-            p0 = prototypes[rows]
-        if cycle_weight:
-            _, recovered = cycle_reconstruction(field,p0,cycle_steps)
-            cycle_loss = (recovered-p0).square().sum(-1).mean()
-        if pseudo_velocity_weight or pseudo_text_weight:
-            pseudo_velocity_loss,pseudo_text_loss = pseudo_prototype_losses(
-                field,p0,prototype_text[rows],pseudo_steps,checkpoint['time_eps'])
-        loss = (fm_weight*fm_loss+cycle_weight*cycle_loss+
-                pseudo_velocity_weight*pseudo_velocity_loss+
-                pseudo_text_weight*pseudo_text_loss)
-        if not torch.isfinite(loss):
+        x1 = targets[selected].to(device)
+        t = torch.rand(len(x0), 1, device=device)*(1-checkpoint['time_eps'])
+        xt = (1-t)*x0+t*x1
+        velocity = field(xt,t)
+        fm_loss = (velocity-(x1-x0)).square().sum(-1).mean()
+        if not torch.isfinite(fm_loss):
             raise RuntimeError('Nonfinite incremental Flow loss')
         current_lr = scheduled_lr(optimizer, step, steps, lr,
                                   warmup_ratio, min_lr_ratio)
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        fm_loss.backward()
         optimizer.step()
         loss_history.append(fm_loss.item())
-        cycle_history.append(cycle_loss.item())
-        pseudo_velocity_history.append(pseudo_velocity_loss.item())
-        pseudo_text_history.append(pseudo_text_loss.item())
         lr_history.append(current_lr)
     updated = dict(checkpoint)
     updated['state_dict'] = {k:v.detach().cpu().clone() for k,v in network.state_dict().items()}
     updated['incremental_training'] = list(checkpoint.get('incremental_training', [])) + [dict(
         steps=steps, support_samples=len(images), replay_classes=len(old_ids),
-        fm_loss=loss_history, cycle_loss=cycle_history,
-        pseudo_velocity_loss=pseudo_velocity_history,
-        pseudo_text_loss=pseudo_text_history, lr=lr_history)]
+        fm_loss=loss_history, lr=lr_history)]
     print(f'adapt steps={steps} fm_loss={loss_history[-1]:.6f} '
-          f'cycle_loss={cycle_history[-1]:.6f} '
-          f'pseudo_velocity={pseudo_velocity_history[-1]:.6f} '
-          f'pseudo_text={pseudo_text_history[-1]:.6f} '
           f'lr={lr_history[-1]:.8g}', flush=True)
     return updated
 

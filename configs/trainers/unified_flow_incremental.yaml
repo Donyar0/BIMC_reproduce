@@ -45,7 +45,7 @@ FLOW:
   HIDDEN: 0  # 0 uses CLIP feature dimension
   STEPS: 8
   SOLVER: "euler"  # euler, midpoint, heun, rk4; inference only
-  OUTPUT_DIR: "output/unified_flow_pseudo_pair_incremental"
+  OUTPUT_DIR: "output/unified_flow_image_text_fm_incremental"
   ADAPT_STEPS: 100
   ADAPT_LR: 0.0002  # peak LR; warmup + cosine decay
   ALPHA: 1.0  # full forward image-to-text integration
@@ -53,11 +53,5 @@ FLOW:
   BETA_INC: 0.5  # validation search: 0.3 to 0.6
   GAMMA: 0.5  # validation search: 0.4 to 0.7
   LOGIT_SCALE: 1.0  # multiplier before softmax; tune on validation data
-  PREDICTION: "velocity"  # required by pseudo-prototype losses
+  PREDICTION: "velocity"  # endpoint predicts x1, then computes velocity loss
   TIME_EPS: 0.05  # shared t in [0, 1-eps); reverse t=1 evaluates at 1-eps
-  CYCLE_WEIGHT: 0.0
-  CYCLE_STEPS: 8
-  FM_WEIGHT: 0.0  # new experiment uses only the two pseudo-prototype losses
-  PSEUDO_VELOCITY_WEIGHT: 1.0
-  PSEUDO_TEXT_WEIGHT: 0.1
-  PSEUDO_STEPS: 8

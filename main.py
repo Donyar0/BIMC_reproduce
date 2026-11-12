@@ -92,12 +92,6 @@ def extend_cfg(cfg):
     cfg.FLOW.LOGIT_SCALE = 1.0
     cfg.FLOW.PREDICTION = 'velocity'
     cfg.FLOW.TIME_EPS = 0.05
-    cfg.FLOW.CYCLE_WEIGHT = 0.0
-    cfg.FLOW.CYCLE_STEPS = 8
-    cfg.FLOW.FM_WEIGHT = 1.0
-    cfg.FLOW.PSEUDO_VELOCITY_WEIGHT = 0.0
-    cfg.FLOW.PSEUDO_TEXT_WEIGHT = 0.0
-    cfg.FLOW.PSEUDO_STEPS = 8
     cfg.FLOW.WARMUP_RATIO = 0.05
     cfg.FLOW.MIN_LR_RATIO = 0.01
 
