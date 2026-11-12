@@ -84,6 +84,9 @@ class RunnerTests(unittest.TestCase):
             bank0=torch.load(result_path.parent/'bank_session0.pt',weights_only=True)
             bank1=torch.load(result_path.parent/'bank_session1.pt',weights_only=True)
             self.assertTrue(torch.equal(bank0['prototypes'],bank1['prototypes'][:2]))
+            self.assertFalse((result_path.parent/'base_text_adapter.pt').exists())
+            base_flow=torch.load(result_path.parent/'base_flow.pt',weights_only=True)
+            self.assertNotIn('text_adapter_sha256',base_flow)
 
     def test_old_classes_compete_with_new_classes(self):
         evaluator=load_class(ROOT/'utils/evaluator.py','AccuracyEvaluator',{'torch':torch,'np':np})
@@ -103,12 +106,18 @@ class RunnerTests(unittest.TestCase):
         namespace={'CN':CfgNode}
         exec(compile(ast.Module(body=functions,type_ignores=[]),'main.py','exec'),namespace)
         for dataset, sessions in [('cifar100',9),('cub200',11),('miniimagenet',9)]:
-            for trainer in ['single_flow','bimc']:
+            for trainer in ['single_flow','single_flow_visual_prototype',
+                            'single_flow_visual_sample','bimc']:
                 cfg=namespace['setup_cfg'](str(ROOT/f'configs/datasets/{dataset}.yaml'),
                                           str(ROOT/f'configs/trainers/{trainer}.yaml'))
                 self.assertEqual(1+(cfg.DATASET.NUM_CLASSES-cfg.DATASET.NUM_INIT_CLS)//cfg.DATASET.NUM_INC_CLS,sessions)
-                if trainer=='single_flow':
+                if trainer.startswith('single_flow'):
                     self.assertEqual(cfg.METHOD,'single_flow')
+                    self.assertNotIn('TEXT_ADAPTER',cfg.FLOW)
+                    expected={'single_flow':'bimc_fused',
+                              'single_flow_visual_prototype':'visual_prototype',
+                              'single_flow_visual_sample':'visual_sample'}[trainer]
+                    self.assertEqual(cfg.FLOW.ENDPOINT,expected)
 
 
 if __name__ == '__main__':

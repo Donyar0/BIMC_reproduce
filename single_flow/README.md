@@ -1,8 +1,12 @@
-# 复用 BIMC 原型的单流融合文本 → BiMC 图文融合原型
+# 复用 BiMC 融合描述文本原型的单流实验
 
 Flow 直接读取 BIMC 已计算的原型，不再加载 CLIP、编码文本或重新融合描述。
 `fm.py` 来自 FlowComposer，保留上游 MIT LICENSE；训练脚本为任务适配实现。
 环境：Python 3.10+、PyTorch 2.6+；运行 BIMC 还需仓库原有依赖、数据和 CLIP 权重。
+
+本分支当前的三种终点对照（BiMC 图文融合、视觉类别均值、基类单张图像）
+均以 BiMC 原始 prompt/描述融合文本原型为起点，不调用 Text Adapter。
+配置和运行方式见 [README_text_to_visual.md](README_text_to_visual.md)。
 
 ## 推荐：像 BIMC 一样直接运行完整实验
 

@@ -13,10 +13,6 @@ from engine.engine import Runner
 from single_flow.bimc_cache import from_task_statistics
 from single_flow.s1_flow import fit, generate, classify
 from utils.experiment_logger import log_metrics
-from single_flow.vdt_text_adapter import (
-    encode_vdt_descriptions, train_base_text_adapter, adapted_prototypes,
-    replace_flow_cache_text, fingerprint, save_adapter,
-)
 
 
 class FlowRunner(Runner):
@@ -24,10 +20,6 @@ class FlowRunner(Runner):
     def run(self):
         cfg = self.cfg
         flow = cfg.FLOW
-        adapter_cfg = getattr(flow, 'TEXT_ADAPTER', None)
-        adapter_enabled = bool(getattr(adapter_cfg, 'ENABLED', False))
-        text_adapter = None
-        adapter_sha = None
         model = self.model.module if self.is_distributed else self.model
         model.eval().requires_grad_(False)
         run_name = f'seed_{cfg.SEED}_{datetime.now().strftime("%Y%m%d_%H%M%S_%f")}'
@@ -39,7 +31,7 @@ class FlowRunner(Runner):
         print(f'Method: single_flow | Dataset: {cfg.DATASET.NAME} | Seed: {cfg.SEED}')
         print(f'Results directory: {output}')
         print(f'Start inferencing on all tasks: [0, {self.data_manager.num_tasks - 1}]')
-        print(f'VDT text adapter (Flow source/target text): {adapter_enabled}')
+        print('Flow text source: original BiMC prompt/description fused prototype')
         print(f'Flow training endpoint: {getattr(flow, "ENDPOINT", "bimc_fused")}')
 
         for task_id in range(self.data_manager.num_tasks):
@@ -52,29 +44,6 @@ class FlowRunner(Runner):
                 names, loader, class_index=class_ids,
                 calibrate_novel_vision_proto=cfg.TRAINER.BiMC.VISION_CALIBRATION)
             cache = from_task_statistics(stats, encoder_id, task_id)
-            if adapter_enabled:
-                # Same Prompt + Description concatenation used by the source
-                # VDT branch; only base TRAIN images can supervise the adapter.
-                class_ids_list = [int(c) for c in class_ids]
-                desc, desc_labels = encode_vdt_descriptions(
-                    model, names, class_ids_list, cfg.DATASET.GPT_PATH)
-                if task_id == 0:
-                    print('Training VDT text adapter on base training images only...')
-                    text_adapter = train_base_text_adapter(
-                        desc, desc_labels, cache['image_features'],
-                        cache['image_labels'], class_ids_list,
-                        adapter_cfg, cfg.SEED, self.device)
-                    adapter_sha = fingerprint(text_adapter)
-                    save_adapter(text_adapter, encoder_id, class_ids_list,
-                                 output / 'base_text_adapter.pt')
-                calibrated_text = adapted_prototypes(
-                    text_adapter, desc, desc_labels, class_ids_list)
-                # The Flow source and the text component of the BiMC fused
-                # training endpoint are *both* replaced by adapted text.
-                cache = replace_flow_cache_text(
-                    cache, calibrated_text, cfg.DATASET.BETA)
-                cache['text_adapter_sha256'] = adapter_sha
-                del desc, desc_labels, calibrated_text
             if cfg.TRAINER.BiMC.PROTOTYPE_CACHE_DIR:
                 cache_dir = Path(cfg.TRAINER.BiMC.PROTOTYPE_CACHE_DIR) / cfg.DATASET.NAME.lower() / run_name
                 cache_dir.mkdir(parents=True, exist_ok=True)
@@ -94,9 +63,6 @@ class FlowRunner(Runner):
                         endpoint=getattr(flow, 'ENDPOINT', 'bimc_fused'),
                         ce_weight=flow.CE_WEIGHT,
                         temperature=flow.TEMPERATURE, seed=cfg.SEED, device=self.device)
-                if adapter_enabled:
-                    checkpoint['text_adapter_sha256'] = adapter_sha
-                    checkpoint['text_prototype_mode'] = 'vdt_linear'
                 torch.save(checkpoint, output / 'base_flow.pt')
 
             bank = generate(checkpoint, cache, steps=flow.STEPS, device=self.device, existing=bank)
