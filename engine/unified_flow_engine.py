@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from engine.engine import Runner
 from single_flow.bimc_cache import from_task_statistics
-from single_flow.image_text_flow import fit, build_bank, classify_bidirectional, load_model, METHOD, DIRECTION
+from single_flow.image_text_flow import fit, adapt, build_bank, classify_bidirectional, load_model, METHOD, DIRECTION
 from single_flow.unified_flow import real_means
 from utils.experiment_logger import log_metrics
 
@@ -21,8 +21,8 @@ class UnifiedFlowRunner(Runner):
     def run(self):
         cfg = self.cfg
         flow = cfg.FLOW
-        if flow.ADAPT_STEPS != 0:
-            raise ValueError('Image-to-text Flow is base-only; set ADAPT_STEPS: 0')
+        if flow.ADAPT_STEPS < 0:
+            raise ValueError('FLOW.ADAPT_STEPS must be nonnegative')
         if flow.SOLVER not in ('euler', 'midpoint', 'heun', 'rk4'):
             raise ValueError('Unknown FLOW.SOLVER')
         if not cfg.TRAINER.BiMC.TEXT_CALIBRATION:
@@ -38,6 +38,7 @@ class UnifiedFlowRunner(Runner):
         encoder_id = str((cfg.MODEL.BACKBONE.NAME, cfg.TRAINER.BiMC.PREC, str(cfg.DATASET),
                           METHOD, DIRECTION, str(cfg.TRAINER.BiMC)))
         rows, checkpoint, bank = [], None, None
+        memory = None
         num_base = len(self.data_manager.class_index_in_task[0])
         print(f'Method: unified_flow | Dataset: {cfg.DATASET.NAME} | Seed: {cfg.SEED}')
         print(f'Results directory: {output}')
@@ -70,16 +71,39 @@ class UnifiedFlowRunner(Runner):
                         lr=flow.LR, weight_decay=flow.WEIGHT_DECAY,
                         blocks=flow.BLOCKS, hidden=flow.HIDDEN or None,
                         prediction=flow.PREDICTION, time_eps=flow.TIME_EPS,
-                        seed=cfg.SEED, device=self.device)
+                        seed=cfg.SEED, device=self.device,
+                        cycle_weight=flow.CYCLE_WEIGHT, cycle_steps=flow.CYCLE_STEPS,
+                        warmup_ratio=flow.WARMUP_RATIO,
+                        min_lr_ratio=flow.MIN_LR_RATIO)
                 torch.save(checkpoint, output / 'base_flow.pt')
 
+            if task_id > 0 and flow.ADAPT_STEPS:
+                devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+                with torch.random.fork_rng(devices=devices), torch.enable_grad():
+                    checkpoint = adapt(checkpoint, cache, memory,
+                        steps=flow.ADAPT_STEPS, batch_size=flow.BATCH_SIZE,
+                        lr=flow.ADAPT_LR, weight_decay=flow.WEIGHT_DECAY,
+                        cycle_weight=flow.CYCLE_WEIGHT, cycle_steps=flow.CYCLE_STEPS,
+                        warmup_ratio=flow.WARMUP_RATIO,
+                        min_lr_ratio=flow.MIN_LR_RATIO,
+                        seed=cfg.SEED+task_id, device=self.device)
             current = dict(class_ids=cache['class_ids'], text=cache['text_prototypes'].float(),
                            real=real_means(cache), encoder_id=checkpoint['encoder_id'])
-            # The same frozen base checkpoint is reused for every new class.
-            bank = build_bank(checkpoint, current, steps=flow.STEPS,
-                              num_base=num_base if task_id == 0 else 0,
+            if memory is None:
+                memory = current
+            else:
+                memory = dict(class_ids=memory['class_ids']+current['class_ids'],
+                              text=torch.cat((memory['text'],current['text'])),
+                              real=torch.cat((memory['real'],current['real'])),
+                              encoder_id=checkpoint['encoder_id'])
+            # Updated Flow changes old-class generation too; rebuild all seen
+            # prototypes after adaptation. Frozen Flow preserves the old bank.
+            generated_classes = memory if flow.ADAPT_STEPS else current
+            bank = build_bank(checkpoint, generated_classes, steps=flow.STEPS,
+                              num_base=num_base if flow.ADAPT_STEPS or task_id == 0 else 0,
                               beta_base=flow.BETA_BASE, beta_inc=flow.BETA_INC,
-                              device=self.device, previous_bank=bank,
+                              device=self.device,
+                              previous_bank=None if flow.ADAPT_STEPS else bank,
                               solver=flow.SOLVER)
             torch.save(checkpoint, output / f'flow_session{task_id}.pt')
             torch.save(bank, output / f'bank_session{task_id}.pt')
@@ -130,6 +154,10 @@ class UnifiedFlowRunner(Runner):
         for name in ('PREDICTION', 'TIME_EPS'):
             if getattr(original.FLOW, name) != getattr(cfg.FLOW, name):
                 raise ValueError(f'FLOW.{name} must match the saved run')
+        for name, default in (('CYCLE_WEIGHT', 0.0), ('CYCLE_STEPS', 8),
+                              ('ADAPT_STEPS', 0)):
+            if getattr(original.FLOW, name, default) != getattr(cfg.FLOW, name):
+                raise ValueError(f'FLOW.{name} must match the saved run')
         if cfg.FLOW.SOLVER not in ('euler', 'midpoint', 'heun', 'rk4'):
             raise ValueError('Unknown FLOW.SOLVER')
         if cfg.FLOW.STEPS < 1:
@@ -165,14 +193,21 @@ class UnifiedFlowRunner(Runner):
             # generated vectors would mix solvers in the visual score.
             ids = self.data_manager.class_index_in_task[task_id]
             count = len(ids)
-            current = dict(class_ids=[int(i) for i in ids],
-                           text=saved['text'][-count:].float(),
-                           real=saved['real'][-count:].float(),
+            if cfg.FLOW.ADAPT_STEPS:
+                bank_ids = expected
+                text = saved['text'].float()
+                real = saved['real'].float()
+            else:
+                bank_ids = [int(i) for i in ids]
+                text = saved['text'][-count:].float()
+                real = saved['real'][-count:].float()
+            current = dict(class_ids=bank_ids, text=text, real=real,
                            encoder_id=checkpoint['encoder_id'])
             bank = build_bank(checkpoint, current, steps=cfg.FLOW.STEPS,
-                              num_base=num_base if task_id == 0 else 0,
+                              num_base=num_base if cfg.FLOW.ADAPT_STEPS or task_id == 0 else 0,
                               beta_base=cfg.FLOW.BETA_BASE, beta_inc=cfg.FLOW.BETA_INC,
-                              device=self.device, previous_bank=bank,
+                              device=self.device,
+                              previous_bank=None if cfg.FLOW.ADAPT_STEPS else bank,
                               solver=cfg.FLOW.SOLVER)
             self._checkpoint = checkpoint
             acc = self.inference_task_flow(task_id, bank, model)

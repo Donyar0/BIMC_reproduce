@@ -149,9 +149,9 @@ v_target = x1-x0
 训练每轮随机抽取已缓存的正常图像特征，不进行旋转、遮挡、加噪声、
 随机裁剪或随机翻转。基础阶段仍使用原本选定的训练图像集合。
 
-增量阶段仅提取当前支持集统计、追加类别 Bank 和评估，**不微调 Flow**，
-不回放旧样本，不训练文本 Adapter。所有 `flow_session*.pt` 的网络参数相同。
-`ADAPT_STEPS` 必须为 0。
+默认 `ADAPT_STEPS: 0`，增量阶段只提取支持集统计、追加类别 Bank 并评估；
+可选的增量训练组会以新类支持样本和每个旧类一个真实均值更新 Flow，
+再重新生成全部已见类别的视觉原型。CLIP 和文本原型保持冻结。
 
 ### 速度预测与终点预测对比
 
@@ -258,3 +258,50 @@ python scripts/run_ode_solver_ablation.py \
 比较准确率时也应关注推理时间。
 自己训练且来源可信的旧版权重若需要 pickle 加载，可在脚本命令后添加
 `--trusted_checkpoints`，该选项会传给每一次重评估。
+
+### 图像原型循环约束与增量训练实验
+
+`unified_flow_cycle.yaml` 在原有 Flow Matching (FM) 速度损失外增加
+基类图像原型循环约束。每个训练 batch 取其中类别的正常视觉原型 `p0`，
+先做一次完整时间步的速度更新，得到伪文本特征：
+
+```text
+pseudo_text = normalize(p0 + vθ(p0, t=0))
+recovered = reverse_euler(pseudo_text, steps=CYCLE_STEPS)
+L_cycle = mean(||normalize(recovered)-p0||²)
+L_total = L_FM + CYCLE_WEIGHT*L_cycle
+```
+
+反向积分使用**同一个**速度网络及 `TIME_EPS` 端点规则，
+梯度经过伪文本和全部反向步骤回传。伪文本采用一次速度更新，
+而反向路径按 `CYCLE_STEPS` 积分；这样约束了起点预测速度与整条反向路径的一致性。
+`CYCLE_WEIGHT: 0.0` 是无循环约束对照，`0.1` 是实验初始值。
+循环训练只使用基类训练图像统计，不读取测试集。
+
+`unified_flow_cycle_incremental.yaml` 保留上述循环损失，并在增量阶段
+使用当前新类支持图像特征与旧类真实均值回放进行 FM 和原型循环训练。
+更新后的 Flow 会重新生成全部已见类的视觉 Bank；每个 Session 保存不同的
+`flow_session*.pt`。基础阶段与增量阶段都不训练 CLIP。
+
+基础阶段的 `LR` 与增量阶段的 `ADAPT_LR` 是**峰值学习率**，不是固定值。
+每次优化更新前，学习率先线性预热，再按余弦曲线下降到峰值的
+`MIN_LR_RATIO`（默认 0.01）。`WARMUP_RATIO` 默认 0.05；
+基础训练按 `EPOCHS × 每轮批次数` 调度，增量阶段按 `ADAPT_STEPS`
+调度。实际学习率保存在 checkpoint 的 `lr_history` 和
+`incremental_training[*].lr` 中。这个调度同样用于无循环约束对照，
+以保持学习率策略一致。
+
+三组配置可在仓库根目录依次运行：
+
+```bash
+bash scripts/run_image_text_cycle_ablation.sh \
+  configs/datasets/cub200.yaml --use_swanlab
+```
+
+对应的输出目录分别是
+`output/unified_flow_image_text_clean_velocity/`、
+`output/unified_flow_image_text_clean_velocity_cycle/` 和
+`output/unified_flow_image_text_clean_velocity_cycle_incremental/`。
+这是三个分别训练的实验；旧权重不能补出循环约束的训练效果。
+脚本依次运行，若任一实验失败会停止，阶段日志写在 `logs/image_text_cycle_.../`。
+实际准确率需用数据集验证，`CYCLE_WEIGHT` 与学习率参数应通过验证集选取。

@@ -1,4 +1,5 @@
 """Base-only clean image features -> original BiMC text Flow Matching."""
+import math
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
@@ -37,23 +38,58 @@ def load_model(checkpoint, device):
     return VelocityField(network, checkpoint['prediction'], checkpoint['time_eps'])
 
 
+def cycle_reconstruction(field, image_prototypes, steps):
+    """One forward velocity update, then a differentiable reverse Euler path."""
+    if steps < 1:
+        raise ValueError('CYCLE_STEPS must be positive')
+    p0 = F.normalize(image_prototypes.float(), dim=-1)
+    zero = p0.new_zeros((len(p0), 1))
+    pseudo_text = F.normalize(p0 + field(p0, zero), dim=-1)
+    reconstructed = pseudo_text
+    for k in range(steps):
+        t = p0.new_full((len(p0), 1), 1-k/steps)
+        reconstructed = reconstructed - field(reconstructed, t)/steps
+    return pseudo_text, F.normalize(reconstructed, dim=-1)
+
+
+def scheduled_lr(optimizer, step, total_steps, peak_lr, warmup_ratio, min_lr_ratio):
+    """Linear warmup followed by cosine decay, for both training stages."""
+    if not (0 <= step < total_steps and peak_lr > 0 and
+            0 <= warmup_ratio < 1 and 0 <= min_lr_ratio < 1):
+        raise ValueError('Invalid learning-rate schedule')
+    warmup = min(total_steps-1, max(1, round(total_steps*warmup_ratio)))
+    if step < warmup:
+        lr = peak_lr*(step+1)/warmup
+    else:
+        progress = (step-warmup+1)/(total_steps-warmup)
+        lr = peak_lr*(min_lr_ratio + (1-min_lr_ratio)*(1+math.cos(math.pi*progress))/2)
+    for group in optimizer.param_groups:
+        group['lr'] = lr
+    return lr
+
+
 def fit(cache, *, epochs, batch_size, lr, weight_decay, blocks, hidden,
-        prediction, time_eps, seed, device):
+        prediction, time_eps, seed, device, cycle_weight=0.0, cycle_steps=8,
+        warmup_ratio=0.05, min_lr_ratio=0.01):
     if cache.get('stage') != 'base' or cache.get('split') != 'train':
         raise ValueError('Flow training accepts base training images only')
     if epochs < 1 or batch_size < 1 or blocks < 1 or lr <= 0 or weight_decay < 0:
         raise ValueError('Invalid Flow training parameters')
     if prediction not in ('velocity', 'endpoint') or not 0 < time_eps < 0.5:
         raise ValueError('Invalid prediction parameterization/time epsilon')
+    if cycle_weight < 0 or cycle_steps < 1:
+        raise ValueError('Invalid cycle loss settings')
     torch.manual_seed(seed)
     ids, text = text_cache(cache)
     if ids != list(range(len(ids))):
         raise ValueError('Base class IDs must be contiguous and zero-based')
     text = text.to(device)
     images = unit(cache['image_features']).cpu()
+    image_prototypes = unit(cache['visual_prototypes']).to(device)
     labels = cache['image_labels'].long().cpu()
     if (labels.ndim != 1 or len(labels) != len(images) or
-            images.shape[1] != text.shape[1] or set(labels.tolist()) != set(ids)):
+            images.shape[1] != text.shape[1] or
+            image_prototypes.shape != text.shape or set(labels.tolist()) != set(ids)):
         raise ValueError('Clean base image features must cover exactly the base classes')
     loader = DataLoader(TensorDataset(images, labels), batch_size=batch_size,
                         shuffle=True, generator=torch.Generator().manual_seed(seed))
@@ -62,36 +98,127 @@ def fit(cache, *, epochs, batch_size, lr, weight_decay, blocks, hidden,
                 out_channels=dim, num_res_blocks=blocks)
     network = DeepFlowMatchingNet(**arch).to(device).train()
     optimizer = torch.optim.AdamW(network.parameters(), lr=lr, weight_decay=weight_decay)
-    history = []
+    history, cycle_history, total_history, lr_history = [], [], [], []
+    field = VelocityField(network, prediction, time_eps)
+    total_steps = epochs*len(loader)
+    update_step = 0
     for epoch in range(epochs):
-        total, count = 0., 0
+        total, cycle_total, full_total, count = 0., 0., 0., 0
         for x0, batch_labels in loader:
             x0 = x0.to(device)
             x1 = text[batch_labels.to(device)]
             t = torch.rand(len(x0), 1, device=device) * (1-time_eps)
             xt = (1-t)*x0 + t*x1
             pred_v = velocity_from_output(network(xt, t), xt, t, prediction, time_eps)
-            loss = (pred_v-(x1-x0)).square().sum(-1).mean()
+            fm_loss = (pred_v-(x1-x0)).square().sum(-1).mean()
+            cycle_loss = fm_loss.new_zeros(())
+            if cycle_weight:
+                selected = batch_labels.unique().to(device)
+                p0 = image_prototypes[selected]
+                _, recovered = cycle_reconstruction(field, p0, cycle_steps)
+                cycle_loss = (recovered-p0).square().sum(-1).mean()
+            loss = fm_loss + cycle_weight*cycle_loss
             if not torch.isfinite(loss):
                 raise RuntimeError('Nonfinite image-to-text FM loss')
+            current_lr = scheduled_lr(optimizer, update_step, total_steps, lr,
+                                      warmup_ratio, min_lr_ratio)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
-            total += loss.item()*len(x0)
+            update_step += 1
+            total += fm_loss.item()*len(x0)
+            cycle_total += cycle_loss.item()*len(x0)
+            full_total += loss.item()*len(x0)
             count += len(x0)
         if not count:
             raise ValueError('Empty base training loader')
         history.append(total/count)
-        print(f'epoch={epoch+1} prediction={prediction} fm_loss={history[-1]:.6f}', flush=True)
-    return dict(format_version=4, architecture=arch,
+        cycle_history.append(cycle_total/count)
+        total_history.append(full_total/count)
+        lr_history.append(current_lr)
+        print(f'epoch={epoch+1} prediction={prediction} fm_loss={history[-1]:.6f} '
+              f'cycle_loss={cycle_history[-1]:.6f} lr={current_lr:.8g}', flush=True)
+    return dict(format_version=5, architecture=arch,
                 state_dict={k:v.detach().cpu().clone() for k,v in network.state_dict().items()},
                 encoder_id=cache['encoder_id'], base_class_ids=ids,
                 flow_direction=DIRECTION, text_prototype_method=METHOD,
                 prediction=prediction, time_eps=time_eps,
                 training=dict(epochs=epochs, batch_size=batch_size, lr=lr,
                               weight_decay=weight_decay, seed=seed,
-                              base_only=True, input_features='clean_base_images'),
-                loss_history=history)
+                              base_only=True, input_features='clean_base_images',
+                              cycle_weight=cycle_weight, cycle_steps=cycle_steps,
+                              lr_schedule='warmup_cosine', warmup_ratio=warmup_ratio,
+                              min_lr_ratio=min_lr_ratio),
+                loss_history=history, cycle_loss_history=cycle_history,
+                total_loss_history=total_history, lr_history=lr_history)
+
+
+def adapt(checkpoint, cache, memory, *, steps, batch_size, lr, weight_decay,
+          cycle_weight, cycle_steps, warmup_ratio, min_lr_ratio, seed, device):
+    """Update Flow with new support samples and one old-class mean per class."""
+    if (cache.get('stage') != 'incremental' or steps < 1 or batch_size < 1 or
+            lr <= 0 or weight_decay < 0 or cache['encoder_id'] != checkpoint['encoder_id']):
+        raise ValueError('Invalid incremental Flow cache or settings')
+    new_ids = list(cache['class_ids'])
+    old_ids = list(memory['class_ids'])
+    if set(new_ids) & set(old_ids):
+        raise ValueError('Incremental class IDs overlap old classes')
+    images = unit(cache['image_features']).cpu()
+    labels = cache['image_labels'].long().cpu()
+    new_text = unit(cache['text_prototypes']).cpu()
+    old_visual = unit(memory['real']).cpu()
+    old_text = unit(memory['text']).cpu()
+    if (set(labels.tolist()) != set(new_ids) or
+            new_text.shape != (len(new_ids), images.shape[1]) or
+            old_text.shape != old_visual.shape):
+        raise ValueError('Incremental support and replay dimensions differ')
+    new_rows = {class_id: row for row, class_id in enumerate(new_ids)}
+    row_labels = torch.tensor([len(old_ids)+new_rows[int(label)] for label in labels])
+    sources = torch.cat((old_visual, images))
+    targets = torch.cat((old_text, new_text[row_labels-len(old_ids)]))
+    # One clean mean per class supplies the cycle constraint.
+    new_means = unit(torch.stack([images[labels == class_id].mean(0) for class_id in new_ids]))
+    prototypes = torch.cat((old_visual, new_means)).to(device)
+    sample_rows = torch.cat((torch.arange(len(old_ids)), row_labels))
+    network = DeepFlowMatchingNet(**checkpoint['architecture']).to(device).train()
+    network.load_state_dict(checkpoint['state_dict'])
+    field = VelocityField(network, checkpoint['prediction'], checkpoint['time_eps'])
+    optimizer = torch.optim.AdamW(network.parameters(), lr=lr, weight_decay=weight_decay)
+    generator = torch.Generator().manual_seed(seed)
+    loss_history, cycle_history, lr_history = [], [], []
+    for step in range(steps):
+        selected = torch.randint(len(sources), (batch_size,), generator=generator)
+        x0 = sources[selected].to(device)
+        x1 = targets[selected].to(device)
+        t = torch.rand(len(x0), 1, device=device)*(1-checkpoint['time_eps'])
+        xt = (1-t)*x0+t*x1
+        velocity = field(xt,t)
+        fm_loss = (velocity-(x1-x0)).square().sum(-1).mean()
+        cycle_loss = fm_loss.new_zeros(())
+        if cycle_weight:
+            _, recovered = cycle_reconstruction(field,
+                prototypes[sample_rows[selected].unique().to(device)], cycle_steps)
+            p0 = prototypes[sample_rows[selected].unique().to(device)]
+            cycle_loss = (recovered-p0).square().sum(-1).mean()
+        loss = fm_loss+cycle_weight*cycle_loss
+        if not torch.isfinite(loss):
+            raise RuntimeError('Nonfinite incremental Flow loss')
+        current_lr = scheduled_lr(optimizer, step, steps, lr,
+                                  warmup_ratio, min_lr_ratio)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        loss_history.append(fm_loss.item())
+        cycle_history.append(cycle_loss.item())
+        lr_history.append(current_lr)
+    updated = dict(checkpoint)
+    updated['state_dict'] = {k:v.detach().cpu().clone() for k,v in network.state_dict().items()}
+    updated['incremental_training'] = list(checkpoint.get('incremental_training', [])) + [dict(
+        steps=steps, support_samples=len(images), replay_classes=len(old_ids),
+        fm_loss=loss_history, cycle_loss=cycle_history, lr=lr_history)]
+    print(f'adapt steps={steps} fm_loss={loss_history[-1]:.6f} '
+          f'cycle_loss={cycle_history[-1]:.6f} lr={lr_history[-1]:.8g}', flush=True)
+    return updated
 
 
 @torch.no_grad()

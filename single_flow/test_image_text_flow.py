@@ -17,7 +17,8 @@ import torch.nn.functional as F
 from single_flow.bimc_cache import from_task_statistics
 from single_flow.unified_flow import real_means
 from single_flow.image_text_flow import (fit, load_model, velocity_from_output, transport,
-    build_bank, classify_bidirectional, METHOD, DIRECTION)
+    adapt, build_bank, classify_bidirectional, cycle_reconstruction,
+    scheduled_lr, METHOD, DIRECTION)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -52,6 +53,32 @@ class NumericalTests(unittest.TestCase):
         self.assertTrue(torch.allclose(loss,expected))
         loss.backward()
         self.assertTrue(torch.allclose(prediction.grad,2*(prediction.detach()-x1)/(1-t).square()))
+
+    def test_prototype_cycle_reconstruction_is_differentiable(self):
+        class RotatingField(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.scale=torch.nn.Parameter(torch.tensor(.4))
+            def forward(self,x,t):
+                return self.scale*torch.stack((x[:,1]+t[:,0],-x[:,0]),dim=-1)
+        field=RotatingField()
+        p0=torch.tensor([[1.,0.],[0.,1.]])
+        pseudo,recovered=cycle_reconstruction(field,p0,steps=4)
+        self.assertEqual(pseudo.shape,p0.shape)
+        self.assertFalse(torch.equal(pseudo,p0))
+        loss=(recovered-p0).square().sum(-1).mean()
+        self.assertGreater(loss.item(),0)
+        loss.backward()
+        self.assertTrue(torch.isfinite(field.scale.grad))
+        self.assertNotEqual(field.scale.grad.item(),0)
+
+    def test_both_stages_use_warmup_and_cosine_decay(self):
+        parameter=torch.nn.Parameter(torch.tensor(1.))
+        optimizer=torch.optim.SGD([parameter],lr=.1)
+        values=[scheduled_lr(optimizer,i,10,.1,.2,.01) for i in range(10)]
+        self.assertLess(values[0],values[1])
+        self.assertGreater(values[1],values[-1])
+        self.assertAlmostEqual(values[-1],.001)
 
     def test_forward_and_reverse_directions(self):
         class Constant:
@@ -100,12 +127,14 @@ class NumericalTests(unittest.TestCase):
         text=F.normalize(torch.tensor([[1.,1.,0.,0.],[0.,0.,1.,1.]]),dim=-1)
         cache=dict(stage='base',split='train',encoder_id='test',class_ids=[0,1],
                    text_prototypes=text,image_features=torch.eye(4)[:2],
+                   visual_prototypes=torch.eye(4)[:2],
                    image_labels=torch.tensor([0,1]))
         for mode in ('velocity','endpoint'):
             with torch.enable_grad():
                 ckpt=fit(cache,epochs=2,batch_size=2,lr=.001,weight_decay=0,blocks=1,
                     hidden=8,prediction=mode,time_eps=.05,seed=7,device='cpu')
             self.assertEqual(ckpt['training']['input_features'],'clean_base_images')
+            self.assertTrue(all(value == 0 for value in ckpt['cycle_loss_history']))
             self.assertTrue(torch.isfinite(torch.tensor(ckpt['loss_history'])).all())
             field=load_model(ckpt,'cpu').eval()
             self.assertTrue(torch.isfinite(field(torch.eye(4)[:2],torch.ones(2,1))).all())
@@ -118,6 +147,22 @@ class NumericalTests(unittest.TestCase):
                     hidden=8,prediction=mode,time_eps=.05,seed=7,device='cpu')
         with self.assertRaisesRegex(ValueError,'Incompatible'):
             load_model(dict(ckpt,flow_direction='text_to_image'),'cpu')
+
+    def test_cycle_training_changes_base_flow_but_not_its_training_scope(self):
+        eye=torch.eye(4)
+        cache=dict(stage='base',split='train',encoder_id='test',class_ids=[0,1],
+                   text_prototypes=F.normalize(eye[:2]+.3,dim=-1),
+                   image_features=eye[:2],visual_prototypes=eye[:2],
+                   image_labels=torch.tensor([0,1]))
+        kwargs=dict(epochs=2,batch_size=2,lr=.001,weight_decay=0,blocks=1,
+                    hidden=8,prediction='velocity',time_eps=.05,seed=9,device='cpu')
+        baseline=fit(cache,cycle_weight=0,cycle_steps=2,**kwargs)
+        constrained=fit(cache,cycle_weight=.5,cycle_steps=2,**kwargs)
+        self.assertEqual(constrained['training']['cycle_weight'],.5)
+        self.assertEqual(len(constrained['cycle_loss_history']),2)
+        self.assertTrue(all(torch.isfinite(torch.tensor(constrained['cycle_loss_history']))))
+        self.assertTrue(any(not torch.equal(baseline['state_dict'][k],constrained['state_dict'][k])
+                            for k in baseline['state_dict']))
 
 
 class RunnerTests(unittest.TestCase):
@@ -181,7 +226,7 @@ class RunnerTests(unittest.TestCase):
         ns=dict(Runner=object,torch=torch,np=np,Path=Path,datetime=datetime,time=time,
             csv=csv,json=json,
             tqdm=lambda x:x,from_task_statistics=from_task_statistics,fit=checked_fit,
-            build_bank=build_bank,real_means=real_means,load_model=load_model,
+            adapt=adapt,build_bank=build_bank,real_means=real_means,load_model=load_model,
             classify_bidirectional=classify_bidirectional,METHOD=METHOD,DIRECTION=DIRECTION,
             log_metrics=lambda *a,**kw:None)
         load_nodes(ROOT/'engine/unified_flow_engine.py',lambda n:isinstance(n,ast.ClassDef),ns)
@@ -206,12 +251,16 @@ class RunnerTests(unittest.TestCase):
             def calc_accuracy(self,scores,targets,task_id):
                 return dict(mean_acc=float((scores.argmax(-1)==targets).float().mean()*100),
                             task_acc=[],base_avg_acc=0.,inc_avg_acc=0.,harmonic_acc=0.)
-        for mode in ('velocity','endpoint'):
+        for mode,adapt_steps,cycle_weight in (
+                ('velocity',0,0.),('endpoint',0,0.),('velocity',3,.2)):
             with tempfile.TemporaryDirectory() as temp:
                 cfg=config();cfg.FLOW.PREDICTION=mode;cfg.FLOW.OUTPUT_DIR=temp
                 cfg.DEVICE.DEVICE_NAME='cpu';cfg.DATALOADER.NUM_WORKERS=0
                 for key,value in dict(EPOCHS=2,BATCH_SIZE=2,BLOCKS=1,HIDDEN=8,STEPS=4).items():
                     setattr(cfg.FLOW,key,value)
+                cfg.FLOW.ADAPT_STEPS=adapt_steps
+                cfg.FLOW.CYCLE_WEIGHT=cycle_weight
+                cfg.FLOW.CYCLE_STEPS=2
                 runner=ns['UnifiedFlowRunner'](); runner.cfg=cfg;runner.model=Model()
                 runner.device='cpu';runner.is_distributed=False;runner.data_manager=Data()
                 runner.evaluator=Evaluator();runner.parse_batch=lambda b:(b['image'],b['label'])
@@ -220,10 +269,17 @@ class RunnerTests(unittest.TestCase):
                 run_dir=next(Path(temp).rglob('base_flow.pt')).parent
                 base=torch.load(run_dir/'flow_session0.pt',weights_only=True)
                 inc=torch.load(run_dir/'flow_session1.pt',weights_only=True)
-                self.assertTrue(all(torch.equal(base['state_dict'][k],inc['state_dict'][k]) for k in base['state_dict']))
+                unchanged=all(torch.equal(base['state_dict'][k],inc['state_dict'][k])
+                              for k in base['state_dict'])
+                self.assertEqual(unchanged,adapt_steps==0)
+                if adapt_steps:
+                    self.assertEqual(len(inc['incremental_training']),1)
+                    lrs=inc['incremental_training'][0]['lr']
+                    self.assertGreater(max(lrs),min(lrs))
                 bank0=torch.load(run_dir/'bank_session0.pt',weights_only=True)
                 bank1=torch.load(run_dir/'bank_session1.pt',weights_only=True)
-                self.assertTrue(torch.equal(bank0['prototypes'],bank1['prototypes'][:2]))
+                if not adapt_steps:
+                    self.assertTrue(torch.equal(bank0['prototypes'],bank1['prototypes'][:2]))
                 self.assertTrue(torch.allclose(bank1['text'],F.normalize(eye[:3]+.5,dim=-1)))
                 before=runner.acc_list.copy(); runner.acc_list=[];runner.task_acc_list=[]
                 with contextlib.redirect_stdout(io.StringIO()):runner.evaluate_saved(run_dir)
@@ -239,7 +295,7 @@ class RunnerTests(unittest.TestCase):
                 cfg.FLOW.PREDICTION='endpoint' if mode=='velocity' else 'velocity'
                 with self.assertRaisesRegex(ValueError,'PREDICTION'):
                     runner.evaluate_saved(run_dir)
-        self.assertEqual(training_calls,['base','base'])
+        self.assertEqual(training_calls,['base','base','base'])
 
 
 if __name__=='__main__':unittest.main()

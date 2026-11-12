@@ -1,0 +1,58 @@
+METHOD: "unified_flow"
+SEED: 1
+
+DEVICE:
+  DEVICE_NAME: "cuda"
+  GPU_ID: "0;"
+
+DATALOADER:
+  TRAIN:
+    BATCH_SIZE_BASE: 64
+    BATCH_SIZE_INC: 64
+  TEST:
+    BATCH_SIZE: 100
+  NUM_WORKERS: 4
+
+
+MODEL:
+  BACKBONE:
+    NAME: "ViT-B/16"  #  RN50  RN101  ViT-B/32  ViT-B/16  ViT-L/14
+
+
+TRAINER:
+  BiMC:
+    PREC: "fp16"  # fp16, fp32, amp
+
+    PROTOTYPE_CACHE_DIR: ""  # e.g. output/bimc_prototypes; export training/support statistics
+
+    VISION_CALIBRATION: True
+    LAMBDA_I: 0.1
+    TAU: 16
+
+    TEXT_CALIBRATION: True
+    LAMBDA_T: 0.5
+
+
+# Starting values only; select hyperparameters using base validation data.
+FLOW:
+  EPOCHS: 100
+  BATCH_SIZE: 64
+  LR: 0.0002
+  WEIGHT_DECAY: 0.0001
+  WARMUP_RATIO: 0.05
+  MIN_LR_RATIO: 0.01
+  BLOCKS: 24
+  HIDDEN: 0  # 0 uses CLIP feature dimension
+  STEPS: 8
+  SOLVER: "euler"  # euler, midpoint, heun, rk4; inference only
+  OUTPUT_DIR: "output/unified_flow_image_text_clean_velocity_cycle"
+  ADAPT_STEPS: 0
+  ALPHA: 1.0  # full forward image-to-text integration
+  BETA_BASE: 0.1
+  BETA_INC: 0.5  # validation search: 0.3 to 0.6
+  GAMMA: 0.5  # validation search: 0.4 to 0.7
+  LOGIT_SCALE: 1.0  # multiplier before softmax; tune on validation data
+  PREDICTION: "velocity"  # endpoint predicts x1, then computes velocity loss
+  TIME_EPS: 0.05  # shared t in [0, 1-eps); reverse t=1 evaluates at 1-eps
+  CYCLE_WEIGHT: 0.1  # validation starting value for prototype cycle
+  CYCLE_STEPS: 8
