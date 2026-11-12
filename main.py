@@ -93,7 +93,7 @@ def extend_cfg(cfg):
     cfg.FLOW.ADAPT_BATCH_SIZE = 32
     cfg.FLOW.ADAPT_LR = 0.0001
     cfg.FLOW.SCORE_MODE = 'fused'
-    cfg.FLOW.SCORE_WEIGHTS = [1.0, 1.0, 1.0]
+    cfg.FLOW.SCORE_WEIGHTS = [1.0, 1.0, 0.0]
 
 
 

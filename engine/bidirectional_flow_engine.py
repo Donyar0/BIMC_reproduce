@@ -28,6 +28,8 @@ class BidirectionalFlowRunner(Runner):
                 or any(w < 0 for w in flow.SCORE_WEIGHTS)
                 or sum(flow.SCORE_WEIGHTS) <= 0):
             raise ValueError('FLOW.SCORE_WEIGHTS must be three nonnegative values')
+        if flow.SCORE_MODE == 'reverse_to_generated' and flow.SCORE_WEIGHTS[2] == 0:
+            raise ValueError('Enable the third score before selecting reverse_to_generated')
         if flow.STEPS < 1 or flow.CONTRAST_STEPS < 1:
             raise ValueError('Flow integration steps must be positive')
 
@@ -102,7 +104,11 @@ class BidirectionalFlowRunner(Runner):
         flow_model = load_model(checkpoint, self.device)
         device_bank = dict(bank, text=bank['text'].to(self.device),
                            generated=bank['generated'].to(self.device))
-        all_scores = {name:[] for name in (*SCORE_NAMES, 'fused')}
+        active_names = list(SCORE_NAMES[:2])
+        if self.cfg.FLOW.SCORE_WEIGHTS[2] > 0:
+            active_names.append(SCORE_NAMES[2])
+        active_names.append('fused')
+        all_scores = {name:[] for name in active_names}
         targets = []
         loader = self.data_manager.get_dataloader(task_id, source='test', mode='test')
         for batch in tqdm(loader):

@@ -85,6 +85,10 @@ class BidirectionalTests(unittest.TestCase):
         reverse=F.normalize(integrate(model,self.eye[:1],2,reverse=True),dim=-1)
         self.assertTrue(torch.allclose(scores['reverse_to_text'],
                                        reverse@adapted_bank['text'].T,atol=1e-6))
+        two=score_three(model,self.eye[:1],adapted_bank,steps=2,weights=(1,1,0))
+        self.assertNotIn('reverse_to_generated',two)
+        self.assertTrue(torch.allclose(two['fused'],
+            (two['query_to_generated']+two['reverse_to_text'])/2))
         with self.assertRaisesRegex(ValueError,'incremental'):
             adapt(checkpoint,self.cache,epochs=1,batch_size=2,lr=.01,
                   weight_decay=0,seed=1,device='cpu')
@@ -134,7 +138,7 @@ class BidirectionalTests(unittest.TestCase):
                             CONTRAST_WEIGHT=.1,CONTRAST_TEMPERATURE=.07,
                             CONTRAST_STEPS=2,ADAPT=adapt_enabled,ADAPT_EPOCHS=1,
                             ADAPT_BATCH_SIZE=2,ADAPT_LR=.01,SCORE_MODE='fused',
-                            SCORE_WEIGHTS=[1.,1.,1.]),dump=lambda:'fake: true\n')
+                            SCORE_WEIGHTS=[1.,1.,0.]),dump=lambda:'fake: true\n')
                 runner=RunnerType();runner.cfg=cfg;runner.model=Model();runner.device='cpu'
                 runner.is_distributed=False;runner.data_manager=Data();runner.evaluator=Eval()
                 runner.parse_batch=lambda batch:(batch['image'],batch['label'])
@@ -145,7 +149,9 @@ class BidirectionalTests(unittest.TestCase):
                 metrics=json.loads((run_dir/'metrics.json').read_text())
                 self.assertEqual(metrics['adapt'],adapt_enabled)
                 self.assertEqual(len(metrics['sessions']),2)
-                self.assertIn('reverse_to_generated_acc',metrics['sessions'][1])
+                self.assertIn('query_to_generated_acc',metrics['sessions'][1])
+                self.assertIn('reverse_to_text_acc',metrics['sessions'][1])
+                self.assertNotIn('reverse_to_generated_acc',metrics['sessions'][1])
                 bank=torch.load(run_dir/'bank_session1.pt',weights_only=True)
                 self.assertEqual(bank['class_ids'],[0,1,2,3])
                 self.assertEqual((run_dir/'flow_session1.pt').exists(),adapt_enabled)
@@ -163,7 +169,7 @@ class BidirectionalTests(unittest.TestCase):
                 str(ROOT/f'configs/trainers/bidirectional_flow_{mode}.yaml'))
             self.assertEqual(cfg.METHOD,'bidirectional_single_flow')
             self.assertEqual(cfg.FLOW.ADAPT,enabled)
-            self.assertEqual(cfg.FLOW.SCORE_WEIGHTS,[1.,1.,1.])
+            self.assertEqual(cfg.FLOW.SCORE_WEIGHTS,[1.,1.,0.])
             self.assertTrue(cfg.TRAINER.BiMC.TEXT_CALIBRATION)
 
 

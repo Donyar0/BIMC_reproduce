@@ -186,8 +186,10 @@ def score_three(model, image_features, bank, *, steps, weights=(1, 1, 1)):
         raise ValueError('Query and prototype bank dimensions differ')
     reverse_query = F.normalize(integrate(model, query, steps, reverse=True), dim=-1)
     scores = dict(query_to_generated=query @ generated.T,
-                  reverse_to_text=reverse_query @ text.T,
-                  reverse_to_generated=reverse_query @ generated.T)
+                  reverse_to_text=reverse_query @ text.T)
+    if weights[2] > 0:
+        scores['reverse_to_generated'] = reverse_query @ generated.T
     scale = float(sum(weights))
-    scores['fused'] = sum(float(w)*scores[name] for w,name in zip(weights,SCORE_NAMES))/scale
+    scores['fused'] = sum(float(w)*scores[name] for w,name in zip(weights,SCORE_NAMES)
+                          if w > 0)/scale
     return scores

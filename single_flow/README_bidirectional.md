@@ -30,17 +30,17 @@ L = mean(||v(x_t,t)-(V_c-T_c)||²)
 重算全部已见类的正向文本原型。两组实验分别保存独立运行结果，
 不能在运行中途切换 `ADAPT`。
 
-推理对每张测试图像特征 `q` 求逆向积分结果 `q'`，计算三路分数：
+推理对每张测试图像特征 `q` 求逆向积分结果 `q'`，默认计算两路分数：
 
 ```text
-query_to_generated    = cos(q,  T'_c)
-reverse_to_text       = cos(q', T_c)
-reverse_to_generated  = cos(q', T'_c)
+query_to_generated    = cos(q,  T'_c)  # 视觉分数
+reverse_to_text       = cos(q', T_c)   # 文本分数
 ```
 
-默认 `SCORE_MODE=fused`，按 `SCORE_WEIGHTS=[1,1,1]` 等权平均。
-运行会同时在 `metrics.csv/json` 写出每一路及融合后的各阶段准确率，
-便于不重新训练直接比较。查询图像不会参与训练或原型库构建。
+默认 `SCORE_MODE=fused`，按 `SCORE_WEIGHTS=[1,1,0]` 等权平均视觉与文本分数。
+第三路 `cos(q',T'_c)` 默认不计算，也不写入指标；如需旧三路实验可将
+第三个权重改为正值。运行会在 `metrics.csv/json` 写出两路及融合后的各阶段
+准确率。查询图像不会参与训练或原型库构建。
 
 在仓库根目录以 CUB200 为例：
 
