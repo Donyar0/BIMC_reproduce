@@ -85,15 +85,14 @@ def extend_cfg(cfg):
     cfg.FLOW.TEMPERATURE = 0.07
     cfg.FLOW.STEPS = 8
     cfg.FLOW.OUTPUT_DIR = 'output/single_flow'
-    cfg.FLOW.CONTRAST_WEIGHT = 0.1
-    cfg.FLOW.CONTRAST_TEMPERATURE = 0.07
-    cfg.FLOW.CONTRAST_STEPS = 4
+    cfg.FLOW.BIDIR_FM_WEIGHT = 0.1
+    cfg.FLOW.BIDIR_STEPS = 8
     cfg.FLOW.ADAPT = False
     cfg.FLOW.ADAPT_EPOCHS = 20
     cfg.FLOW.ADAPT_BATCH_SIZE = 32
     cfg.FLOW.ADAPT_LR = 0.0001
     cfg.FLOW.SCORE_MODE = 'fused'
-    cfg.FLOW.SCORE_WEIGHTS = [1.0, 1.0, 0.0]
+    cfg.FLOW.SCORE_WEIGHTS = [1.0, 1.0, 1.0]
 
 
 

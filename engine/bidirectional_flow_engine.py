@@ -30,7 +30,7 @@ class BidirectionalFlowRunner(Runner):
             raise ValueError('FLOW.SCORE_WEIGHTS must be three nonnegative values')
         if flow.SCORE_MODE == 'reverse_to_generated' and flow.SCORE_WEIGHTS[2] == 0:
             raise ValueError('Enable the third score before selecting reverse_to_generated')
-        if flow.STEPS < 1 or flow.CONTRAST_STEPS < 1:
+        if flow.STEPS < 1 or flow.BIDIR_STEPS < 1:
             raise ValueError('Flow integration steps must be positive')
 
     @torch.no_grad()
@@ -63,9 +63,8 @@ class BidirectionalFlowRunner(Runner):
                         cache, epochs=flow.EPOCHS, batch_size=flow.BATCH_SIZE,
                         lr=flow.LR, weight_decay=flow.WEIGHT_DECAY,
                         blocks=flow.BLOCKS, hidden=flow.HIDDEN or None,
-                        contrast_weight=flow.CONTRAST_WEIGHT,
-                        temperature=flow.CONTRAST_TEMPERATURE,
-                        contrast_steps=flow.CONTRAST_STEPS,
+                        bidir_fm_weight=flow.BIDIR_FM_WEIGHT,
+                        bidir_steps=flow.BIDIR_STEPS,
                         seed=cfg.SEED, device=self.device)
                 torch.save(checkpoint, output/'base_flow.pt')
             elif flow.ADAPT:
@@ -104,12 +103,14 @@ class BidirectionalFlowRunner(Runner):
         run_dir = Path(run_dir)
         with (run_dir/'config.yaml').open(encoding='utf-8') as handle:
             original = CfgNode.load_cfg(handle)
+        if not hasattr(original.FLOW,'BIDIR_FM_WEIGHT'):
+            raise ValueError('Saved run uses the previous contrastive objective; retrain the Flow')
         for name in ('METHOD','SEED','DATASET','MODEL','DATALOADER','DEVICE','TRAINER'):
             if getattr(original,name) != getattr(cfg,name):
                 raise ValueError(f'Saved run {name} differs from evaluation config')
         for name in ('EPOCHS','BATCH_SIZE','LR','WEIGHT_DECAY','BLOCKS','HIDDEN',
-                     'STEPS','CONTRAST_WEIGHT','CONTRAST_TEMPERATURE',
-                     'CONTRAST_STEPS','ADAPT','ADAPT_EPOCHS','ADAPT_BATCH_SIZE','ADAPT_LR'):
+                     'STEPS','BIDIR_FM_WEIGHT','BIDIR_STEPS',
+                     'ADAPT','ADAPT_EPOCHS','ADAPT_BATCH_SIZE','ADAPT_LR'):
             if getattr(original.FLOW,name) != getattr(cfg.FLOW,name):
                 raise ValueError(f'Saved run FLOW.{name} differs from evaluation config')
         output = Path(cfg.FLOW.OUTPUT_DIR)/cfg.DATASET.NAME.lower()/(
@@ -131,6 +132,7 @@ class BidirectionalFlowRunner(Runner):
             expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1]
                         for c in group]
             if (checkpoint.get('method') != 'bidirectional_single_flow' or
+                    checkpoint.get('objective') != 'updated_pair_velocity_v2' or
                     bank['encoder_id'] != checkpoint['encoder_id'] or
                     bank['class_ids'] != expected):
                 raise ValueError('Saved Flow checkpoint and bank do not match the dataset')

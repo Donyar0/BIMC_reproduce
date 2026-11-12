@@ -1,4 +1,4 @@
-"""One velocity field with text-to-visual FM and bidirectional prototype contrast."""
+"""One velocity field with original and updated-pair text-to-visual FM."""
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
@@ -8,6 +8,7 @@ from .s1_flow import text_cache, unit
 
 
 METHOD = 'bidirectional_single_flow'
+OBJECTIVE = 'updated_pair_velocity_v2'
 SCORE_NAMES = ('query_to_generated', 'reverse_to_text', 'reverse_to_generated')
 
 
@@ -39,24 +40,22 @@ def integrate(model, features, steps, reverse=False):
     return x
 
 
-def prototype_contrast(model, text, visual, steps, temperature):
-    """Match same-class forward text and backward observed visual endpoints."""
-    if text.shape != visual.shape or text.ndim != 2 or temperature <= 0:
-        raise ValueError('Invalid bidirectional contrast prototypes or temperature')
-    if len(text) < 2:
-        return text.new_zeros(())
-    forward = F.normalize(integrate(model, text, steps), dim=-1)
-    backward = F.normalize(integrate(model, visual, steps, reverse=True), dim=-1)
-    similarities = forward @ backward.T / temperature
-    labels = torch.arange(len(text), device=text.device)
-    return (F.cross_entropy(similarities, labels) +
-            F.cross_entropy(similarities.T, labels)) / 2
+def updated_pair_fm(model, text, visual, steps):
+    """FM from reverse-updated visual (text side) to forward-updated text (visual side)."""
+    if text.shape != visual.shape or text.ndim != 2:
+        raise ValueError('Updated-pair FM requires matching class prototypes')
+    updated_text = F.normalize(integrate(model, text, steps), dim=-1)
+    updated_visual = F.normalize(integrate(model, visual, steps, reverse=True), dim=-1)
+    t = torch.rand(len(text), 1, device=text.device)
+    xt = (1-t)*updated_visual + t*updated_text
+    target_velocity = updated_text - updated_visual
+    return (model(xt, t)-target_velocity).square().sum(-1).mean()
 
 
 def _train(cache, model, *, epochs, batch_size, lr, weight_decay,
-           contrast_weight, temperature, contrast_steps, seed, device):
+           bidir_fm_weight, bidir_steps, seed, device):
     if (epochs < 1 or batch_size < 1 or lr <= 0 or weight_decay < 0 or
-            contrast_weight < 0 or temperature <= 0 or contrast_steps < 1):
+            bidir_fm_weight < 0 or bidir_steps < 1):
         raise ValueError('Invalid bidirectional Flow training settings')
     ids, text, visual = real_visual_means(cache)
     loader = DataLoader(TensorDataset(text, visual), batch_size=batch_size,
@@ -67,16 +66,15 @@ def _train(cache, model, *, epochs, batch_size, lr, weight_decay,
         optimizer, T_max=epochs, eta_min=lr*0.01)
     history = []
     for epoch in range(epochs):
-        total_sum = fm_sum = contrast_sum = 0.0
+        total_sum = fm_sum = bidir_sum = 0.0
         count = 0
         for source, target in loader:
             source, target = source.to(device), target.to(device)
             t = torch.rand(len(source), 1, device=device)
             xt = (1-t)*source + t*target
             fm = (model(xt, t) - (target-source)).square().sum(-1).mean()
-            contrast = prototype_contrast(model, source, target,
-                                          contrast_steps, temperature)
-            loss = fm + contrast_weight*contrast
+            bidir_fm = updated_pair_fm(model, source, target, bidir_steps)
+            loss = fm + bidir_fm_weight*bidir_fm
             if not torch.isfinite(loss):
                 raise RuntimeError('Nonfinite bidirectional Flow loss')
             optimizer.zero_grad(set_to_none=True)
@@ -85,20 +83,20 @@ def _train(cache, model, *, epochs, batch_size, lr, weight_decay,
             n = len(source)
             total_sum += loss.item()*n
             fm_sum += fm.item()*n
-            contrast_sum += contrast.item()*n
+            bidir_sum += bidir_fm.item()*n
             count += n
         used_lr = optimizer.param_groups[0]['lr']
         scheduler.step()
         history.append(dict(total=total_sum/count, fm=fm_sum/count,
-                            contrast=contrast_sum/count, lr=used_lr))
+                            bidir_fm=bidir_sum/count, lr=used_lr))
         print(f'epoch={epoch+1} fm={history[-1]["fm"]:.6f} '
-              f'contrast={history[-1]["contrast"]:.6f} '
+              f'bidir_fm={history[-1]["bidir_fm"]:.6f} '
               f'total={history[-1]["total"]:.6f}', flush=True)
     return history
 
 
 def fit_base(cache, *, epochs, batch_size, lr, weight_decay, blocks, hidden,
-             contrast_weight, temperature, contrast_steps, seed, device):
+             bidir_fm_weight, bidir_steps, seed, device):
     if cache['stage'] != 'base' or cache['split'] != 'train':
         raise ValueError('Base Flow requires base training statistics')
     if blocks < 1:
@@ -113,19 +111,20 @@ def fit_base(cache, *, epochs, batch_size, lr, weight_decay, blocks, hidden,
     model = DeepFlowMatchingNet(**architecture).to(device)
     history = _train(cache, model, epochs=epochs, batch_size=batch_size,
                      lr=lr, weight_decay=weight_decay,
-                     contrast_weight=contrast_weight, temperature=temperature,
-                     contrast_steps=contrast_steps, seed=seed, device=device)
-    return dict(format_version=1, method=METHOD, architecture=architecture,
+                     bidir_fm_weight=bidir_fm_weight,
+                     bidir_steps=bidir_steps, seed=seed, device=device)
+    return dict(format_version=2, method=METHOD, objective=OBJECTIVE,
+                architecture=architecture,
                 encoder_id=cache['encoder_id'], base_class_ids=ids,
                 state_dict={k:v.detach().cpu().clone() for k,v in model.state_dict().items()},
-                training=dict(contrast_weight=contrast_weight, temperature=temperature,
-                              contrast_steps=contrast_steps),
+                training=dict(bidir_fm_weight=bidir_fm_weight,
+                              bidir_steps=bidir_steps),
                 loss_history=history, adaptation_history=[])
 
 
 def load_model(checkpoint, device, train=False):
-    if checkpoint.get('method') != METHOD:
-        raise ValueError('Not a bidirectional single Flow checkpoint')
+    if checkpoint.get('method') != METHOD or checkpoint.get('objective') != OBJECTIVE:
+        raise ValueError('Checkpoint is not an updated-pair velocity Flow; retrain it')
     model = DeepFlowMatchingNet(**checkpoint['architecture']).to(device)
     model.load_state_dict(checkpoint['state_dict'])
     return model.train() if train else model.eval().requires_grad_(False)
@@ -140,9 +139,8 @@ def adapt(checkpoint, cache, *, epochs, batch_size, lr, weight_decay, seed, devi
     model = load_model(checkpoint, device, train=True)
     history = _train(cache, model, epochs=epochs, batch_size=batch_size,
                      lr=lr, weight_decay=weight_decay,
-                     contrast_weight=settings['contrast_weight'],
-                     temperature=settings['temperature'],
-                     contrast_steps=settings['contrast_steps'], seed=seed, device=device)
+                     bidir_fm_weight=settings['bidir_fm_weight'],
+                     bidir_steps=settings['bidir_steps'], seed=seed, device=device)
     updated = dict(checkpoint)
     updated['state_dict'] = {k:v.detach().cpu().clone() for k,v in model.state_dict().items()}
     updated['adaptation_history'] = checkpoint['adaptation_history'] + [dict(

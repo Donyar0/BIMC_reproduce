@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 from single_flow.bimc_cache import from_task_statistics
 from single_flow.bidirectional_flow import (
-    SCORE_NAMES, integrate, prototype_contrast, fit_base, adapt,
+    SCORE_NAMES, integrate, updated_pair_fm, fit_base, adapt,
     build_bank, load_model, score_three,
 )
 
@@ -42,7 +42,7 @@ class BidirectionalTests(unittest.TestCase):
                           image_features=self.eye[:2].roll(1,1),
                           image_labels=torch.tensor([0,1]))
 
-    def test_reverse_integral_and_contrastive_pairs(self):
+    def test_reverse_integral_and_updated_pair_velocity_loss(self):
         class Constant(torch.nn.Module):
             def forward(self,x,t):
                 return torch.tensor([[.2, .1, 0., 0.]],device=x.device).expand_as(x)
@@ -50,17 +50,25 @@ class BidirectionalTests(unittest.TestCase):
         source=self.eye[:2]
         target=integrate(model,source,steps=4)
         self.assertTrue(torch.allclose(integrate(model,target,4,reverse=True),source,atol=1e-6))
-        matching=prototype_contrast(model,source,source,4,.07)
-        mismatched=prototype_contrast(model,source,source.flip(0),4,.07)
+        with patch('torch.rand',return_value=torch.full((2,1),.25)):
+            measured=updated_pair_fm(model,source,source,4)
+        forward=F.normalize(integrate(model,source,4),dim=-1)
+        backward=F.normalize(integrate(model,source,4,reverse=True),dim=-1)
+        xt=.75*backward+.25*forward
+        expected=(model(xt,torch.full((2,1),.25))-(forward-backward)).square().sum(-1).mean()
+        self.assertTrue(torch.allclose(measured,expected))
+        matching=updated_pair_fm(model,source,source,4)
+        mismatched=updated_pair_fm(model,source,source.flip(0),4)
         self.assertLess(matching,mismatched)
 
     def test_base_incremental_bank_and_three_scores(self):
         with contextlib.redirect_stdout(io.StringIO()):
             checkpoint=fit_base(self.cache,epochs=2,batch_size=2,lr=.01,
-                weight_decay=0,blocks=1,hidden=8,contrast_weight=.2,
-                temperature=.07,contrast_steps=2,seed=3,device='cpu')
+                weight_decay=0,blocks=1,hidden=8,bidir_fm_weight=.2,
+                bidir_steps=2,seed=3,device='cpu')
         self.assertEqual(len(checkpoint['loss_history']),2)
-        self.assertTrue(all(np.isfinite(row['contrast']) for row in checkpoint['loss_history']))
+        self.assertEqual(checkpoint['objective'],'updated_pair_velocity_v2')
+        self.assertTrue(all(np.isfinite(row['bidir_fm']) for row in checkpoint['loss_history']))
         first=build_bank(checkpoint,self.cache,steps=2,device='cpu')
         novel=dict(self.cache,stage='incremental',class_ids=[2,3],
                    text_prototypes=self.eye[2:],
@@ -138,10 +146,10 @@ class BidirectionalTests(unittest.TestCase):
                                         VISION_CALIBRATION=False)),
                     FLOW=NS(OUTPUT_DIR=temp,EPOCHS=1,BATCH_SIZE=2,LR=.01,
                             WEIGHT_DECAY=0.,BLOCKS=1,HIDDEN=8,STEPS=2,
-                            CONTRAST_WEIGHT=.1,CONTRAST_TEMPERATURE=.07,
-                            CONTRAST_STEPS=2,ADAPT=adapt_enabled,ADAPT_EPOCHS=1,
+                            BIDIR_FM_WEIGHT=.1,BIDIR_STEPS=2,
+                            ADAPT=adapt_enabled,ADAPT_EPOCHS=1,
                             ADAPT_BATCH_SIZE=2,ADAPT_LR=.01,SCORE_MODE='fused',
-                            SCORE_WEIGHTS=[1.,1.,0.]),dump=lambda:'fake: true\n')
+                            SCORE_WEIGHTS=[1.,1.,1.]),dump=lambda:'fake: true\n')
                 runner=RunnerType();runner.cfg=cfg;runner.model=Model();runner.device='cpu'
                 runner.is_distributed=False;runner.data_manager=Data();runner.evaluator=Eval()
                 runner.parse_batch=lambda batch:(batch['image'],batch['label'])
@@ -155,7 +163,7 @@ class BidirectionalTests(unittest.TestCase):
                 self.assertEqual(len(metrics['sessions']),2)
                 self.assertIn('query_to_generated_acc',metrics['sessions'][1])
                 self.assertIn('reverse_to_text_acc',metrics['sessions'][1])
-                self.assertNotIn('reverse_to_generated_acc',metrics['sessions'][1])
+                self.assertIn('reverse_to_generated_acc',metrics['sessions'][1])
                 bank=torch.load(run_dir/'bank_session1.pt',weights_only=True)
                 self.assertEqual(bank['class_ids'],[0,1,2,3])
                 self.assertEqual((run_dir/'flow_session1.pt').exists(),adapt_enabled)
@@ -178,7 +186,7 @@ class BidirectionalTests(unittest.TestCase):
                 str(ROOT/f'configs/trainers/bidirectional_flow_{mode}.yaml'))
             self.assertEqual(cfg.METHOD,'bidirectional_single_flow')
             self.assertEqual(cfg.FLOW.ADAPT,enabled)
-            self.assertEqual(cfg.FLOW.SCORE_WEIGHTS,[1.,1.,0.])
+            self.assertEqual(cfg.FLOW.SCORE_WEIGHTS,[1.,1.,1.])
             self.assertTrue(cfg.TRAINER.BiMC.TEXT_CALIBRATION)
 
 

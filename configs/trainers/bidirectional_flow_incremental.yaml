@@ -47,13 +47,12 @@ FLOW:
   BLOCKS: 24
   HIDDEN: 0  # 0 uses CLIP feature dimension
   STEPS: 8
-  CONTRAST_WEIGHT: 0.1
-  CONTRAST_TEMPERATURE: 0.07
-  CONTRAST_STEPS: 4
+  BIDIR_FM_WEIGHT: 0.1
+  BIDIR_STEPS: 8
   ADAPT: True
   ADAPT_EPOCHS: 20
   ADAPT_BATCH_SIZE: 32
   ADAPT_LR: 0.0001
   SCORE_MODE: "fused"
-  SCORE_WEIGHTS: [1.0, 1.0, 0.0] # visual + text; skip updated-query vs updated-text
-  OUTPUT_DIR: "output/bidirectional_flow_incremental"
+  SCORE_WEIGHTS: [1.0, 1.0, 1.0]
+  OUTPUT_DIR: "output/bidirectional_velocity_incremental"
