@@ -1,7 +1,6 @@
-"""Numerical, augmentation and two-session integration tests without real CLIP."""
+"""Numerical and two-session clean-feature integration tests without real CLIP."""
 import ast
 import contextlib
-import copy
 import csv
 import io
 import json
@@ -15,9 +14,6 @@ from unittest.mock import patch
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
-from torch.utils.data import DataLoader, Dataset
-from datasets.flow_augmentation import GaussianNoise, build_flow_transform
 from single_flow.bimc_cache import from_task_statistics
 from single_flow.unified_flow import real_means
 from single_flow.image_text_flow import (fit, load_model, velocity_from_output, transport,
@@ -100,28 +96,16 @@ class NumericalTests(unittest.TestCase):
         a,b=torch.eye(3)[:2],torch.eye(3)[1:]
         self.assertTrue(torch.equal(model.fused_text_prototype(a,b),.5*(a+b)))
 
-    def test_pixel_augmentation_is_random_finite_and_noise_clamped(self):
-        cfg=config().FLOW.AUGMENT
-        image=Image.fromarray(np.random.default_rng(1).integers(0,256,(64,64,3),dtype=np.uint8))
-        transform=build_flow_transform(cfg)
-        first,second=transform(image),transform(image)
-        self.assertEqual(first.shape,(3,224,224))
-        self.assertTrue(torch.isfinite(first).all())
-        self.assertFalse(torch.equal(first,second))
-        noisy=GaussianNoise(.5,1)(torch.full((3,32,32),.5))
-        self.assertTrue(((noisy>=0)&(noisy<=1)).all())
-        self.assertFalse(torch.equal(noisy,torch.full_like(noisy,.5)))
-
-    def test_modes_train_base_only_freeze_encoder_and_stay_finite(self):
+    def test_modes_train_base_only_on_clean_features_and_stay_finite(self):
         text=F.normalize(torch.tensor([[1.,1.,0.,0.],[0.,0.,1.,1.]]),dim=-1)
-        cache=dict(stage='base',split='train',encoder_id='test',class_ids=[0,1],text_prototypes=text)
+        cache=dict(stage='base',split='train',encoder_id='test',class_ids=[0,1],
+                   text_prototypes=text,image_features=torch.eye(4)[:2],
+                   image_labels=torch.tensor([0,1]))
         for mode in ('velocity','endpoint'):
-            encoder=torch.nn.Linear(4,4)
-            batches=[dict(image=torch.eye(4)[:2],label=torch.tensor([0,1]))]
             with torch.enable_grad():
-                ckpt=fit(cache,batches,encoder,epochs=2,lr=.001,weight_decay=0,blocks=1,
+                ckpt=fit(cache,epochs=2,batch_size=2,lr=.001,weight_decay=0,blocks=1,
                     hidden=8,prediction=mode,time_eps=.05,seed=7,device='cpu')
-            self.assertTrue(all(p.grad is None for p in encoder.parameters()))
+            self.assertEqual(ckpt['training']['input_features'],'clean_base_images')
             self.assertTrue(torch.isfinite(torch.tensor(ckpt['loss_history'])).all())
             field=load_model(ckpt,'cpu').eval()
             self.assertTrue(torch.isfinite(field(torch.eye(4)[:2],torch.ones(2,1))).all())
@@ -130,7 +114,7 @@ class NumericalTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(bank['prototypes']).all())
             invalid=dict(cache,stage='incremental')
             with self.assertRaisesRegex(ValueError,'base training'):
-                fit(invalid,batches,encoder,epochs=1,lr=.001,weight_decay=0,blocks=1,
+                fit(invalid,epochs=1,batch_size=2,lr=.001,weight_decay=0,blocks=1,
                     hidden=8,prediction=mode,time_eps=.05,seed=7,device='cpu')
         with self.assertRaisesRegex(ValueError,'Incompatible'):
             load_model(dict(ckpt,flow_direction='text_to_image'),'cpu')
@@ -145,12 +129,14 @@ class RunnerTests(unittest.TestCase):
             run_dir=Path(temp)
             commands=[]
             cfg=CfgNode({'DATASET':{'NAME':'synthetic'},'FLOW':{
-                'PREDICTION':'velocity','SOLVER':'euler','OUTPUT_DIR':'unused','STEPS':4}})
+                'PREDICTION':'velocity','SOLVER':'euler','OUTPUT_DIR':'unused',
+                'STEPS':4,'AUGMENT':{'ROTATION':15.}}})
             (run_dir/'config.yaml').write_text(cfg.dump())
             def fake_run(command, **kwargs):
                 commands.append(command)
                 with open(command[command.index('--train_cfg')+1]) as handle:
                     selected=CfgNode.load_cfg(handle)
+                self.assertNotIn('AUGMENT', selected.FLOW)
                 target=Path(selected.FLOW.OUTPUT_DIR)/'synthetic'/'eval_fake'
                 target.mkdir(parents=True)
                 (target/'metrics.json').write_text(json.dumps({
@@ -187,23 +173,18 @@ class RunnerTests(unittest.TestCase):
         torch.set_num_threads(1)
         eye=torch.eye(4)
         training_calls=[]
-        def checked_fit(cache,loader,encoder,**kwargs):
+        def checked_fit(cache,**kwargs):
             training_calls.append(cache['stage'])
+            self.assertTrue(torch.equal(cache['image_features'],eye[:2]))
             self.assertTrue(torch.is_grad_enabled())
-            return fit(cache,loader,encoder,**kwargs)
-        ns=dict(Runner=object,torch=torch,np=np,copy=copy,Path=Path,datetime=datetime,time=time,
-            csv=csv,json=json,DataLoader=DataLoader,build_flow_transform=build_flow_transform,
+            return fit(cache,**kwargs)
+        ns=dict(Runner=object,torch=torch,np=np,Path=Path,datetime=datetime,time=time,
+            csv=csv,json=json,
             tqdm=lambda x:x,from_task_statistics=from_task_statistics,fit=checked_fit,
             build_bank=build_bank,real_means=real_means,load_model=load_model,
             classify_bidirectional=classify_bidirectional,METHOD=METHOD,DIRECTION=DIRECTION,
             log_metrics=lambda *a,**kw:None)
         load_nodes(ROOT/'engine/unified_flow_engine.py',lambda n:isinstance(n,ast.ClassDef),ns)
-        class TinyDataset(Dataset):
-            def __init__(self,ids): self.ids=ids; self.transform=lambda x:torch.zeros(3,224,224)
-            def __len__(self): return len(self.ids)
-            def __getitem__(self,idx):
-                label=int(self.ids[idx]); pixels=np.full((32,32,3),50+label*30,dtype=np.uint8)
-                return dict(image=self.transform(Image.fromarray(pixels)),label=label)
         class Model(torch.nn.Module):
             def build_task_statistics(self,names,loader,class_index,**kw):
                 ids=torch.as_tensor(class_index)
@@ -216,7 +197,9 @@ class RunnerTests(unittest.TestCase):
             class_index_in_task=[np.array([0,1]),np.array([2])]
             class_names=['a','b','c']; num_tasks=2
             def get_dataloader(self,task_id,source,**kw):
-                if source=='train': return DataLoader(TinyDataset(self.class_index_in_task[task_id]),batch_size=2)
+                if source=='train':
+                    ids=torch.as_tensor(self.class_index_in_task[task_id])
+                    return [dict(image=eye[ids],label=ids)]
                 ids=torch.arange(2 if task_id==0 else 3)
                 return [dict(image=eye[ids],label=ids)]
         class Evaluator:

@@ -1,5 +1,4 @@
 """Base-only Flow training with BIMC's dataset splits and accuracy evaluator."""
-import copy
 import csv
 import json
 import time
@@ -14,8 +13,6 @@ from engine.engine import Runner
 from single_flow.bimc_cache import from_task_statistics
 from single_flow.image_text_flow import fit, build_bank, classify_bidirectional, load_model, METHOD, DIRECTION
 from single_flow.unified_flow import real_means
-from datasets.flow_augmentation import build_flow_transform
-from torch.utils.data import DataLoader
 from utils.experiment_logger import log_metrics
 
 
@@ -68,18 +65,12 @@ class UnifiedFlowRunner(Runner):
                 # Isolate torch RNG so training does not alter subsequent data loading.
                 devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
                 with torch.random.fork_rng(devices=devices), torch.enable_grad():
-                    dataset = copy.copy(loader.dataset)
-                    dataset.transform = build_flow_transform(flow.AUGMENT)
-                    augmented_loader = DataLoader(dataset, batch_size=flow.BATCH_SIZE,
-                        shuffle=True, num_workers=cfg.DATALOADER.NUM_WORKERS,
-                        pin_memory=True, generator=torch.Generator().manual_seed(cfg.SEED))
                     checkpoint = fit(
-                        cache, augmented_loader, model.extract_img_feature,
-                        epochs=flow.EPOCHS, lr=flow.LR, weight_decay=flow.WEIGHT_DECAY,
+                        cache, epochs=flow.EPOCHS, batch_size=flow.BATCH_SIZE,
+                        lr=flow.LR, weight_decay=flow.WEIGHT_DECAY,
                         blocks=flow.BLOCKS, hidden=flow.HIDDEN or None,
                         prediction=flow.PREDICTION, time_eps=flow.TIME_EPS,
                         seed=cfg.SEED, device=self.device)
-                    del augmented_loader, dataset
                 torch.save(checkpoint, output / 'base_flow.pt')
 
             current = dict(class_ids=cache['class_ids'], text=cache['text_prototypes'].float(),

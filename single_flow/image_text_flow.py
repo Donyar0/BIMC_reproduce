@@ -1,6 +1,7 @@
-"""Base-only, augmented image -> original BiMC text Flow Matching."""
+"""Base-only clean image features -> original BiMC text Flow Matching."""
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
 from .fm import DeepFlowMatchingNet
 from .s1_flow import unit, text_cache
 
@@ -36,11 +37,11 @@ def load_model(checkpoint, device):
     return VelocityField(network, checkpoint['prediction'], checkpoint['time_eps'])
 
 
-def fit(cache, loader, encode_images, *, epochs, lr, weight_decay, blocks, hidden,
+def fit(cache, *, epochs, batch_size, lr, weight_decay, blocks, hidden,
         prediction, time_eps, seed, device):
     if cache.get('stage') != 'base' or cache.get('split') != 'train':
         raise ValueError('Flow training accepts base training images only')
-    if epochs < 1 or blocks < 1 or lr <= 0 or weight_decay < 0:
+    if epochs < 1 or batch_size < 1 or blocks < 1 or lr <= 0 or weight_decay < 0:
         raise ValueError('Invalid Flow training parameters')
     if prediction not in ('velocity', 'endpoint') or not 0 < time_eps < 0.5:
         raise ValueError('Invalid prediction parameterization/time epsilon')
@@ -49,6 +50,13 @@ def fit(cache, loader, encode_images, *, epochs, lr, weight_decay, blocks, hidde
     if ids != list(range(len(ids))):
         raise ValueError('Base class IDs must be contiguous and zero-based')
     text = text.to(device)
+    images = unit(cache['image_features']).cpu()
+    labels = cache['image_labels'].long().cpu()
+    if (labels.ndim != 1 or len(labels) != len(images) or
+            images.shape[1] != text.shape[1] or set(labels.tolist()) != set(ids)):
+        raise ValueError('Clean base image features must cover exactly the base classes')
+    loader = DataLoader(TensorDataset(images, labels), batch_size=batch_size,
+                        shuffle=True, generator=torch.Generator().manual_seed(seed))
     dim = text.shape[1]
     arch = dict(in_channels=dim, model_channels=hidden or dim,
                 out_channels=dim, num_res_blocks=blocks)
@@ -57,14 +65,9 @@ def fit(cache, loader, encode_images, *, epochs, lr, weight_decay, blocks, hidde
     history = []
     for epoch in range(epochs):
         total, count = 0., 0
-        # Pixel transforms are sampled again whenever the loader is iterated.
-        for batch in loader:
-            with torch.no_grad():
-                x0 = unit(encode_images(batch['image'].to(device))).to(device)
-                labels = batch['label'].to(device=device, dtype=torch.long)
-                if labels.ndim != 1 or len(labels) != len(x0) or not ((labels >= 0) & (labels < len(ids))).all():
-                    raise ValueError('Only base training labels may enter Flow optimization')
-                x1 = text[labels]
+        for x0, batch_labels in loader:
+            x0 = x0.to(device)
+            x1 = text[batch_labels.to(device)]
             t = torch.rand(len(x0), 1, device=device) * (1-time_eps)
             xt = (1-t)*x0 + t*x1
             pred_v = velocity_from_output(network(xt, t), xt, t, prediction, time_eps)
@@ -80,13 +83,15 @@ def fit(cache, loader, encode_images, *, epochs, lr, weight_decay, blocks, hidde
             raise ValueError('Empty base training loader')
         history.append(total/count)
         print(f'epoch={epoch+1} prediction={prediction} fm_loss={history[-1]:.6f}', flush=True)
-    return dict(format_version=3, architecture=arch,
+    return dict(format_version=4, architecture=arch,
                 state_dict={k:v.detach().cpu().clone() for k,v in network.state_dict().items()},
                 encoder_id=cache['encoder_id'], base_class_ids=ids,
                 flow_direction=DIRECTION, text_prototype_method=METHOD,
                 prediction=prediction, time_eps=time_eps,
-                training=dict(epochs=epochs, lr=lr, weight_decay=weight_decay, seed=seed,
-                              base_only=True, online_pixel_augmentation=True), loss_history=history)
+                training=dict(epochs=epochs, batch_size=batch_size, lr=lr,
+                              weight_decay=weight_decay, seed=seed,
+                              base_only=True, input_features='clean_base_images'),
+                loss_history=history)
 
 
 @torch.no_grad()

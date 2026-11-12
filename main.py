@@ -92,11 +92,6 @@ def extend_cfg(cfg):
     cfg.FLOW.LOGIT_SCALE = 1.0
     cfg.FLOW.PREDICTION = 'velocity'
     cfg.FLOW.TIME_EPS = 0.05
-    cfg.FLOW.AUGMENT = CN()
-    cfg.FLOW.AUGMENT.ROTATION = 15.0
-    cfg.FLOW.AUGMENT.ERASE_P = 0.5
-    cfg.FLOW.AUGMENT.NOISE_P = 0.5
-    cfg.FLOW.AUGMENT.NOISE_STD = 0.03
 
 
 

@@ -30,6 +30,10 @@ def main():
     for solver in args.solvers:
         cfg = original.clone()
         cfg.defrost()
+        # Older checkpoints may have saved augmentation settings that the
+        # clean-feature runner no longer accepts. They are irrelevant to eval.
+        if 'AUGMENT' in cfg.FLOW:
+            cfg.FLOW.pop('AUGMENT')
         cfg.FLOW.SOLVER = solver
         cfg.FLOW.OUTPUT_DIR = str(output / solver)
         cfg.freeze()

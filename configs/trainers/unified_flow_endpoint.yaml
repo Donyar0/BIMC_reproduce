@@ -43,7 +43,7 @@ FLOW:
   HIDDEN: 0  # 0 uses CLIP feature dimension
   STEPS: 8
   SOLVER: "euler"  # euler, midpoint, heun, rk4; inference only
-  OUTPUT_DIR: "output/unified_flow_image_text_endpoint"
+  OUTPUT_DIR: "output/unified_flow_image_text_clean_endpoint"
   ADAPT_STEPS: 0
   ALPHA: 1.0  # full forward image-to-text integration
   BETA_BASE: 0.1
@@ -52,8 +52,3 @@ FLOW:
   LOGIT_SCALE: 1.0  # multiplier before softmax; tune on validation data
   PREDICTION: "endpoint"  # endpoint predicts x1, then computes velocity loss
   TIME_EPS: 0.05  # shared t in [0, 1-eps); reverse t=1 evaluates at 1-eps
-  AUGMENT:
-    ROTATION: 15.0
-    ERASE_P: 0.5
-    NOISE_P: 0.5
-    NOISE_STD: 0.03

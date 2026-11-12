@@ -129,13 +129,13 @@ python -m unittest discover -s single_flow -v
 8项测试覆盖三个数据集配置、两阶段完整合成流程、全部已见类别竞争，以及：原型直接输入、导出行序、增量拒绝训练、旧 bank 保留、
 非连续标签、sample 路径，以及共用文本融合公式。未运行真实数据集或 GPU 训练。
 
-## 双向 Flow：增强图像 → 原始 BiMC 融合文本
+## 双向 Flow：正常图像特征 → 原始 BiMC 融合文本
 
-当前 `unified_flow` 的起点为增强图像经冻结 CLIP 提取并归一化的特征，
+当前 `unified_flow` 的起点为基类训练图像经固定测试预处理、冻结 CLIP 提取并归一化的特征，
 终点为原始 BiMC 文本原型：
 
 ```text
-x0 = normalize(CLIP_image(augment(image)))
+x0 = normalize(CLIP_image(clean_preprocess(image)))
 x1 = normalize((1-LAMBDA_T)*prompt_proto + LAMBDA_T*description_proto)
 xt = (1-t)*x0 + t*x1
 v_target = x1-x0
@@ -144,11 +144,10 @@ v_target = x1-x0
 不使用 calibText Linear Adapter；`TEXT_CALIBRATION: True`、`LAMBDA_T: 0.5`
 恢复原始 Prompt/Description 融合。CLIP 全程冻结。
 
-只有基础阶段进行 Flow 训练。旋转（默认 ±15°）、水平翻转、随机遮挡
-（默认概率 0.5、面积 2%–20%）和高斯噪声（概率 0.5、标准差 0.03）
-在像素空间进行，再归一化为 CLIP 输入；每轮重新随机生成，不缓存固定增强视图。
-支持集的真实原型与测试图像仍使用干净的测试变换。
-基础训练沿用该阶段已经选择的图像子集，增强不会重新抽取支持样本。
+只有基础阶段进行 Flow 训练。训练图像使用与原型统计相同的固定预处理
+（Resize、CenterCrop、Normalize）；CLIP 特征提取一次后缓存在内存中。
+训练每轮随机抽取已缓存的正常图像特征，不进行旋转、遮挡、加噪声、
+随机裁剪或随机翻转。基础阶段仍使用原本选定的训练图像集合。
 
 增量阶段仅提取当前支持集统计、追加类别 Bank 和评估，**不微调 Flow**，
 不回放旧样本，不训练文本 Adapter。所有 `flow_session*.pt` 的网络参数相同。
@@ -162,7 +161,7 @@ v_target = x1-x0
 | `configs/trainers/unified_flow_endpoint.yaml` | `x1_hat` | `(x1_hat-xt)/(1-t)` | 相同速度损失 |
 
 终点预测模式不对网络输出归一化，也不额外加终点 MSE。
-两组使用相同种子、网络、增强、优化器和时间分布；只改变输出参数化及结果目录。
+两组使用相同种子、网络、正常图像特征、优化器和时间分布；只改变输出参数化及结果目录。
 为避免 `t=1` 的除零，两组训练均采样 `t∈[0,1-TIME_EPS)`（默认 `TIME_EPS=0.05`）。
 推理在同一速度场接口中将时间上限限制为 `1-TIME_EPS`。
 终点预测的速度损失等价于按 `1/(1-t)^2` 加权的终点误差，这个权重是换算公式的结果。
@@ -204,8 +203,8 @@ python -u main.py --data_cfg configs/datasets/cifar100.yaml \
   --train_cfg configs/trainers/unified_flow_endpoint.yaml --use_swanlab
 ```
 
-两组结果分别写入 `output/unified_flow_image_text_velocity/` 和
-`output/unified_flow_image_text_endpoint/`；每个目录按数据集、种子和时间区分运行。
+两组结果分别写入 `output/unified_flow_image_text_clean_velocity/` 和
+`output/unified_flow_image_text_clean_endpoint/`；每个目录按数据集、种子和时间区分运行。
 保存 `config.yaml`、`base_flow.pt`、每阶段的 Flow/Bank、`metrics.csv` 和 `metrics.json`。
 SwanLab 记录完整配置、Git 提交信息和阶段准确率。
 
@@ -214,7 +213,7 @@ SwanLab 记录完整配置、Git 提交信息和阶段准确率。
 ```bash
 python main.py --data_cfg configs/datasets/cifar100.yaml \
   --train_cfg configs/trainers/unified_flow.yaml \
-  --eval_run output/unified_flow_image_text_velocity/cifar100/原训练目录
+  --eval_run output/unified_flow_image_text_clean_velocity/cifar100/原训练目录
 ```
 
 仅可重评估此版本产生的相同预测模式权重；旧的文本→图像/单向/calibText 权重
@@ -226,7 +225,7 @@ python main.py --data_cfg configs/datasets/cifar100.yaml \
 ### 验证
 
 `test_image_text_flow.py` 用合成特征和像素验证原始 BiMC 文本融合、
-终点→速度公式及梯度、两方向积分、像素增强、冻结 CLIP、拒绝增量训练，
+终点→速度公式及梯度、两方向积分、正常图像特征缓存、拒绝增量训练，
 以及两组配置的两阶段运行、相同权重、旧 Bank 保留与重评估。
 未执行真实数据集/GPU 准确率实验。
 
@@ -246,12 +245,12 @@ python main.py --data_cfg configs/datasets/cifar100.yaml \
 
 ```bash
 python scripts/run_ode_solver_ablation.py \
-  output/unified_flow_image_text_velocity/cifar100/你的训练目录 \
+  output/unified_flow_image_text_clean_velocity/cifar100/你的训练目录 \
   --data_cfg configs/datasets/cifar100.yaml --use_swanlab
 ```
 
 对于终点预测网络，将路径替换为
-`output/unified_flow_image_text_endpoint/cifar100/你的训练目录`。
+`output/unified_flow_image_text_clean_endpoint/cifar100/你的训练目录`。
 脚本在该训练目录的 `ode_solver_ablation/` 中保存四份配置、各组日志、
 评估结果，以及列出 `final_acc`、`avg_acc` 和整个重评估用时
 `eval_seconds` 的 `summary.csv`。用时包含特征提取和 Bank 重建。
