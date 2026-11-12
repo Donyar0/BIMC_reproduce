@@ -120,6 +120,8 @@ def main():
 
     parser.add_argument('--data_cfg', type=str, help="Path to the data configuration file")
     parser.add_argument('--train_cfg', type=str, help="Path to the training configuration file")
+    parser.add_argument('--eval_run', default='', help='Re-evaluate a saved bidirectional Flow run without training')
+    parser.add_argument('--trusted_checkpoints', action='store_true', help='Allow pickle loading only for checkpoints you trust')
     parser.add_argument('--use_swanlab', action='store_true', help="Enable SwanLab experiment logging")
     parser.add_argument('--swanlab_project', type=str, default='BIMC_reproduce', help="SwanLab project name")
     parser.add_argument('--swanlab_experiment', type=str, default='', help="SwanLab experiment name")
@@ -149,7 +151,13 @@ def main():
         raise ValueError(f'Unknown METHOD: {cfg.METHOD}')
     engine = Runner(cfg)
     try:
-        engine.run()
+        if args.eval_run:
+            if cfg.METHOD.lower() != 'bidirectional_single_flow':
+                raise ValueError('--eval_run requires METHOD bidirectional_single_flow')
+            engine.evaluate_saved(args.eval_run,
+                                  trusted_checkpoints=args.trusted_checkpoints)
+        else:
+            engine.run()
     finally:
         finish()
 

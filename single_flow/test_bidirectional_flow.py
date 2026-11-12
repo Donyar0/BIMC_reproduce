@@ -10,6 +10,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace as NS
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -130,7 +131,9 @@ class BidirectionalTests(unittest.TestCase):
                             task_acc=[],base_avg_acc=0.,inc_avg_acc=0.,harmonic_acc=0.)
         with tempfile.TemporaryDirectory() as temp:
             for adapt_enabled in (False,True):
-                cfg=NS(SEED=1,DATASET=NS(NAME='synthetic'),MODEL=NS(BACKBONE=NS(NAME='fake')),
+                cfg=NS(METHOD='bidirectional_single_flow',SEED=1,
+                    DATASET=NS(NAME='synthetic'),MODEL=NS(BACKBONE=NS(NAME='fake')),
+                    DATALOADER=NS(),DEVICE=NS(),
                     TRAINER=NS(BiMC=NS(PREC='fp32',TEXT_CALIBRATION=True,
                                         VISION_CALIBRATION=False)),
                     FLOW=NS(OUTPUT_DIR=temp,EPOCHS=1,BATCH_SIZE=2,LR=.01,
@@ -144,7 +147,8 @@ class BidirectionalTests(unittest.TestCase):
                 runner.parse_batch=lambda batch:(batch['image'],batch['label'])
                 runner.acc_list=[];runner.task_acc_list=[]
                 with contextlib.redirect_stdout(io.StringIO()):runner.run()
-                results=[p for p in Path(temp).rglob('metrics.json')]
+                results=[p for p in Path(temp).rglob('metrics.json')
+                         if p.parent.name.startswith('seed_')]
                 run_dir=max(results,key=lambda p:p.stat().st_mtime_ns).parent
                 metrics=json.loads((run_dir/'metrics.json').read_text())
                 self.assertEqual(metrics['adapt'],adapt_enabled)
@@ -155,6 +159,11 @@ class BidirectionalTests(unittest.TestCase):
                 bank=torch.load(run_dir/'bank_session1.pt',weights_only=True)
                 self.assertEqual(bank['class_ids'],[0,1,2,3])
                 self.assertEqual((run_dir/'flow_session1.pt').exists(),adapt_enabled)
+                runner.acc_list=[];runner.task_acc_list=[]
+                with patch('yacs.config.CfgNode.load_cfg',return_value=cfg):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        runner.evaluate_saved(run_dir)
+                self.assertEqual(len(runner.acc_list),2)
             self.assertEqual(calls,['base','base','adapt'])
 
     def test_both_experiment_configs(self):

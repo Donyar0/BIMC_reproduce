@@ -96,6 +96,57 @@ class BidirectionalFlowRunner(Runner):
                      'avg_acc': sum(r['mean_acc'] for r in rows)/len(rows)})
 
     @torch.no_grad()
+    def evaluate_saved(self, run_dir, trusted_checkpoints=False):
+        """Re-score saved banks and per-session weights with current score weights."""
+        from yacs.config import CfgNode
+        self._validate()
+        cfg = self.cfg
+        run_dir = Path(run_dir)
+        with (run_dir/'config.yaml').open(encoding='utf-8') as handle:
+            original = CfgNode.load_cfg(handle)
+        for name in ('METHOD','SEED','DATASET','MODEL','DATALOADER','DEVICE','TRAINER'):
+            if getattr(original,name) != getattr(cfg,name):
+                raise ValueError(f'Saved run {name} differs from evaluation config')
+        for name in ('EPOCHS','BATCH_SIZE','LR','WEIGHT_DECAY','BLOCKS','HIDDEN',
+                     'STEPS','CONTRAST_WEIGHT','CONTRAST_TEMPERATURE',
+                     'CONTRAST_STEPS','ADAPT','ADAPT_EPOCHS','ADAPT_BATCH_SIZE','ADAPT_LR'):
+            if getattr(original.FLOW,name) != getattr(cfg.FLOW,name):
+                raise ValueError(f'Saved run FLOW.{name} differs from evaluation config')
+        output = Path(cfg.FLOW.OUTPUT_DIR)/cfg.DATASET.NAME.lower()/(
+            'eval_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+        output.mkdir(parents=True,exist_ok=False)
+        (output/'config.yaml').write_text(cfg.dump(),encoding='utf-8')
+        (output/'source_run.txt').write_text(str(run_dir.resolve())+'\n',encoding='utf-8')
+        image_model = self.model.module if self.is_distributed else self.model
+        image_model.eval().requires_grad_(False)
+        rows = []
+        for task_id in range(self.data_manager.num_tasks):
+            start = time.time()
+            checkpoint_path = (run_dir/f'flow_session{task_id}.pt'
+                               if cfg.FLOW.ADAPT and task_id > 0 else run_dir/'base_flow.pt')
+            checkpoint = torch.load(checkpoint_path,map_location='cpu',
+                                    weights_only=not trusted_checkpoints)
+            bank = torch.load(run_dir/f'bank_session{task_id}.pt',map_location='cpu',
+                              weights_only=not trusted_checkpoints)
+            expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1]
+                        for c in group]
+            if (checkpoint.get('method') != 'bidirectional_single_flow' or
+                    bank['encoder_id'] != checkpoint['encoder_id'] or
+                    bank['class_ids'] != expected):
+                raise ValueError('Saved Flow checkpoint and bank do not match the dataset')
+            result = self.inference_task(task_id,bank,image_model,checkpoint)
+            row = dict(task_id=task_id,seen_classes=len(expected),**result,
+                       elapsed_time=time.time()-start)
+            self.acc_list.append(result['mean_acc'])
+            self.task_acc_list.append(result['task_acc'])
+            rows.append(row)
+            log_metrics({k:v for k,v in row.items() if k != 'task_acc'},step=task_id)
+            self.save_results(output,rows)
+        print(f'Re-scored results saved to: {output}',flush=True)
+        log_metrics({'final_acc':rows[-1]['mean_acc'],
+                     'avg_acc':sum(r['mean_acc'] for r in rows)/len(rows)})
+
+    @torch.no_grad()
     def inference_task(self, task_id, bank, image_model, checkpoint):
         expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1]
                     for c in group]

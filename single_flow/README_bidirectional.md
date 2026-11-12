@@ -42,6 +42,18 @@ reverse_to_text       = cos(q', T_c)   # 文本分数
 第三个权重改为正值。运行会在 `metrics.csv/json` 写出两路及融合后的各阶段
 准确率。查询图像不会参与训练或原型库构建。
 
+已有三路分数版本的完整运行目录可以只重评估，不重新训练。更新分支后：
+
+```bash
+python -u main.py --data_cfg configs/datasets/cub200.yaml \
+  --train_cfg configs/trainers/bidirectional_flow_incremental.yaml \
+  --eval_run output/bidirectional_flow_incremental/cub200/seed_已有目录 \
+  --trusted_checkpoints
+```
+
+冻结版运行则换用 `bidirectional_flow_frozen.yaml` 和对应的输出目录。
+重评估要求数据、训练参数和积分步数与原运行一致，只允许改变分数设置。
+
 在仓库根目录以 CUB200 为例：
 
 ```bash
