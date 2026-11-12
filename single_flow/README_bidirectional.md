@@ -2,23 +2,23 @@
 
 本实验沿用冻结 CLIP 和原始 BiMC 的 prompt＋描述融合文本原型 `T_c`。
 真正的视觉原型 `V_c` 从当前阶段训练/支持图像的 CLIP 特征按类求均值，
-不使用 BiMC 可选的新类视觉校准。Flow 是一套共享速度网络；基类以
-`x_t=(1-t)T_c+tV_c` 和目标速度 `V_c-T_c` 训练。
+不使用 BiMC 可选的新类视觉校准。Flow 是一套共享速度网络。
 
-训练中的第二项是更新后同类原型的速度匹配损失，替代旧版 InfoNCE。
-正向更新的文本原型 `T'_c` 在视觉侧，反向更新的真实视觉原型 `V'_c`
-在文本侧，因此第二项也沿文本到视觉方向计算：
+训练**只使用**更新后同类原型的速度匹配损失。正向更新的文本原型
+`T'_c` 仍按文本来源作为插值起点，反向更新的真实视觉原型 `V'_c`
+按视觉来源作为终点。只保留这一项损失时，这个顺序让网络从初始化起
+沿文本到视觉方向学习：
 
 ```text
 T'_c = normalize(ODE_forward(T_c, 0 -> 1))
 V'_c = normalize(ODE_reverse(V_c, 1 -> 0))
-z_s = (1-s)V'_c + sT'_c,  s ~ Uniform(0,1)
-L_FM = mean(||v(x_t,t)-(V_c-T_c)||²)
-L_bidir = mean(||v(z_s,s)-(T'_c-V'_c)||²)
-L = L_FM + BIDIR_FM_WEIGHT * L_bidir
+z_s = (1-s)T'_c + sV'_c,  s ~ Uniform(0,1)
+L = mean(||v(z_s,s)-(V'_c-T'_c)||²)
 ```
 
-两条更新轨迹参与反向传播，损失不依赖其他类别作为负样本。
+两条更新轨迹参与反向传播；原始 `T_c → V_c` 的 FM 项和 InfoNCE 均不参与训练。
+由于没有原始端点速度监督，这是独立的自生成端点实验；Flow 可能学出
+与原始文本到视觉目标不同的速度场，需用真实数据评估其效果。
 `BIDIR_STEPS` 控制训练中两条轨迹的 Euler 步数，默认与推理的
 `STEPS` 一样为 8。基类与增量优化器均按 epoch 使用余弦退火学习率。
 
@@ -47,13 +47,13 @@ reverse_to_generated  = cos(q', T'_c)  # 更新图像和更新文本
 设第三个权重为 0 时第三路不计算，也不参与融合。
 查询图像不会参与训练或原型库构建。
 
-这次更换了训练损失，旧 InfoNCE 训练权重不能当作新实验，需要重新训练。
+这次更换了训练损失，旧版双损失和 InfoNCE 权重不能当作新实验，需要重新训练。
 完成新实验后，若只改变 `SCORE_WEIGHTS`，可以不重新训练而重评估：
 
 ```bash
 python -u main.py --data_cfg configs/datasets/cub200.yaml \
   --train_cfg configs/trainers/bidirectional_flow_incremental.yaml \
-  --eval_run output/bidirectional_velocity_incremental/cub200/seed_已有目录 \
+  --eval_run output/bidirectional_updated_only_incremental/cub200/seed_已有目录 \
   --trusted_checkpoints
 ```
 
@@ -70,7 +70,7 @@ python -u main.py --data_cfg configs/datasets/cub200.yaml \
   --train_cfg configs/trainers/bidirectional_flow_incremental.yaml --use_swanlab
 ```
 
-分别写入 `output/bidirectional_velocity_frozen/cub200/seed_...` 和
-`output/bidirectional_velocity_incremental/cub200/seed_...`。`base_flow.pt`
+分别写入 `output/bidirectional_updated_only_frozen/cub200/seed_...` 和
+`output/bidirectional_updated_only_incremental/cub200/seed_...`。`base_flow.pt`
 是基类权重；增量训练版另有 `flow_session<N>.pt`；每阶段均保存
 `bank_session<N>.pt` 和阶段指标。真实数据精度需实际运行验证。

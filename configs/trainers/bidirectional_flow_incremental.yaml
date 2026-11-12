@@ -47,7 +47,7 @@ FLOW:
   BLOCKS: 24
   HIDDEN: 0  # 0 uses CLIP feature dimension
   STEPS: 8
-  BIDIR_FM_WEIGHT: 0.1
+  LOSS_MODE: "updated_only"
   BIDIR_STEPS: 8
   ADAPT: True
   ADAPT_EPOCHS: 20
@@ -55,4 +55,4 @@ FLOW:
   ADAPT_LR: 0.0001
   SCORE_MODE: "fused"
   SCORE_WEIGHTS: [1.0, 1.0, 1.0]
-  OUTPUT_DIR: "output/bidirectional_velocity_incremental"
+  OUTPUT_DIR: "output/bidirectional_updated_only_incremental"

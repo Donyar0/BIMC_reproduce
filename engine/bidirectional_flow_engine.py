@@ -22,6 +22,8 @@ class BidirectionalFlowRunner(Runner):
         flow = self.cfg.FLOW
         if not self.cfg.TRAINER.BiMC.TEXT_CALIBRATION:
             raise ValueError('BiMC fused-description text must be enabled')
+        if flow.LOSS_MODE != 'updated_only':
+            raise ValueError('FLOW.LOSS_MODE must be updated_only')
         if flow.SCORE_MODE not in (*SCORE_NAMES, 'fused'):
             raise ValueError('Unknown FLOW.SCORE_MODE')
         if (len(flow.SCORE_WEIGHTS) != 3 or not np.isfinite(flow.SCORE_WEIGHTS).all()
@@ -63,7 +65,6 @@ class BidirectionalFlowRunner(Runner):
                         cache, epochs=flow.EPOCHS, batch_size=flow.BATCH_SIZE,
                         lr=flow.LR, weight_decay=flow.WEIGHT_DECAY,
                         blocks=flow.BLOCKS, hidden=flow.HIDDEN or None,
-                        bidir_fm_weight=flow.BIDIR_FM_WEIGHT,
                         bidir_steps=flow.BIDIR_STEPS,
                         seed=cfg.SEED, device=self.device)
                 torch.save(checkpoint, output/'base_flow.pt')
@@ -103,13 +104,13 @@ class BidirectionalFlowRunner(Runner):
         run_dir = Path(run_dir)
         with (run_dir/'config.yaml').open(encoding='utf-8') as handle:
             original = CfgNode.load_cfg(handle)
-        if not hasattr(original.FLOW,'BIDIR_FM_WEIGHT'):
-            raise ValueError('Saved run uses the previous contrastive objective; retrain the Flow')
+        if getattr(original.FLOW,'LOSS_MODE',None) != 'updated_only':
+            raise ValueError('Saved run uses a different training objective; retrain the Flow')
         for name in ('METHOD','SEED','DATASET','MODEL','DATALOADER','DEVICE','TRAINER'):
             if getattr(original,name) != getattr(cfg,name):
                 raise ValueError(f'Saved run {name} differs from evaluation config')
         for name in ('EPOCHS','BATCH_SIZE','LR','WEIGHT_DECAY','BLOCKS','HIDDEN',
-                     'STEPS','BIDIR_FM_WEIGHT','BIDIR_STEPS',
+                     'STEPS','LOSS_MODE','BIDIR_STEPS',
                      'ADAPT','ADAPT_EPOCHS','ADAPT_BATCH_SIZE','ADAPT_LR'):
             if getattr(original.FLOW,name) != getattr(cfg.FLOW,name):
                 raise ValueError(f'Saved run FLOW.{name} differs from evaluation config')
@@ -132,7 +133,7 @@ class BidirectionalFlowRunner(Runner):
             expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1]
                         for c in group]
             if (checkpoint.get('method') != 'bidirectional_single_flow' or
-                    checkpoint.get('objective') != 'updated_pair_velocity_v2' or
+                    checkpoint.get('objective') != 'updated_pair_velocity_only_v3' or
                     bank['encoder_id'] != checkpoint['encoder_id'] or
                     bank['class_ids'] != expected):
                 raise ValueError('Saved Flow checkpoint and bank do not match the dataset')

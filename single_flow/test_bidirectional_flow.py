@@ -54,21 +54,31 @@ class BidirectionalTests(unittest.TestCase):
             measured=updated_pair_fm(model,source,source,4)
         forward=F.normalize(integrate(model,source,4),dim=-1)
         backward=F.normalize(integrate(model,source,4,reverse=True),dim=-1)
-        xt=.75*backward+.25*forward
-        expected=(model(xt,torch.full((2,1),.25))-(forward-backward)).square().sum(-1).mean()
+        xt=.75*forward+.25*backward
+        expected=(model(xt,torch.full((2,1),.25))-(backward-forward)).square().sum(-1).mean()
         self.assertTrue(torch.allclose(measured,expected))
         matching=updated_pair_fm(model,source,source,4)
         mismatched=updated_pair_fm(model,source,source.flip(0),4)
         self.assertLess(matching,mismatched)
+        class LearnableConstant(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.velocity=torch.nn.Parameter(torch.zeros(1,4))
+            def forward(self,x,t):
+                return self.velocity.expand_as(x)
+        learnable=LearnableConstant()
+        updated_pair_fm(learnable,self.eye[:1],self.eye[1:2],1).backward()
+        desired=(self.eye[1]-self.eye[0]).unsqueeze(0)
+        self.assertLess((learnable.velocity.grad*desired).sum().item(),0)
 
     def test_base_incremental_bank_and_three_scores(self):
         with contextlib.redirect_stdout(io.StringIO()):
             checkpoint=fit_base(self.cache,epochs=2,batch_size=2,lr=.01,
-                weight_decay=0,blocks=1,hidden=8,bidir_fm_weight=.2,
-                bidir_steps=2,seed=3,device='cpu')
+                weight_decay=0,blocks=1,hidden=8,bidir_steps=2,seed=3,device='cpu')
         self.assertEqual(len(checkpoint['loss_history']),2)
-        self.assertEqual(checkpoint['objective'],'updated_pair_velocity_v2')
-        self.assertTrue(all(np.isfinite(row['bidir_fm']) for row in checkpoint['loss_history']))
+        self.assertEqual(checkpoint['objective'],'updated_pair_velocity_only_v3')
+        self.assertTrue(all(set(row)=={'updated_fm','lr'} for row in checkpoint['loss_history']))
+        self.assertTrue(all(np.isfinite(row['updated_fm']) for row in checkpoint['loss_history']))
         first=build_bank(checkpoint,self.cache,steps=2,device='cpu')
         novel=dict(self.cache,stage='incremental',class_ids=[2,3],
                    text_prototypes=self.eye[2:],
@@ -146,7 +156,7 @@ class BidirectionalTests(unittest.TestCase):
                                         VISION_CALIBRATION=False)),
                     FLOW=NS(OUTPUT_DIR=temp,EPOCHS=1,BATCH_SIZE=2,LR=.01,
                             WEIGHT_DECAY=0.,BLOCKS=1,HIDDEN=8,STEPS=2,
-                            BIDIR_FM_WEIGHT=.1,BIDIR_STEPS=2,
+                            LOSS_MODE='updated_only',BIDIR_STEPS=2,
                             ADAPT=adapt_enabled,ADAPT_EPOCHS=1,
                             ADAPT_BATCH_SIZE=2,ADAPT_LR=.01,SCORE_MODE='fused',
                             SCORE_WEIGHTS=[1.,1.,1.]),dump=lambda:'fake: true\n')
@@ -185,6 +195,7 @@ class BidirectionalTests(unittest.TestCase):
             cfg=namespace['setup_cfg'](str(ROOT/'configs/datasets/cub200.yaml'),
                 str(ROOT/f'configs/trainers/bidirectional_flow_{mode}.yaml'))
             self.assertEqual(cfg.METHOD,'bidirectional_single_flow')
+            self.assertEqual(cfg.FLOW.LOSS_MODE,'updated_only')
             self.assertEqual(cfg.FLOW.ADAPT,enabled)
             self.assertEqual(cfg.FLOW.SCORE_WEIGHTS,[1.,1.,1.])
             self.assertTrue(cfg.TRAINER.BiMC.TEXT_CALIBRATION)

@@ -85,7 +85,7 @@ def extend_cfg(cfg):
     cfg.FLOW.TEMPERATURE = 0.07
     cfg.FLOW.STEPS = 8
     cfg.FLOW.OUTPUT_DIR = 'output/single_flow'
-    cfg.FLOW.BIDIR_FM_WEIGHT = 0.1
+    cfg.FLOW.LOSS_MODE = 'updated_only'
     cfg.FLOW.BIDIR_STEPS = 8
     cfg.FLOW.ADAPT = False
     cfg.FLOW.ADAPT_EPOCHS = 20
