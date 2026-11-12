@@ -1,5 +1,8 @@
 # 复用 BIMC 原型的单流文本 → 伪视觉原型
 
+伪视觉／伪文本双损失的独立配置与运行方式见
+[README_pseudo_pair.md](README_pseudo_pair.md)。
+
 Flow 直接读取 BIMC 已计算的原型，不再加载 CLIP、编码文本或重新融合描述。
 `fm.py` 来自 FlowComposer，保留上游 MIT LICENSE；训练脚本为任务适配实现。
 环境：Python 3.10+、PyTorch 2.6+；运行 BIMC 还需仓库原有依赖、数据和 CLIP 权重。
