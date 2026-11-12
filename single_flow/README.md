@@ -7,6 +7,8 @@ Flow 直接读取 BIMC 已计算的原型，不再加载 CLIP、编码文本或�
 本分支当前的三种终点对照（BiMC 图文融合、视觉类别均值、基类单张图像）
 均以 BiMC 原始 prompt/描述融合文本原型为起点，不调用 Text Adapter。
 配置和运行方式见 [README_text_to_visual.md](README_text_to_visual.md)。
+新增的正向文本／反向视觉对比损失和增量训练消融见
+[README_bidirectional.md](README_bidirectional.md)。
 
 ## 推荐：像 BIMC 一样直接运行完整实验
 

@@ -85,7 +85,15 @@ def extend_cfg(cfg):
     cfg.FLOW.TEMPERATURE = 0.07
     cfg.FLOW.STEPS = 8
     cfg.FLOW.OUTPUT_DIR = 'output/single_flow'
-    # Optional base-trained VDT text adapter for text-to-visual Flow.
+    cfg.FLOW.CONTRAST_WEIGHT = 0.1
+    cfg.FLOW.CONTRAST_TEMPERATURE = 0.07
+    cfg.FLOW.CONTRAST_STEPS = 4
+    cfg.FLOW.ADAPT = False
+    cfg.FLOW.ADAPT_EPOCHS = 20
+    cfg.FLOW.ADAPT_BATCH_SIZE = 32
+    cfg.FLOW.ADAPT_LR = 0.0001
+    cfg.FLOW.SCORE_MODE = 'fused'
+    cfg.FLOW.SCORE_WEIGHTS = [1.0, 1.0, 1.0]
 
 
 
@@ -133,6 +141,8 @@ def main():
     # Import and run the trainer
     if cfg.METHOD.lower() == 'single_flow':
         from engine.flow_engine import FlowRunner as Runner
+    elif cfg.METHOD.lower() == 'bidirectional_single_flow':
+        from engine.bidirectional_flow_engine import BidirectionalFlowRunner as Runner
     elif cfg.METHOD.lower() in ('', 'bimc'):
         from engine.engine import Runner
     else:
