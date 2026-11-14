@@ -58,7 +58,8 @@ def combine(old, new):
     return dict(class_ids=old['class_ids']+new['class_ids'],
                 **{key:torch.cat((old[key],new[key])) for key in
                    ('text','real','sigma','cov','description_features','description_labels')},
-                base_cov=old['base_cov'], base_text=old['base_text'])
+                base_cov=old['base_cov'], base_text=old['base_text'],
+                current_class_count=len(new['class_ids']))
 
 
 def sample_pairs(memory, rows, noise_scale, visual_scale, max_radius, device, chol_all=None):
@@ -76,7 +77,8 @@ def sample_pairs(memory, rows, noise_scale, visual_scale, max_radius, device, ch
 
 def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, device,
            noise_scale, visual_scale, max_radius, replay_fraction,
-           warmup_ratio, min_lr_ratio, blocks=None, hidden=None):
+           warmup_ratio, min_lr_ratio, blocks=None, hidden=None,
+           distill_weight=0., contrast_weight=0., contrast_temperature=20.):
     if steps < 1 or batch_size < 1 or lr <= 0 or weight_decay < 0 or not 0 <= replay_fraction <= 1:
         raise ValueError('Invalid training parameters')
     torch.manual_seed(seed)
@@ -89,27 +91,51 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
         arch = checkpoint['architecture']
         network = DeepFlowMatchingNet(**arch).to(device)
         network.load_state_dict(checkpoint['state_dict'])
+    if min(distill_weight, contrast_weight) < 0 or contrast_temperature <= 0:
+        raise ValueError('Invalid auxiliary loss weights or temperature')
+    teacher = None
+    if checkpoint is not None and distill_weight:
+        teacher = DeepFlowMatchingNet(**arch).to(device).eval()
+        teacher.load_state_dict(checkpoint['state_dict'])
+        teacher.requires_grad_(False)
     network.train()
     opt = torch.optim.AdamW(network.parameters(), lr=lr, weight_decay=weight_decay)
     nbase = len(memory['base_text'])
     nclass = len(memory['class_ids'])
+    nold = nclass - memory.get('current_class_count', nclass)
     history=[]
     chol_all = torch.linalg.cholesky(memory['cov'].to(device))
     for step in range(steps):
-        if nclass == nbase:
+        if nold == 0:
             rows = torch.randint(nclass,(batch_size,),device=device)
+            old = torch.zeros(batch_size,dtype=torch.bool,device=device)
         else:
             # Exact per-batch split, including late sessions with many old classes.
             old = torch.zeros(batch_size,dtype=torch.bool,device=device)
             old[:round(batch_size*replay_fraction)] = True
             old = old[torch.randperm(batch_size,device=device)]
             rows = torch.empty(batch_size,dtype=torch.long,device=device)
-            rows[old] = torch.randint(nbase,(int(old.sum()),),device=device)
-            rows[~old] = torch.randint(nbase,nclass,(int((~old).sum()),),device=device)
+            rows[old] = torch.randint(nold,(int(old.sum()),),device=device)
+            rows[~old] = torch.randint(nold,nclass,(int((~old).sum()),),device=device)
         x0,x1 = sample_pairs(memory,rows,noise_scale,visual_scale,max_radius,device,chol_all)
         t = torch.rand(batch_size,1,device=device)
         xt = (1-t)*x0+t*x1
-        loss = (network(xt,t)-(x1-x0)).square().sum(-1).mean()
+        velocity = network(xt,t)
+        fm_loss = (velocity-(x1-x0)).square().sum(-1).mean()
+        loss = fm_loss
+        if teacher is not None and old.any():
+            with torch.no_grad():
+                previous = teacher(xt[old],t[old])
+            loss = loss + distill_weight*(velocity[old]-previous).square().sum(-1).mean()
+        if contrast_weight:
+            unique_rows, targets = rows.unique(sorted=True, return_inverse=True)
+            visual_proto = unit(memory['real'].to(device)[unique_rows])
+            text_proto = unit(memory['text'].to(device)[unique_rows])
+            end_hat = unit(xt+(1-t)*velocity)
+            start_hat = unit(xt-t*velocity)
+            contrast = (F.cross_entropy(contrast_temperature*end_hat@visual_proto.T,targets)
+                        + F.cross_entropy(contrast_temperature*start_hat@text_proto.T,targets))/2
+            loss = loss + contrast_weight*contrast
         if not torch.isfinite(loss):
             raise RuntimeError('Nonfinite Flow loss')
         scheduled_lr(opt,step,steps,lr,warmup_ratio,min_lr_ratio)
@@ -120,26 +146,32 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
     result = dict(format_version=2,architecture=arch,
                   state_dict={k:v.detach().cpu().clone() for k,v in network.state_dict().items()},
                   flow_direction=DIRECTION,method=METHOD,
-                  loss_history=history if checkpoint is None else checkpoint['loss_history']+history)
+                  loss_history=history if checkpoint is None else checkpoint['loss_history']+history,
+                  auxiliary_weights=dict(distill=distill_weight,contrast=contrast_weight,
+                                         contrast_temperature=contrast_temperature))
     return result
 
 
 def fit(memory, *, epochs, steps_per_epoch, batch_size, lr, weight_decay, blocks, hidden,
         seed, device, noise_scale=1., visual_scale=1., max_radius=0.5,
-        warmup_ratio=0.05,min_lr_ratio=0.01):
+        warmup_ratio=0.05,min_lr_ratio=0.01,contrast_weight=0.,contrast_temperature=20.):
     return _train(None,memory,steps=epochs*steps_per_epoch,batch_size=batch_size,lr=lr,
                   weight_decay=weight_decay,seed=seed,device=device,noise_scale=noise_scale,
                   visual_scale=visual_scale,max_radius=max_radius,replay_fraction=0.,
-                  warmup_ratio=warmup_ratio,min_lr_ratio=min_lr_ratio,blocks=blocks,hidden=hidden)
+                  warmup_ratio=warmup_ratio,min_lr_ratio=min_lr_ratio,blocks=blocks,hidden=hidden,
+                  contrast_weight=contrast_weight,contrast_temperature=contrast_temperature)
 
 
 def adapt(checkpoint,memory,*,steps,batch_size,lr,weight_decay,seed,device,
           noise_scale,visual_scale,max_radius,replay_fraction,
-          warmup_ratio=0.05,min_lr_ratio=0.01):
+          warmup_ratio=0.05,min_lr_ratio=0.01,distill_weight=0.,
+          contrast_weight=0.,contrast_temperature=20.):
     return _train(checkpoint,memory,steps=steps,batch_size=batch_size,lr=lr,
                   weight_decay=weight_decay,seed=seed,device=device,noise_scale=noise_scale,
                   visual_scale=visual_scale,max_radius=max_radius,replay_fraction=replay_fraction,
-                  warmup_ratio=warmup_ratio,min_lr_ratio=min_lr_ratio)
+                  warmup_ratio=warmup_ratio,min_lr_ratio=min_lr_ratio,
+                  distill_weight=distill_weight,contrast_weight=contrast_weight,
+                  contrast_temperature=contrast_temperature)
 
 
 def load_model(checkpoint,device):
