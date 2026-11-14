@@ -339,3 +339,7 @@ The three `*t500.yaml` configurations now use `COSINE_TEMPERATURE: 500.0` for Fl
 ### All-seen contrast versus distillation-only baseline
 
 `configs/trainers/tangent_flow_distill_knn_t500.yaml` isolates the 16 Base + 16 historical-increment replay, previous-flow distillation weight 1.0, Flow/KNN temperature 500, and Cov divisor 2048; its contrast weight is zero. `configs/trainers/tangent_flow_distill_t500.yaml` has the same settings plus one-step endpoint cross-entropy against **all currently seen class** visual means, with weight 0.1 and contrast temperature 20. Target columns follow memory row indices, so sampled class rows map to their global seen-class prototypes. The configurations write to separate directories and must be run independently to compare whether the all-seen contrast helps.
+
+### Task 1 new-class visual Bank check
+
+Task 1 evaluation now prints `visual_real_new` and `visual_flow_new` accuracies for both Task 0 and Task 1. Both scores use only cosine similarity in visual space against all seen classes; Base Bank rows remain the same fused prototypes. The Task 1 rows are replaced by either the unblended five-shot real visual means or the unblended forward-generated Flow text prototypes. This isolates the new-class Bank contribution from reverse-text and Cov/KNN scoring. The all-seen CE configurations now use `CONTRAST_WEIGHT: 0.05` (the previous value was 0.1, not 1.0) and write to new output directories.

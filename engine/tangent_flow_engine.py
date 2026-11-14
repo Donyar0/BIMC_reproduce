@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from engine.engine import Runner
@@ -134,13 +135,20 @@ class TangentFlowRunner(Runner):
             raise ValueError('BIMC evaluator requires ordered, contiguous seen-class IDs')
         loader = self.data_manager.get_dataloader(task_id, source='test', mode='test')
         scores, targets, errors = [], [], []
-        ablations = {name: [] for name in ('visual', 'text', 'flow')} if task_id == 1 else None
+        ablations = {name: [] for name in ('visual', 'text', 'flow',
+                                          'visual_real_new', 'visual_flow_new')} if task_id == 1 else None
         base_errors, incremental_errors = [], []
         velocity = load_model(checkpoint=self._checkpoint, device=self.device).eval()
         use_priors = self.cfg.FLOW.USE_GEOMETRY_PRIORS
         cov_inv = (torch.linalg.pinv(memory['cov'].float().mean(0).to(self.device))
                    if use_priors else None)
         device_bank = dict(bank, prototypes=bank['prototypes'].to(self.device), text=bank['text'].to(self.device))
+        if task_id == 1:
+            num_base = len(self.data_manager.class_index_in_task[0])
+            real_bank = device_bank['prototypes'].clone()
+            flow_bank = device_bank['prototypes'].clone()
+            real_bank[num_base:] = F.normalize(bank['real'][num_base:].to(self.device), dim=-1)
+            flow_bank[num_base:] = F.normalize(bank['generated'][num_base:].to(self.device), dim=-1)
         for batch in tqdm(loader):
             images, labels = self.parse_batch(batch)
             features = model.extract_img_feature(images)
@@ -160,8 +168,11 @@ class TangentFlowRunner(Runner):
                                                return_components=task_id == 1)
             if task_id == 1:
                 _, logits, cycle_error, components = result
-                for name in ablations:
+                for name in ('visual', 'text', 'flow'):
                     ablations[name].append(components[name].cpu())
+                z = F.normalize(features.float(), dim=-1)
+                ablations['visual_real_new'].append((z @ real_bank.T).cpu())
+                ablations['visual_flow_new'].append((z @ flow_bank.T).cpu())
             else:
                 _, logits, cycle_error = result
             errors.append(cycle_error.cpu())
