@@ -81,6 +81,7 @@ class TangentFlowRunner(Runner):
                                        visual_scale=flow.VISUAL_SCALE,
                                        max_radius=flow.MAX_RADIUS,
                                        replay_fraction=flow.REPLAY_FRACTION,
+                                       replay_strategy=flow.REPLAY_STRATEGY,
                                        distill_weight=flow.DISTILL_WEIGHT,
                                        warmup_ratio=flow.WARMUP_RATIO,
                                        min_lr_ratio=flow.MIN_LR_RATIO)

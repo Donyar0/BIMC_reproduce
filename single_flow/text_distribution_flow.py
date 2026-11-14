@@ -97,7 +97,8 @@ def sample_pairs(memory, rows, noise_scale, visual_scale, max_radius, device, ch
 
 def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, device,
            noise_scale, visual_scale, max_radius, replay_fraction,
-           warmup_ratio, min_lr_ratio, blocks=None, hidden=None, distill_weight=0.):
+           warmup_ratio, min_lr_ratio, blocks=None, hidden=None, distill_weight=0.,
+           replay_strategy='base_incremental_half'):
     if steps < 1 or batch_size < 1 or lr <= 0 or weight_decay < 0 or not 0 <= replay_fraction <= 1:
         raise ValueError('Invalid training parameters')
     torch.manual_seed(seed)
@@ -112,6 +113,8 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
         network.load_state_dict(checkpoint['state_dict'])
     if distill_weight < 0:
         raise ValueError('DISTILL_WEIGHT must be nonnegative')
+    if replay_strategy not in ('base_incremental_half', 'class_uniform'):
+        raise ValueError('Unknown replay strategy')
     prev_model = copy.deepcopy(network).eval() if checkpoint is not None and distill_weight else None
     if prev_model is not None:
         prev_model.requires_grad_(False)
@@ -133,7 +136,10 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
             old[:round(batch_size*replay_fraction)] = True
             old = old[torch.randperm(batch_size,device=device)]
             rows = torch.empty(batch_size,dtype=torch.long,device=device)
-            rows[old] = sample_old_rows(memory['session_lengths'],int(old.sum()),device)
+            if replay_strategy == 'class_uniform':
+                rows[old] = torch.randint(old_count,(int(old.sum()),),device=device)
+            else:
+                rows[old] = sample_old_rows(memory['session_lengths'],int(old.sum()),device)
             rows[~old] = torch.randint(old_count,nclass,(int((~old).sum()),),device=device)
         x0,x1 = sample_pairs(memory,rows,noise_scale,visual_scale,max_radius,device,chol_all)
         t = torch.rand(batch_size,1,device=device)
@@ -158,7 +164,7 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
                   state_dict={k:v.detach().cpu().clone() for k,v in network.state_dict().items()},
                   flow_direction=DIRECTION,method=METHOD,
                   loss_history=history if checkpoint is None else checkpoint['loss_history']+history,
-                  distill_weight=distill_weight,
+                  distill_weight=distill_weight, replay_strategy=replay_strategy,
                   distill_history=distill_history)
     if distill_history:
         print(f'adapt fm+distill_loss={history[-1]:.6f} '
@@ -177,12 +183,13 @@ def fit(memory, *, epochs, steps_per_epoch, batch_size, lr, weight_decay, blocks
 
 def adapt(checkpoint,memory,*,steps,batch_size,lr,weight_decay,seed,device,
           noise_scale,visual_scale,max_radius,replay_fraction,
-          warmup_ratio=0.05,min_lr_ratio=0.01,distill_weight=0.):
+          warmup_ratio=0.05,min_lr_ratio=0.01,distill_weight=0.,
+          replay_strategy='base_incremental_half'):
     return _train(checkpoint,memory,steps=steps,batch_size=batch_size,lr=lr,
                   weight_decay=weight_decay,seed=seed,device=device,noise_scale=noise_scale,
                   visual_scale=visual_scale,max_radius=max_radius,replay_fraction=replay_fraction,
                   warmup_ratio=warmup_ratio,min_lr_ratio=min_lr_ratio,
-                  distill_weight=distill_weight)
+                  distill_weight=distill_weight,replay_strategy=replay_strategy)
 
 
 def load_model(checkpoint,device):

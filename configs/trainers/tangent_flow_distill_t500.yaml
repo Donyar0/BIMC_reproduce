@@ -61,6 +61,7 @@ FLOW:
   OUTPUT_DIR: "output/gaussian_text_visual_distill_t500_knn25_cov2048"
   ADAPT_STEPS: 100  # incremental FM plus previous-session velocity distillation
   DISTILL_WEIGHT: 1.0
+  REPLAY_STRATEGY: "base_incremental_half"
   ALPHA: 1.0  # full reverse image-to-text integration
   BETA_BASE: 0.1
   BETA_INC: 0.5  # validation search: 0.3 to 0.6
