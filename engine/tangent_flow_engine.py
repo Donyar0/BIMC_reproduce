@@ -128,27 +128,57 @@ class TangentFlowRunner(Runner):
             raise ValueError('BIMC evaluator requires ordered, contiguous seen-class IDs')
         loader = self.data_manager.get_dataloader(task_id, source='test', mode='test')
         scores, targets, errors = [], [], []
+        ablations = {name: [] for name in ('visual', 'text', 'flow')} if task_id == 1 else None
+        base_errors, incremental_errors = [], []
         velocity = load_model(checkpoint=self._checkpoint, device=self.device).eval()
         cov_inv = torch.linalg.pinv(memory['cov'].float().mean(0).to(self.device))
         device_bank = dict(bank, prototypes=bank['prototypes'].to(self.device), text=bank['text'].to(self.device))
         for batch in tqdm(loader):
             images, labels = self.parse_batch(batch)
             features = model.extract_img_feature(images)
-            _, logits, cycle_error = classify_bidirectional(velocity, features, device_bank,
+            result = classify_bidirectional(velocity, features, device_bank,
                                                alpha=self.cfg.FLOW.ALPHA, gamma=self.cfg.FLOW.GAMMA,
                                                steps=self.cfg.FLOW.STEPS,
                                                solver=self.cfg.FLOW.SOLVER,
                                                cycle_scale=self.cfg.FLOW.CYCLE_SCALE,
                                                ensemble_alpha=self.cfg.DATASET.ENSEMBLE_ALPHA,
                                                num_base=len(self.data_manager.class_index_in_task[0]),
-                                               covariance=memory['cov'], cov_inv=cov_inv)
+                                               covariance=memory['cov'], cov_inv=cov_inv,
+                                               cycle_gate=self.cfg.FLOW.CYCLE_GATE,
+                                               cosine_temperature=self.cfg.FLOW.COSINE_TEMPERATURE,
+                                               return_components=task_id == 1)
+            if task_id == 1:
+                _, logits, cycle_error, components = result
+                for name in ablations:
+                    ablations[name].append(components[name].cpu())
+            else:
+                _, logits, cycle_error = result
             errors.append(cycle_error.cpu())
+            base_mask = labels.cpu() < len(self.data_manager.class_index_in_task[0])
+            base_errors.append(cycle_error.cpu()[base_mask])
+            incremental_errors.append(cycle_error.cpu()[~base_mask])
             scores.append(logits.cpu())
             targets.append(labels.cpu())
         if not scores:
             raise ValueError('Empty test loader')
         acc = self.evaluator.calc_accuracy(torch.cat(scores), torch.cat(targets), task_id)
         acc['cycle_error_mean'] = torch.cat(errors).mean().item()
+        acc['cycle_error_base_mean'] = torch.cat(base_errors).mean().item()
+        acc['cycle_error_incremental_mean'] = (torch.cat(incremental_errors).mean().item()
+                                                if task_id > 0 else 0.0)
+        if ablations is not None:
+            all_targets = torch.cat(targets)
+            for name, chunks in ablations.items():
+                result = self.evaluator.calc_accuracy(torch.cat(chunks), all_targets, task_id)
+                acc[f'{name}_task0_acc'] = result['task_acc'][0]
+                acc[f'{name}_task1_acc'] = result['task_acc'][1]
+                print(f'Task 1 ablation {name}: task0={result["task_acc"][0]:.2f}% '
+                      f'task1={result["task_acc"][1]:.2f}%')
+            print(f'Task 1 full: task0={acc["task_acc"][0]:.2f}% '
+                  f'task1={acc["task_acc"][1]:.2f}%')
+        print(f'Cycle error: base={acc["cycle_error_base_mean"]:.6g}, '
+              f'incremental={acc["cycle_error_incremental_mean"]:.6g}, '
+              f'gate={self.cfg.FLOW.CYCLE_GATE}')
         print(f'Test acc mean: {acc["mean_acc"]}, task-wise acc: {acc["task_acc"]}')
         return acc
 
@@ -161,6 +191,6 @@ class TangentFlowRunner(Runner):
                        avg_acc=sum(r['mean_acc'] for r in rows)/len(rows), sessions=rows)
         (output / 'metrics.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
         with (output / 'metrics.csv').open('w', newline='', encoding='utf-8') as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+            writer = csv.DictWriter(handle, fieldnames=list(dict.fromkeys(k for row in rows for k in row)))
             writer.writeheader()
             writer.writerows(rows)

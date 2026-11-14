@@ -42,7 +42,9 @@ FLOW:
   COV_TRANSFER_TEMPERATURE: 16.0
   REPLAY_FRACTION: 0.5
   CYCLE_SCALE: 0.01
-  NOISE_SCALE: 1.0
+  CYCLE_GATE: False  # diagnostic baseline: disable reconstruction gate
+  COSINE_TEMPERATURE: 1.0  # keep original scale for Task 1 diagnosis
+  NOISE_SCALE: 0.25
   EPOCHS: 100
   BATCH_SIZE: 64
   LR: 0.0002

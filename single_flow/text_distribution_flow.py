@@ -99,9 +99,12 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
         if nclass == nbase:
             rows = torch.randint(nclass,(batch_size,),device=device)
         else:
-            old = torch.rand(batch_size,device=device)<replay_fraction
+            # Exact per-batch split, including late sessions with many old classes.
+            old = torch.zeros(batch_size,dtype=torch.bool,device=device)
+            old[:round(batch_size*replay_fraction)] = True
+            old = old[torch.randperm(batch_size,device=device)]
             rows = torch.empty(batch_size,dtype=torch.long,device=device)
-            rows[old] = torch.randint(nclass-(nclass-nbase),(int(old.sum()),),device=device)
+            rows[old] = torch.randint(nbase,(int(old.sum()),),device=device)
             rows[~old] = torch.randint(nbase,nclass,(int((~old).sum()),),device=device)
         x0,x1 = sample_pairs(memory,rows,noise_scale,visual_scale,max_radius,device,chol_all)
         t = torch.rand(batch_size,1,device=device)
@@ -172,17 +175,19 @@ def build_bank(checkpoint,current,*,steps,num_base,beta_base,beta_inc,device,
 @torch.no_grad()
 def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
                            solver='euler',cycle_scale=0.01,ensemble_alpha=0.8,
-                           num_base=0,covariance=None,cov_inv=None):
-    if not (0<=alpha<=1 and 0<=gamma<=1 and cycle_scale>0 and 0<=ensemble_alpha<=1):
+                           num_base=0,covariance=None,cov_inv=None,
+                           cycle_gate=False,cosine_temperature=1.,return_components=False):
+    if not (0<=alpha<=1 and 0<=gamma<=1 and cycle_scale>0 and
+            cosine_temperature>0 and 0<=ensemble_alpha<=1):
         raise ValueError('Invalid scoring parameters')
     z=unit(image_features)
     t_hat=transport(model,z,steps,reverse=True,solver=solver)
     z_reconstructed=transport(model,t_hat,steps,solver=solver)
     error=(z-z_reconstructed).square().sum(-1,keepdim=True)
-    gamma_z=1-(1-gamma)*torch.exp(-error/cycle_scale)
+    gamma_z=1-(1-gamma)*torch.exp(-error/cycle_scale) if cycle_gate else torch.full_like(error,gamma)
     text_query=unit((1-alpha)*z+alpha*t_hat)
-    visual_prob=F.softmax(z@bank['prototypes'].to(z.device).T,dim=-1)
-    text_prob=F.softmax(text_query@bank['text'].to(z.device).T,dim=-1)
+    visual_prob=F.softmax(cosine_temperature*(z@bank['prototypes'].to(z.device).T),dim=-1)
+    text_prob=F.softmax(cosine_temperature*(text_query@bank['text'].to(z.device).T),dim=-1)
     flow_prob=gamma_z*visual_prob+(1-gamma_z)*text_prob
     if ensemble_alpha<1:
         if covariance is None:
@@ -196,10 +201,16 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
         similarities=z@desc.T
         knn=torch.stack([similarities[:,desc_labels==c].max(-1).values
                          for c in bank['class_ids']],dim=-1)
-        prob_knn=F.softmax(knn,dim=-1)
+        prob_knn=F.softmax(cosine_temperature*knn,dim=-1)
         priors=torch.cat((prob_cov[:,:num_base],prob_knn[:,num_base:]),dim=-1)
         scores=ensemble_alpha*flow_prob+(1-ensemble_alpha)*priors
     else:
         scores=flow_prob
     ids=torch.tensor(bank['class_ids'],device=z.device)
+    if return_components:
+        return ids[scores.argmax(-1)],scores,error,dict(
+            visual=visual_prob,text=text_prob,flow=flow_prob,
+            cov=prob_cov if ensemble_alpha<1 else None,
+            knn=prob_knn if ensemble_alpha<1 else None,
+            gamma=gamma_z)
     return ids[scores.argmax(-1)],scores,error

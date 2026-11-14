@@ -80,6 +80,8 @@ def extend_cfg(cfg):
     cfg.FLOW.COV_TRANSFER_TEMPERATURE = 16.0
     cfg.FLOW.REPLAY_FRACTION = 0.5
     cfg.FLOW.CYCLE_SCALE = 0.01
+    cfg.FLOW.CYCLE_GATE = False
+    cfg.FLOW.COSINE_TEMPERATURE = 1.0
     cfg.FLOW.NOISE_SCALE = 1.0
     cfg.FLOW.MAX_ANGLE = 0.5
     cfg.FLOW.MIX_PROBABILITY = 0.2
