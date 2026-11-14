@@ -319,3 +319,7 @@ The current `tangent_flow.yaml` evaluates only the visual Bank and reverse-text 
 ### Pure Flow versus Full at temperature 25
 
 `configs/trainers/tangent_flow.yaml` is the pure Flow baseline (`USE_GEOMETRY_PRIORS: False`, `COSINE_TEMPERATURE: 1.0`). `configs/trainers/tangent_flow_full_t25.yaml` enables the original Base Cov / incremental Description KNN probability blend and applies `COSINE_TEMPERATURE: 25.0` to visual, reverse-text, and KNN cosine logits before softmax. The covariance logits retain BiMC's `/512` scaling. The two configurations write to separate output directories. Run both with the same dataset config and seed, then compare `Final session Acc` and `Average session Acc`. Temperature can affect the mix of visual and text probability branches even without Cov/KNN, so the pure Flow run deliberately retains the previous value of 1.0.
+
+### Frozen Base Flow, separate probability scales (from commit 607ac3c)
+
+`configs/trainers/tangent_flow_frozen_t500.yaml` keeps the original Base distributional FM training and freezes the Flow at every incremental session (`ADAPT_STEPS: 0`). New-class distribution statistics and Bank rows are still computed. Flow visual and reverse-text cosine logits use temperature 500; Description KNN uses 25; Mahalanobis logits use divisor 2048. These are independent inference settings. Results are isolated in `output/gaussian_text_visual_frozen_t500_knn25_cov2048/`. This experiment has not been run on CUB-200 in the development workspace.

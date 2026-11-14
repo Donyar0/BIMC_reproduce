@@ -176,9 +176,11 @@ def build_bank(checkpoint,current,*,steps,num_base,beta_base,beta_inc,device,
 def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
                            solver='euler',cycle_scale=0.01,ensemble_alpha=0.8,
                            num_base=0,covariance=None,cov_inv=None,
-                           cycle_gate=False,cosine_temperature=1.,return_components=False):
+                           cycle_gate=False,cosine_temperature=1.,
+                           knn_temperature=25.,cov_divisor=512.,return_components=False):
     if not (0<=alpha<=1 and 0<=gamma<=1 and cycle_scale>0 and
-            cosine_temperature>0 and 0<=ensemble_alpha<=1):
+            cosine_temperature>0 and knn_temperature>0 and cov_divisor>0 and
+            0<=ensemble_alpha<=1):
         raise ValueError('Invalid scoring parameters')
     z=unit(image_features)
     t_hat=transport(model,z,steps,reverse=True,solver=solver)
@@ -195,13 +197,13 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
         inv = cov_inv.to(z.device) if cov_inv is not None else torch.linalg.pinv(covariance.to(z.device).float().mean(0))
         dist=z[:,None,:]-bank['real'].to(z.device)[None,:,:]
         cov_logits=-torch.einsum('bcd,de,bce->bc',dist,inv,dist)
-        prob_cov=F.softmax(cov_logits/512,dim=-1)
+        prob_cov=F.softmax(cov_logits/cov_divisor,dim=-1)
         desc=unit(bank['description_features'].to(z.device))
         desc_labels=bank['description_labels'].to(z.device)
         similarities=z@desc.T
         knn=torch.stack([similarities[:,desc_labels==c].max(-1).values
                          for c in bank['class_ids']],dim=-1)
-        prob_knn=F.softmax(cosine_temperature*knn,dim=-1)
+        prob_knn=F.softmax(knn_temperature*knn,dim=-1)
         priors=torch.cat((prob_cov[:,:num_base],prob_knn[:,num_base:]),dim=-1)
         scores=ensemble_alpha*flow_prob+(1-ensemble_alpha)*priors
     else:

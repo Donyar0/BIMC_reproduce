@@ -149,6 +149,8 @@ class TangentFlowRunner(Runner):
                                                cov_inv=cov_inv,
                                                cycle_gate=self.cfg.FLOW.CYCLE_GATE,
                                                cosine_temperature=self.cfg.FLOW.COSINE_TEMPERATURE,
+                                               knn_temperature=self.cfg.FLOW.KNN_TEMPERATURE,
+                                               cov_divisor=self.cfg.FLOW.COV_DIVISOR,
                                                return_components=task_id == 1)
             if task_id == 1:
                 _, logits, cycle_error, components = result
