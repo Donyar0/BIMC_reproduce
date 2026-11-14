@@ -295,3 +295,13 @@ python -u main.py --data_cfg configs/datasets/cub200.yaml \
 `output/unified_flow_image_text_fm_incremental/`。它们是两个独立训练实验；
 伪原型双损失和循环约束产生的旧权重不能代替这次的单损失训练。
 实际准确率和学习率超参数需用验证集检验。
+
+## Base-only tangent text-distribution Flow
+
+Run `python main.py --data_cfg configs/datasets/cub200.yaml --train_cfg configs/trainers/tangent_flow.yaml` after setting the dataset root and installing dependencies. The same trainer config supports CIFAR-100 and mini-ImageNet.
+
+This separate `METHOD: tangent_flow` trains an eight-block velocity network on Base classes only. Its center `T_c` is the existing BiMC fused text prototype. Per-description CLIP embeddings provide a diagonal standard deviation after projection into the tangent plane at `T_c`. Training samples tangent noise, caps its angle, and maps it back to the unit sphere. With probability `MIX_PROBABILITY`, it interpolates both sampled text origins and corresponding visual endpoints between two Base classes. The endpoint is the uncalibrated Base visual prototype. The objective is only the squared flow-matching velocity error; no cross-entropy loss is used.
+
+After Base, the network remains frozen. Each session forwards only its new `T_c` through the velocity field, fuses the result with its real visual mean, and appends the resulting prototype to the immutable Bank. At test time, the original image feature is compared with this Bank; the image is also integrated backward and compared with the untouched `T_c`. `GAMMA` blends these scores and `ALPHA` controls the backward query contribution. No existing unified-flow checkpoints are compatible.
+
+The repository does not contain dataset images or CLIP weights. Hyperparameters and accuracy must be validated on actual data; the provided configuration is a starting point.

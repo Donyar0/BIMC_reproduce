@@ -73,6 +73,9 @@ def extend_cfg(cfg):
     cfg.TRAINER.BiMC.USING_ENSEMBLE = False
 
     cfg.FLOW = CN()
+    cfg.FLOW.NOISE_SCALE = 1.0
+    cfg.FLOW.MAX_ANGLE = 0.5
+    cfg.FLOW.MIX_PROBABILITY = 0.2
     cfg.FLOW.EPOCHS = 100
     cfg.FLOW.BATCH_SIZE = 64
     cfg.FLOW.LR = 0.0002
@@ -143,6 +146,8 @@ def main():
     # Import and run the trainer
     if cfg.METHOD.lower() == 'single_flow':
         from engine.flow_engine import FlowRunner as Runner
+    elif cfg.METHOD.lower() == 'tangent_flow':
+        from engine.tangent_flow_engine import TangentFlowRunner as Runner
     elif cfg.METHOD.lower() == 'unified_flow':
         from engine.unified_flow_engine import UnifiedFlowRunner as Runner
     elif cfg.METHOD.lower() in ('', 'bimc'):
