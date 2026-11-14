@@ -48,7 +48,9 @@ def distributions(stats, base=None, shrink=0.1, transfer_temperature=16.):
     diag = cov.diagonal(dim1=-2, dim2=-1).mean(-1).clamp_min(1e-6)
     eye = torch.eye(dim).unsqueeze(0)
     cov = cov + (0.05*diag).view(-1,1,1)*eye + 1e-6*eye
-    return dict(class_ids=ids, text=text, real=visual, sigma=sigma, cov=cov,
+    return dict(class_ids=ids, text=text, real=visual,
+                bank_real=unit(stats['image_proto'].detach().float()).cpu(),
+                sigma=sigma, cov=cov,
                 base_cov=base_cov, base_text=base_text,
                 session_lengths=[len(ids)],
                 description_features=desc, description_labels=desc_labels)
@@ -221,17 +223,22 @@ def load_model(checkpoint,device):
 
 @torch.no_grad()
 def build_bank(checkpoint,current,*,steps,num_base,beta_base,beta_inc,device,
-               previous_bank=None,solver='euler'):
+               previous_bank=None,solver='euler',bank_mode='flow'):
     ids=current['class_ids']
     if previous_bank is not None and set(ids)&set(previous_bank['class_ids']):
         raise ValueError('Repeated class IDs')
     text=current['text']
-    real=current['real']
+    real=current['bank_real'] if bank_mode == 'bimc_incremental' else current['real']
     generated=transport(load_model(checkpoint,device),text.to(device),steps,solver=solver).cpu()
     beta=torch.full((len(ids),1),beta_inc)
     beta[:num_base]=beta_base
+    prototypes=unit((1-beta)*real+beta*generated)
+    if bank_mode == 'bimc_incremental' and previous_bank is not None:
+        prototypes=unit(0.3*current['bank_text']+0.7*real)
+    elif bank_mode != 'flow' and bank_mode != 'bimc_incremental':
+        raise ValueError('Unknown visual Bank mode')
     new=dict(class_ids=ids,text=text,real=real,generated=generated,
-             prototypes=unit((1-beta)*real+beta*generated),
+             prototypes=prototypes,
              description_features=current['description_features'],
              description_labels=current['description_labels'])
     if previous_bank is None:
@@ -246,7 +253,8 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
                            solver='euler',cycle_scale=0.01,ensemble_alpha=0.8,
                            num_base=0,covariance=None,cov_inv=None,
                            cycle_gate=False,cosine_temperature=1.,
-                           knn_temperature=25.,cov_divisor=512.,return_components=False):
+                           knn_temperature=25.,cov_divisor=512.,return_components=False,
+                           gamma_base=None,gamma_inc=None):
     if not (0<=alpha<=1 and 0<=gamma<=1 and cycle_scale>0 and
             cosine_temperature>0 and knn_temperature>0 and cov_divisor>0 and
             0<=ensemble_alpha<=1):
@@ -255,7 +263,13 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
     t_hat=transport(model,z,steps,reverse=True,solver=solver)
     z_reconstructed=transport(model,t_hat,steps,solver=solver)
     error=(z-z_reconstructed).square().sum(-1,keepdim=True)
-    gamma_z=1-(1-gamma)*torch.exp(-error/cycle_scale) if cycle_gate else torch.full_like(error,gamma)
+    base_weight=gamma if gamma_base is None else gamma_base
+    inc_weight=gamma if gamma_inc is None else gamma_inc
+    if not 0<=base_weight<=1 or not 0<=inc_weight<=1:
+        raise ValueError('Invalid per-group gamma')
+    gamma_columns=torch.full((1,len(bank['class_ids'])),inc_weight,device=z.device)
+    gamma_columns[:,:num_base]=base_weight
+    gamma_z=1-(1-gamma_columns)*torch.exp(-error/cycle_scale) if cycle_gate else gamma_columns
     text_query=unit((1-alpha)*z+alpha*t_hat)
     visual_prob=F.softmax(cosine_temperature*(z@bank['prototypes'].to(z.device).T),dim=-1)
     text_prob=F.softmax(cosine_temperature*(text_query@bank['text'].to(z.device).T),dim=-1)

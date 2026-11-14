@@ -343,3 +343,9 @@ The three `*t500.yaml` configurations now use `COSINE_TEMPERATURE: 500.0` for Fl
 ### Task 1 new-class visual Bank check
 
 Task 1 evaluation now prints `visual_real_new` and `visual_flow_new` accuracies for both Task 0 and Task 1. Both scores use only cosine similarity in visual space against all seen classes; Base Bank rows remain the same fused prototypes. The Task 1 rows are replaced by either the unblended five-shot real visual means or the unblended forward-generated Flow text prototypes. This isolates the new-class Bank contribution from reverse-text and Cov/KNN scoring. The all-seen CE configurations now use `CONTRAST_WEIGHT: 0.05` (the previous value was 0.1, not 1.0) and write to new output directories.
+
+### BiMC-calibrated incremental Bank and per-group bidirectional scoring
+
+`configs/trainers/tangent_flow_bimc_bank_noce.yaml` disables endpoint CE, keeps 16 Base + 16 historical-increment replay and velocity distillation weight 1.0, and enables `VISION_CALIBRATION`. For each **new** class, the visual Bank row becomes the normalized original BiMC mixture: `0.3 * ((1-LAMBDA_T)*prompt_proto + LAMBDA_T*description_proto) + 0.7 * soft_calibrated_visual_proto`. It does not include the generated `Flow(T_new)` in that Bank row. The real support mean remains available for training the visual distribution. Base Bank rows retain their prior behavior. Flow/KNN temperatures remain 500 and the Cov divisor remains 2048.
+
+`configs/trainers/tangent_flow_bimc_bank_group_gamma.yaml` uses the same training and Bank, but gives Base columns 0.8 visual / 0.2 reverse-text and incremental columns 0.3 visual / 0.7 reverse-text before the existing Cov/KNN probability blend. Both configurations have separate result directories. The accuracy figures motivating this comparison are user-provided and have not been reproduced in this workspace.

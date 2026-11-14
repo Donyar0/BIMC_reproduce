@@ -54,6 +54,10 @@ class TangentFlowRunner(Runner):
             current = distributions(stats, base=memory if task_id else None,
                                     shrink=flow.COV_SHRINK,
                                     transfer_temperature=flow.COV_TRANSFER_TEMPERATURE)
+            if flow.BANK_MODE == 'bimc_incremental' and task_id:
+                lam = cfg.TRAINER.BiMC.LAMBDA_T
+                current['bank_text'] = ((1-lam)*stats['text_features'].detach().float()
+                                        +lam*stats['description_proto'].detach().float()).cpu()
             if cfg.TRAINER.BiMC.PROTOTYPE_CACHE_DIR:
                 cache_dir = Path(cfg.TRAINER.BiMC.PROTOTYPE_CACHE_DIR) / cfg.DATASET.NAME.lower() / run_name
                 cache_dir.mkdir(parents=True, exist_ok=True)
@@ -93,7 +97,8 @@ class TangentFlowRunner(Runner):
             bank = build_bank(checkpoint, current, steps=flow.STEPS,
                               num_base=num_base if task_id == 0 else 0,
                               beta_base=flow.BETA_BASE, beta_inc=flow.BETA_INC,
-                              device=self.device, previous_bank=bank, solver=flow.SOLVER)
+                              device=self.device, previous_bank=bank, solver=flow.SOLVER,
+                              bank_mode=flow.BANK_MODE)
             torch.save(checkpoint, output / f'flow_session{task_id}.pt')
             torch.save(bank, output / f'bank_session{task_id}.pt')
             del stats, loader
@@ -165,6 +170,8 @@ class TangentFlowRunner(Runner):
                                                cosine_temperature=self.cfg.FLOW.COSINE_TEMPERATURE,
                                                knn_temperature=self.cfg.FLOW.KNN_TEMPERATURE,
                                                cov_divisor=self.cfg.FLOW.COV_DIVISOR,
+                                               gamma_base=(self.cfg.FLOW.GAMMA_BASE if self.cfg.FLOW.GAMMA_BASE >= 0 else None),
+                                               gamma_inc=(self.cfg.FLOW.GAMMA_INC if self.cfg.FLOW.GAMMA_INC >= 0 else None),
                                                return_components=task_id == 1)
             if task_id == 1:
                 _, logits, cycle_error, components = result
