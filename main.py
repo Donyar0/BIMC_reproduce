@@ -73,6 +73,13 @@ def extend_cfg(cfg):
     cfg.TRAINER.BiMC.USING_ENSEMBLE = False
 
     cfg.FLOW = CN()
+    cfg.FLOW.STEPS_PER_EPOCH = 100
+    cfg.FLOW.VISUAL_SCALE = 1.0
+    cfg.FLOW.MAX_RADIUS = 0.5
+    cfg.FLOW.COV_SHRINK = 0.1
+    cfg.FLOW.COV_TRANSFER_TEMPERATURE = 16.0
+    cfg.FLOW.REPLAY_FRACTION = 0.5
+    cfg.FLOW.CYCLE_SCALE = 0.01
     cfg.FLOW.NOISE_SCALE = 1.0
     cfg.FLOW.MAX_ANGLE = 0.5
     cfg.FLOW.MIX_PROBABILITY = 0.2

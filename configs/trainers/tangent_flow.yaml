@@ -33,11 +33,16 @@ TRAINER:
     LAMBDA_T: 0.5
 
 
-# Base-only text-distribution to visual-prototype Flow. Tune on base validation data.
+# Distributional text-to-visual Flow with exemplar-free incremental replay.
 FLOW:
+  STEPS_PER_EPOCH: 100
+  VISUAL_SCALE: 1.0
+  MAX_RADIUS: 0.5
+  COV_SHRINK: 0.1
+  COV_TRANSFER_TEMPERATURE: 16.0
+  REPLAY_FRACTION: 0.5
+  CYCLE_SCALE: 0.01
   NOISE_SCALE: 1.0
-  MAX_ANGLE: 0.5
-  MIX_PROBABILITY: 0.2
   EPOCHS: 100
   BATCH_SIZE: 64
   LR: 0.0002
@@ -48,12 +53,9 @@ FLOW:
   HIDDEN: 0  # 0 uses CLIP feature dimension
   STEPS: 8
   SOLVER: "euler"  # euler, midpoint, heun, rk4; inference only
-  OUTPUT_DIR: "output/tangent_flow_text_visual"
-  ADAPT_STEPS: 0
+  OUTPUT_DIR: "output/gaussian_text_visual_flow"
+  ADAPT_STEPS: 100
   ALPHA: 1.0  # full reverse image-to-text integration
   BETA_BASE: 0.1
   BETA_INC: 0.5  # validation search: 0.3 to 0.6
   GAMMA: 0.5  # validation search: 0.4 to 0.7
-  LOGIT_SCALE: 1.0  # multiplier before softmax; tune on validation data
-  PREDICTION: "velocity"  # this method trains a velocity field
-  TIME_EPS: 0.05  # unused by this method

@@ -1,4 +1,4 @@
-"""Base-only tangent text-to-visual Flow runner."""
+"""Distributional text-to-visual Flow runner with exemplar-free replay."""
 import csv
 import json
 import time
@@ -10,9 +10,8 @@ import torch
 from tqdm import tqdm
 
 from engine.engine import Runner
-from single_flow.bimc_cache import from_task_statistics
-from single_flow.text_distribution_flow import fit, build_bank, classify_bidirectional, load_model, description_std, METHOD, DIRECTION
-from single_flow.unified_flow import real_means
+from single_flow.text_distribution_flow import (fit, adapt, distributions, combine, build_bank,
+                                                classify_bidirectional, load_model, METHOD, DIRECTION)
 from utils.experiment_logger import log_metrics
 
 
@@ -21,14 +20,12 @@ class TangentFlowRunner(Runner):
     def run(self):
         cfg = self.cfg
         flow = cfg.FLOW
-        if flow.ADAPT_STEPS != 0:
-            raise ValueError('Tangent Flow is permanently frozen after Base; set ADAPT_STEPS: 0')
+        if flow.ADAPT_STEPS < 0:
+            raise ValueError('ADAPT_STEPS must be nonnegative')
         if flow.SOLVER not in ('euler', 'midpoint', 'heun', 'rk4'):
             raise ValueError('Unknown FLOW.SOLVER')
         if not cfg.TRAINER.BiMC.TEXT_CALIBRATION:
             raise ValueError('Enable original BiMC description fusion: TEXT_CALIBRATION: True')
-        if not np.isfinite(flow.LOGIT_SCALE) or flow.LOGIT_SCALE <= 0:
-            raise ValueError('FLOW.LOGIT_SCALE must be finite and positive')
         model = self.model.module if self.is_distributed else self.model
         model.eval().requires_grad_(False)
         run_name = f'seed_{cfg.SEED}_{datetime.now().strftime("%Y%m%d_%H%M%S_%f")}'
@@ -37,7 +34,7 @@ class TangentFlowRunner(Runner):
         (output / 'config.yaml').write_text(cfg.dump(), encoding='utf-8')
         encoder_id = str((cfg.MODEL.BACKBONE.NAME, cfg.TRAINER.BiMC.PREC, str(cfg.DATASET),
                           METHOD, DIRECTION, str(cfg.TRAINER.BiMC)))
-        rows, checkpoint, bank = [], None, None
+        rows, checkpoint, bank, memory = [], None, None, None
         num_base = len(self.data_manager.class_index_in_task[0])
         print(f'Method: tangent_flow | Dataset: {cfg.DATASET.NAME} | Seed: {cfg.SEED}')
         print(f'Results directory: {output}')
@@ -53,42 +50,48 @@ class TangentFlowRunner(Runner):
                 names, loader, class_index=class_ids,
                 calibrate_novel_vision_proto=cfg.TRAINER.BiMC.VISION_CALIBRATION,
                 calculate_covariance=False)
-            cache = from_task_statistics(stats, encoder_id, task_id)
+            current = distributions(stats, base=memory if task_id else None,
+                                    shrink=flow.COV_SHRINK,
+                                    transfer_temperature=flow.COV_TRANSFER_TEMPERATURE)
             if cfg.TRAINER.BiMC.PROTOTYPE_CACHE_DIR:
                 cache_dir = Path(cfg.TRAINER.BiMC.PROTOTYPE_CACHE_DIR) / cfg.DATASET.NAME.lower() / run_name
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                cache['description_std'] = description_std(stats)
-                torch.save(cache, cache_dir / f'session_{task_id}.pt')
-
-            if task_id == 0:
-                cache['description_std'] = description_std(stats)
-                print('Training tangent text-to-visual Flow on base classes...')
-                # run() is no_grad for CLIP/statistics; explicitly enable Flow training.
-                # Isolate torch RNG so training does not alter subsequent data loading.
-                devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
-                with torch.random.fork_rng(devices=devices), torch.enable_grad():
-                    checkpoint = fit(
-                        cache, epochs=flow.EPOCHS, batch_size=flow.BATCH_SIZE,
-                        lr=flow.LR, weight_decay=flow.WEIGHT_DECAY,
-                        blocks=flow.BLOCKS, hidden=flow.HIDDEN or None,
-                        seed=cfg.SEED, device=self.device,
-                        noise_scale=flow.NOISE_SCALE, max_angle=flow.MAX_ANGLE,
-                        mix_probability=flow.MIX_PROBABILITY,
-                        warmup_ratio=flow.WARMUP_RATIO,
-                        min_lr_ratio=flow.MIN_LR_RATIO)
-                torch.save(checkpoint, output / 'base_flow.pt')
-
-            current = dict(class_ids=cache['class_ids'], text=cache['text_prototypes'].float(),
-                           real=real_means(cache), encoder_id=checkpoint['encoder_id'])
+                torch.save(current, cache_dir / f'session_{task_id}.pt')
+            memory = current if memory is None else combine(memory, current)
+            devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+            with torch.random.fork_rng(devices=devices), torch.enable_grad():
+                if task_id == 0:
+                    checkpoint = fit(memory, epochs=flow.EPOCHS,
+                                     steps_per_epoch=flow.STEPS_PER_EPOCH,
+                                     batch_size=flow.BATCH_SIZE, lr=flow.LR,
+                                     weight_decay=flow.WEIGHT_DECAY, blocks=flow.BLOCKS,
+                                     hidden=flow.HIDDEN or None, seed=cfg.SEED,
+                                     device=self.device, noise_scale=flow.NOISE_SCALE,
+                                     visual_scale=flow.VISUAL_SCALE,
+                                     max_radius=flow.MAX_RADIUS,
+                                     warmup_ratio=flow.WARMUP_RATIO,
+                                     min_lr_ratio=flow.MIN_LR_RATIO)
+                    torch.save(checkpoint, output / 'base_flow.pt')
+                elif flow.ADAPT_STEPS:
+                    checkpoint = adapt(checkpoint, memory, steps=flow.ADAPT_STEPS,
+                                       batch_size=flow.BATCH_SIZE, lr=flow.ADAPT_LR,
+                                       weight_decay=flow.WEIGHT_DECAY,
+                                       seed=cfg.SEED+task_id, device=self.device,
+                                       noise_scale=flow.NOISE_SCALE,
+                                       visual_scale=flow.VISUAL_SCALE,
+                                       max_radius=flow.MAX_RADIUS,
+                                       replay_fraction=flow.REPLAY_FRACTION,
+                                       warmup_ratio=flow.WARMUP_RATIO,
+                                       min_lr_ratio=flow.MIN_LR_RATIO)
             bank = build_bank(checkpoint, current, steps=flow.STEPS,
                               num_base=num_base if task_id == 0 else 0,
                               beta_base=flow.BETA_BASE, beta_inc=flow.BETA_INC,
                               device=self.device, previous_bank=bank, solver=flow.SOLVER)
             torch.save(checkpoint, output / f'flow_session{task_id}.pt')
             torch.save(bank, output / f'bank_session{task_id}.pt')
-            del stats, cache, loader
+            del stats, loader
             self._checkpoint = checkpoint
-            acc = self.inference_task_flow(task_id, bank, model)
+            acc = self.inference_task_flow(task_id, bank, memory, model)
             elapsed = time.time() - start
             self.acc_list.append(acc['mean_acc'])
             self.task_acc_list.append(acc['task_acc'])
@@ -117,29 +120,35 @@ class TangentFlowRunner(Runner):
         raise NotImplementedError('Saved-run reevaluation is not implemented for tangent_flow')
 
     @torch.no_grad()
-    def inference_task_flow(self, task_id, bank, model):
+    def inference_task_flow(self, task_id, bank, memory, model):
         # The existing evaluator interprets score column index as global class ID.
         expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1]
                     for c in group]
         if bank['class_ids'] != expected or expected != list(range(len(expected))):
             raise ValueError('BIMC evaluator requires ordered, contiguous seen-class IDs')
         loader = self.data_manager.get_dataloader(task_id, source='test', mode='test')
-        scores, targets = [], []
+        scores, targets, errors = [], [], []
         velocity = load_model(checkpoint=self._checkpoint, device=self.device).eval()
+        cov_inv = torch.linalg.pinv(memory['cov'].float().mean(0).to(self.device))
         device_bank = dict(bank, prototypes=bank['prototypes'].to(self.device), text=bank['text'].to(self.device))
         for batch in tqdm(loader):
             images, labels = self.parse_batch(batch)
             features = model.extract_img_feature(images)
-            _, logits = classify_bidirectional(velocity, features, device_bank,
+            _, logits, cycle_error = classify_bidirectional(velocity, features, device_bank,
                                                alpha=self.cfg.FLOW.ALPHA, gamma=self.cfg.FLOW.GAMMA,
                                                steps=self.cfg.FLOW.STEPS,
-                                               solver=self.cfg.FLOW.SOLVER)
-            logits = torch.softmax(logits * self.cfg.FLOW.LOGIT_SCALE, dim=-1)
+                                               solver=self.cfg.FLOW.SOLVER,
+                                               cycle_scale=self.cfg.FLOW.CYCLE_SCALE,
+                                               ensemble_alpha=self.cfg.DATASET.ENSEMBLE_ALPHA,
+                                               num_base=len(self.data_manager.class_index_in_task[0]),
+                                               covariance=memory['cov'], cov_inv=cov_inv)
+            errors.append(cycle_error.cpu())
             scores.append(logits.cpu())
             targets.append(labels.cpu())
         if not scores:
             raise ValueError('Empty test loader')
         acc = self.evaluator.calc_accuracy(torch.cat(scores), torch.cat(targets), task_id)
+        acc['cycle_error_mean'] = torch.cat(errors).mean().item()
         print(f'Test acc mean: {acc["mean_acc"]}, task-wise acc: {acc["task_acc"]}')
         return acc
 
