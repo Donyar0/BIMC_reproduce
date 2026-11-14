@@ -228,14 +228,17 @@ def build_bank(checkpoint,current,*,steps,num_base,beta_base,beta_inc,device,
     if previous_bank is not None and set(ids)&set(previous_bank['class_ids']):
         raise ValueError('Repeated class IDs')
     text=current['text']
-    real=current['bank_real'] if bank_mode == 'bimc_incremental' else current['real']
+    real=(current['bank_real'] if bank_mode in ('bimc_incremental','pure_visual')
+          else current['real'])
     generated=transport(load_model(checkpoint,device),text.to(device),steps,solver=solver).cpu()
     beta=torch.full((len(ids),1),beta_inc)
     beta[:num_base]=beta_base
     prototypes=unit((1-beta)*real+beta*generated)
-    if bank_mode == 'bimc_incremental' and previous_bank is not None:
+    if bank_mode == 'pure_visual':
+        prototypes=unit(real)
+    elif bank_mode == 'bimc_incremental' and previous_bank is not None:
         prototypes=unit(0.3*current['bank_text']+0.7*real)
-    elif bank_mode != 'flow' and bank_mode != 'bimc_incremental':
+    elif bank_mode not in ('flow','bimc_incremental'):
         raise ValueError('Unknown visual Bank mode')
     new=dict(class_ids=ids,text=text,real=real,generated=generated,
              prototypes=prototypes,
