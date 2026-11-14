@@ -65,15 +65,21 @@ def combine(old, new):
 
 
 def sample_old_rows(session_lengths, count, device):
-    """Choose a past session uniformly, then a class uniformly within it."""
+    """Split old replay between Base and earlier incremental sessions."""
     past = session_lengths[:-1]
-    if not past or any(length <= 0 for length in past):
+    if not past or any(length <= 0 for length in past) or count < 0:
         raise ValueError('Old-class replay needs nonempty historical sessions')
-    sizes = torch.tensor(past, device=device)
-    session = torch.randint(len(past), (count,), device=device)
-    starts = torch.cat((sizes.new_zeros(1), sizes.cumsum(0)[:-1]))
-    offset = (torch.rand(count, device=device) * sizes[session]).long()
-    return starts[session] + offset
+    base_count = count if len(past) == 1 else count // 2
+    base_rows = torch.randint(past[0], (base_count,), device=device)
+    inc_count = count-base_count
+    if not inc_count:
+        return base_rows
+    sizes = torch.tensor(past[1:], device=device)
+    session = torch.randint(len(sizes), (inc_count,), device=device)
+    starts = past[0] + torch.cat((sizes.new_zeros(1), sizes.cumsum(0)[:-1]))
+    offset = (torch.rand(inc_count, device=device) * sizes[session]).long()
+    rows = torch.cat((base_rows, starts[session]+offset))
+    return rows[torch.randperm(count, device=device)]
 
 
 def sample_pairs(memory, rows, noise_scale, visual_scale, max_radius, device, chol_all=None):
