@@ -55,7 +55,7 @@ FLOW:
   HIDDEN: 0  # 0 uses CLIP feature dimension
   STEPS: 8
   SOLVER: "euler"  # euler, midpoint, heun, rk4; inference only
-  OUTPUT_DIR: "output/gaussian_text_visual_flow"
+  OUTPUT_DIR: "output/gaussian_text_visual_flow_only"
   ADAPT_STEPS: 100
   ALPHA: 1.0  # full reverse image-to-text integration
   BETA_BASE: 0.1

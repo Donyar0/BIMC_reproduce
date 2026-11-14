@@ -91,7 +91,7 @@ class TangentFlowRunner(Runner):
             torch.save(bank, output / f'bank_session{task_id}.pt')
             del stats, loader
             self._checkpoint = checkpoint
-            acc = self.inference_task_flow(task_id, bank, memory, model)
+            acc = self.inference_task_flow(task_id, bank, model)
             elapsed = time.time() - start
             self.acc_list.append(acc['mean_acc'])
             self.task_acc_list.append(acc['task_acc'])
@@ -120,7 +120,7 @@ class TangentFlowRunner(Runner):
         raise NotImplementedError('Saved-run reevaluation is not implemented for tangent_flow')
 
     @torch.no_grad()
-    def inference_task_flow(self, task_id, bank, memory, model):
+    def inference_task_flow(self, task_id, bank, model):
         # The existing evaluator interprets score column index as global class ID.
         expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1]
                     for c in group]
@@ -131,7 +131,6 @@ class TangentFlowRunner(Runner):
         ablations = {name: [] for name in ('visual', 'text', 'flow')} if task_id == 1 else None
         base_errors, incremental_errors = [], []
         velocity = load_model(checkpoint=self._checkpoint, device=self.device).eval()
-        cov_inv = torch.linalg.pinv(memory['cov'].float().mean(0).to(self.device))
         device_bank = dict(bank, prototypes=bank['prototypes'].to(self.device), text=bank['text'].to(self.device))
         for batch in tqdm(loader):
             images, labels = self.parse_batch(batch)
@@ -141,9 +140,7 @@ class TangentFlowRunner(Runner):
                                                steps=self.cfg.FLOW.STEPS,
                                                solver=self.cfg.FLOW.SOLVER,
                                                cycle_scale=self.cfg.FLOW.CYCLE_SCALE,
-                                               ensemble_alpha=self.cfg.DATASET.ENSEMBLE_ALPHA,
-                                               num_base=len(self.data_manager.class_index_in_task[0]),
-                                               covariance=memory['cov'], cov_inv=cov_inv,
+                                               ensemble_alpha=1.0,
                                                cycle_gate=self.cfg.FLOW.CYCLE_GATE,
                                                cosine_temperature=self.cfg.FLOW.COSINE_TEMPERATURE,
                                                return_components=task_id == 1)
