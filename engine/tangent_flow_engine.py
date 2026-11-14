@@ -69,6 +69,8 @@ class TangentFlowRunner(Runner):
                                      device=self.device, noise_scale=flow.NOISE_SCALE,
                                      visual_scale=flow.VISUAL_SCALE,
                                      max_radius=flow.MAX_RADIUS,
+                                     contrast_weight=flow.CONTRAST_WEIGHT,
+                                     contrast_temperature=flow.CONTRAST_TEMPERATURE,
                                      warmup_ratio=flow.WARMUP_RATIO,
                                      min_lr_ratio=flow.MIN_LR_RATIO)
                     torch.save(checkpoint, output / 'base_flow.pt')
@@ -82,6 +84,8 @@ class TangentFlowRunner(Runner):
                                        max_radius=flow.MAX_RADIUS,
                                        replay_fraction=flow.REPLAY_FRACTION,
                                        replay_strategy=flow.REPLAY_STRATEGY,
+                                       contrast_weight=flow.CONTRAST_WEIGHT,
+                                       contrast_temperature=flow.CONTRAST_TEMPERATURE,
                                        distill_weight=flow.DISTILL_WEIGHT,
                                        warmup_ratio=flow.WARMUP_RATIO,
                                        min_lr_ratio=flow.MIN_LR_RATIO)

@@ -98,7 +98,8 @@ def sample_pairs(memory, rows, noise_scale, visual_scale, max_radius, device, ch
 def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, device,
            noise_scale, visual_scale, max_radius, replay_fraction,
            warmup_ratio, min_lr_ratio, blocks=None, hidden=None, distill_weight=0.,
-           replay_strategy='base_incremental_half'):
+           replay_strategy='base_incremental_half', contrast_weight=0.,
+           contrast_temperature=20.):
     if steps < 1 or batch_size < 1 or lr <= 0 or weight_decay < 0 or not 0 <= replay_fraction <= 1:
         raise ValueError('Invalid training parameters')
     torch.manual_seed(seed)
@@ -111,8 +112,8 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
         arch = checkpoint['architecture']
         network = DeepFlowMatchingNet(**arch).to(device)
         network.load_state_dict(checkpoint['state_dict'])
-    if distill_weight < 0:
-        raise ValueError('DISTILL_WEIGHT must be nonnegative')
+    if distill_weight < 0 or contrast_weight < 0 or contrast_temperature <= 0:
+        raise ValueError('Invalid auxiliary loss settings')
     if replay_strategy not in ('base_incremental_half', 'class_uniform'):
         raise ValueError('Unknown replay strategy')
     prev_model = copy.deepcopy(network).eval() if checkpoint is not None and distill_weight else None
@@ -125,6 +126,7 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
     old_count = nclass-current_count
     history=[]
     distill_history=[]
+    contrast_history=[]
     chol_all = torch.linalg.cholesky(memory['cov'].to(device))
     for step in range(steps):
         if old_count == 0:
@@ -153,6 +155,15 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
             distill_loss = (velocity[old]-previous_velocity).square().sum(-1).mean()
             loss = loss + distill_weight*distill_loss
             distill_history.append(distill_loss.item())
+        if contrast_weight:
+            # Duplicate class labels share one target column, avoiding false negatives.
+            unique_rows, targets = rows.unique(sorted=True, return_inverse=True)
+            visual_means = unit(memory['real'].to(device)[unique_rows])
+            end_hat = unit(xt+(1-t)*velocity)
+            contrast_loss = F.cross_entropy(contrast_temperature*end_hat@visual_means.T,
+                                            targets)
+            loss = loss + contrast_weight*contrast_loss
+            contrast_history.append(contrast_loss.item())
         if not torch.isfinite(loss):
             raise RuntimeError('Nonfinite Flow loss')
         scheduled_lr(opt,step,steps,lr,warmup_ratio,min_lr_ratio)
@@ -165,31 +176,40 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
                   flow_direction=DIRECTION,method=METHOD,
                   loss_history=history if checkpoint is None else checkpoint['loss_history']+history,
                   distill_weight=distill_weight, replay_strategy=replay_strategy,
-                  distill_history=distill_history)
+                  distill_history=distill_history,
+                  contrast_weight=contrast_weight,
+                  contrast_temperature=contrast_temperature,
+                  contrast_history=contrast_history)
     if distill_history:
         print(f'adapt fm+distill_loss={history[-1]:.6f} '
               f'distill_loss={sum(distill_history)/len(distill_history):.6f}',flush=True)
+    if contrast_history:
+        print(f'contrast_loss={sum(contrast_history)/len(contrast_history):.6f}',flush=True)
     return result
 
 
 def fit(memory, *, epochs, steps_per_epoch, batch_size, lr, weight_decay, blocks, hidden,
         seed, device, noise_scale=1., visual_scale=1., max_radius=0.5,
-        warmup_ratio=0.05,min_lr_ratio=0.01):
+        warmup_ratio=0.05,min_lr_ratio=0.01,
+        contrast_weight=0.,contrast_temperature=20.):
     return _train(None,memory,steps=epochs*steps_per_epoch,batch_size=batch_size,lr=lr,
                   weight_decay=weight_decay,seed=seed,device=device,noise_scale=noise_scale,
                   visual_scale=visual_scale,max_radius=max_radius,replay_fraction=0.,
-                  warmup_ratio=warmup_ratio,min_lr_ratio=min_lr_ratio,blocks=blocks,hidden=hidden)
+                  warmup_ratio=warmup_ratio,min_lr_ratio=min_lr_ratio,blocks=blocks,hidden=hidden,
+                  contrast_weight=contrast_weight,contrast_temperature=contrast_temperature)
 
 
 def adapt(checkpoint,memory,*,steps,batch_size,lr,weight_decay,seed,device,
           noise_scale,visual_scale,max_radius,replay_fraction,
           warmup_ratio=0.05,min_lr_ratio=0.01,distill_weight=0.,
-          replay_strategy='base_incremental_half'):
+          replay_strategy='base_incremental_half',contrast_weight=0.,
+          contrast_temperature=20.):
     return _train(checkpoint,memory,steps=steps,batch_size=batch_size,lr=lr,
                   weight_decay=weight_decay,seed=seed,device=device,noise_scale=noise_scale,
                   visual_scale=visual_scale,max_radius=max_radius,replay_fraction=replay_fraction,
                   warmup_ratio=warmup_ratio,min_lr_ratio=min_lr_ratio,
-                  distill_weight=distill_weight,replay_strategy=replay_strategy)
+                  distill_weight=distill_weight,replay_strategy=replay_strategy,
+                  contrast_weight=contrast_weight,contrast_temperature=contrast_temperature)
 
 
 def load_model(checkpoint,device):

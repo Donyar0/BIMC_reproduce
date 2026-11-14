@@ -86,6 +86,8 @@ def extend_cfg(cfg):
     cfg.FLOW.COV_DIVISOR = 512.0
     cfg.FLOW.DISTILL_WEIGHT = 0.0
     cfg.FLOW.REPLAY_STRATEGY = 'base_incremental_half'
+    cfg.FLOW.CONTRAST_WEIGHT = 0.0
+    cfg.FLOW.CONTRAST_TEMPERATURE = 20.0
     cfg.FLOW.USE_GEOMETRY_PRIORS = False
     cfg.FLOW.NOISE_SCALE = 1.0
     cfg.FLOW.MAX_ANGLE = 0.5
