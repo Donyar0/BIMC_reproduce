@@ -44,6 +44,7 @@ FLOW:
   CYCLE_SCALE: 0.01
   CYCLE_GATE: False  # diagnostic baseline: disable reconstruction gate
   COSINE_TEMPERATURE: 1.0  # keep original scale for Task 1 diagnosis
+  USE_GEOMETRY_PRIORS: False
   NOISE_SCALE: 0.25
   EPOCHS: 100
   BATCH_SIZE: 64

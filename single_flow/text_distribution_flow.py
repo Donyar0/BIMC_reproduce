@@ -190,7 +190,7 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
     text_prob=F.softmax(cosine_temperature*(text_query@bank['text'].to(z.device).T),dim=-1)
     flow_prob=gamma_z*visual_prob+(1-gamma_z)*text_prob
     if ensemble_alpha<1:
-        if covariance is None:
+        if covariance is None and cov_inv is None:
             raise ValueError('Covariance is required for geometry priors')
         inv = cov_inv.to(z.device) if cov_inv is not None else torch.linalg.pinv(covariance.to(z.device).float().mean(0))
         dist=z[:,None,:]-bank['real'].to(z.device)[None,:,:]

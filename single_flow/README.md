@@ -315,3 +315,7 @@ A reversible ODE tends to yield low cycle error even for out-of-distribution inp
 ### Flow-only 11-session experiment
 
 The current `tangent_flow.yaml` evaluates only the visual Bank and reverse-text Flow branches. The runner calls `classify_bidirectional(..., ensemble_alpha=1.0)` for every session, skips the Mahalanobis pseudoinverse, and never computes Cov/KNN scores. Visual covariances remain necessary for Gaussian endpoint sampling and distribution replay during training. Results go to `output/gaussian_text_visual_flow_only/` so earlier ensemble runs are not overwritten. Task 1 visual-only, text-only, and Flow-only diagnostics remain available. The `DATASET.ENSEMBLE_ALPHA` value does not affect this method's current inference.
+
+### Pure Flow versus Full at temperature 25
+
+`configs/trainers/tangent_flow.yaml` is the pure Flow baseline (`USE_GEOMETRY_PRIORS: False`, `COSINE_TEMPERATURE: 1.0`). `configs/trainers/tangent_flow_full_t25.yaml` enables the original Base Cov / incremental Description KNN probability blend and applies `COSINE_TEMPERATURE: 25.0` to visual, reverse-text, and KNN cosine logits before softmax. The covariance logits retain BiMC's `/512` scaling. The two configurations write to separate output directories. Run both with the same dataset config and seed, then compare `Final session Acc` and `Average session Acc`. Temperature can affect the mix of visual and text probability branches even without Cov/KNN, so the pure Flow run deliberately retains the previous value of 1.0.

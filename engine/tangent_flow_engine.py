@@ -131,6 +131,9 @@ class TangentFlowRunner(Runner):
         ablations = {name: [] for name in ('visual', 'text', 'flow')} if task_id == 1 else None
         base_errors, incremental_errors = [], []
         velocity = load_model(checkpoint=self._checkpoint, device=self.device).eval()
+        use_priors = self.cfg.FLOW.USE_GEOMETRY_PRIORS
+        cov_inv = (torch.linalg.pinv(memory['cov'].float().mean(0).to(self.device))
+                   if use_priors else None)
         device_bank = dict(bank, prototypes=bank['prototypes'].to(self.device), text=bank['text'].to(self.device))
         for batch in tqdm(loader):
             images, labels = self.parse_batch(batch)
@@ -140,7 +143,10 @@ class TangentFlowRunner(Runner):
                                                steps=self.cfg.FLOW.STEPS,
                                                solver=self.cfg.FLOW.SOLVER,
                                                cycle_scale=self.cfg.FLOW.CYCLE_SCALE,
-                                               ensemble_alpha=1.0,
+                                               ensemble_alpha=(self.cfg.DATASET.ENSEMBLE_ALPHA
+                                                               if use_priors else 1.0),
+                                               num_base=len(self.data_manager.class_index_in_task[0]),
+                                               cov_inv=cov_inv,
                                                cycle_gate=self.cfg.FLOW.CYCLE_GATE,
                                                cosine_temperature=self.cfg.FLOW.COSINE_TEMPERATURE,
                                                return_components=task_id == 1)
