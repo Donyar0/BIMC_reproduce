@@ -91,7 +91,7 @@ class TangentFlowRunner(Runner):
             torch.save(bank, output / f'bank_session{task_id}.pt')
             del stats, loader
             self._checkpoint = checkpoint
-            acc = self.inference_task_flow(task_id, bank, model)
+            acc = self.inference_task_flow(task_id, bank, memory, model)
             elapsed = time.time() - start
             self.acc_list.append(acc['mean_acc'])
             self.task_acc_list.append(acc['task_acc'])
@@ -120,7 +120,7 @@ class TangentFlowRunner(Runner):
         raise NotImplementedError('Saved-run reevaluation is not implemented for tangent_flow')
 
     @torch.no_grad()
-    def inference_task_flow(self, task_id, bank, model):
+    def inference_task_flow(self, task_id, bank, memory, model):
         # The existing evaluator interprets score column index as global class ID.
         expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1]
                     for c in group]
