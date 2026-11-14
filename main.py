@@ -84,6 +84,7 @@ def extend_cfg(cfg):
     cfg.FLOW.COSINE_TEMPERATURE = 1.0
     cfg.FLOW.KNN_TEMPERATURE = 25.0
     cfg.FLOW.COV_DIVISOR = 512.0
+    cfg.FLOW.DISTILL_WEIGHT = 0.0
     cfg.FLOW.USE_GEOMETRY_PRIORS = False
     cfg.FLOW.NOISE_SCALE = 1.0
     cfg.FLOW.MAX_ANGLE = 0.5

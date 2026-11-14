@@ -1,5 +1,6 @@
 """Text/visual Gaussian flow with distribution-only incremental replay."""
 import math
+import copy
 import torch
 import torch.nn.functional as F
 from .fm import DeepFlowMatchingNet
@@ -49,6 +50,7 @@ def distributions(stats, base=None, shrink=0.1, transfer_temperature=16.):
     cov = cov + (0.05*diag).view(-1,1,1)*eye + 1e-6*eye
     return dict(class_ids=ids, text=text, real=visual, sigma=sigma, cov=cov,
                 base_cov=base_cov, base_text=base_text,
+                session_lengths=[len(ids)],
                 description_features=desc, description_labels=desc_labels)
 
 
@@ -58,7 +60,20 @@ def combine(old, new):
     return dict(class_ids=old['class_ids']+new['class_ids'],
                 **{key:torch.cat((old[key],new[key])) for key in
                    ('text','real','sigma','cov','description_features','description_labels')},
-                base_cov=old['base_cov'], base_text=old['base_text'])
+                base_cov=old['base_cov'], base_text=old['base_text'],
+                session_lengths=old['session_lengths'] + new['session_lengths'])
+
+
+def sample_old_rows(session_lengths, count, device):
+    """Choose a past session uniformly, then a class uniformly within it."""
+    past = session_lengths[:-1]
+    if not past or any(length <= 0 for length in past):
+        raise ValueError('Old-class replay needs nonempty historical sessions')
+    sizes = torch.tensor(past, device=device)
+    session = torch.randint(len(past), (count,), device=device)
+    starts = torch.cat((sizes.new_zeros(1), sizes.cumsum(0)[:-1]))
+    offset = (torch.rand(count, device=device) * sizes[session]).long()
+    return starts[session] + offset
 
 
 def sample_pairs(memory, rows, noise_scale, visual_scale, max_radius, device, chol_all=None):
@@ -76,7 +91,7 @@ def sample_pairs(memory, rows, noise_scale, visual_scale, max_radius, device, ch
 
 def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, device,
            noise_scale, visual_scale, max_radius, replay_fraction,
-           warmup_ratio, min_lr_ratio, blocks=None, hidden=None):
+           warmup_ratio, min_lr_ratio, blocks=None, hidden=None, distill_weight=0.):
     if steps < 1 or batch_size < 1 or lr <= 0 or weight_decay < 0 or not 0 <= replay_fraction <= 1:
         raise ValueError('Invalid training parameters')
     torch.manual_seed(seed)
@@ -89,27 +104,43 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
         arch = checkpoint['architecture']
         network = DeepFlowMatchingNet(**arch).to(device)
         network.load_state_dict(checkpoint['state_dict'])
+    if distill_weight < 0:
+        raise ValueError('DISTILL_WEIGHT must be nonnegative')
+    prev_model = copy.deepcopy(network).eval() if checkpoint is not None and distill_weight else None
+    if prev_model is not None:
+        prev_model.requires_grad_(False)
     network.train()
     opt = torch.optim.AdamW(network.parameters(), lr=lr, weight_decay=weight_decay)
-    nbase = len(memory['base_text'])
     nclass = len(memory['class_ids'])
+    current_count = memory['session_lengths'][-1]
+    old_count = nclass-current_count
     history=[]
+    distill_history=[]
     chol_all = torch.linalg.cholesky(memory['cov'].to(device))
     for step in range(steps):
-        if nclass == nbase:
+        if old_count == 0:
             rows = torch.randint(nclass,(batch_size,),device=device)
+            old = torch.zeros(batch_size,dtype=torch.bool,device=device)
         else:
             # Exact per-batch split, including late sessions with many old classes.
             old = torch.zeros(batch_size,dtype=torch.bool,device=device)
             old[:round(batch_size*replay_fraction)] = True
             old = old[torch.randperm(batch_size,device=device)]
             rows = torch.empty(batch_size,dtype=torch.long,device=device)
-            rows[old] = torch.randint(nbase,(int(old.sum()),),device=device)
-            rows[~old] = torch.randint(nbase,nclass,(int((~old).sum()),),device=device)
+            rows[old] = sample_old_rows(memory['session_lengths'],int(old.sum()),device)
+            rows[~old] = torch.randint(old_count,nclass,(int((~old).sum()),),device=device)
         x0,x1 = sample_pairs(memory,rows,noise_scale,visual_scale,max_radius,device,chol_all)
         t = torch.rand(batch_size,1,device=device)
         xt = (1-t)*x0+t*x1
-        loss = (network(xt,t)-(x1-x0)).square().sum(-1).mean()
+        velocity = network(xt,t)
+        fm_loss = (velocity-(x1-x0)).square().sum(-1).mean()
+        loss = fm_loss
+        if prev_model is not None and old.any():
+            with torch.no_grad():
+                previous_velocity = prev_model(xt[old],t[old])
+            distill_loss = (velocity[old]-previous_velocity).square().sum(-1).mean()
+            loss = loss + distill_weight*distill_loss
+            distill_history.append(distill_loss.item())
         if not torch.isfinite(loss):
             raise RuntimeError('Nonfinite Flow loss')
         scheduled_lr(opt,step,steps,lr,warmup_ratio,min_lr_ratio)
@@ -120,7 +151,12 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
     result = dict(format_version=2,architecture=arch,
                   state_dict={k:v.detach().cpu().clone() for k,v in network.state_dict().items()},
                   flow_direction=DIRECTION,method=METHOD,
-                  loss_history=history if checkpoint is None else checkpoint['loss_history']+history)
+                  loss_history=history if checkpoint is None else checkpoint['loss_history']+history,
+                  distill_weight=distill_weight,
+                  distill_history=distill_history)
+    if distill_history:
+        print(f'adapt fm+distill_loss={history[-1]:.6f} '
+              f'distill_loss={sum(distill_history)/len(distill_history):.6f}',flush=True)
     return result
 
 
@@ -135,11 +171,12 @@ def fit(memory, *, epochs, steps_per_epoch, batch_size, lr, weight_decay, blocks
 
 def adapt(checkpoint,memory,*,steps,batch_size,lr,weight_decay,seed,device,
           noise_scale,visual_scale,max_radius,replay_fraction,
-          warmup_ratio=0.05,min_lr_ratio=0.01):
+          warmup_ratio=0.05,min_lr_ratio=0.01,distill_weight=0.):
     return _train(checkpoint,memory,steps=steps,batch_size=batch_size,lr=lr,
                   weight_decay=weight_decay,seed=seed,device=device,noise_scale=noise_scale,
                   visual_scale=visual_scale,max_radius=max_radius,replay_fraction=replay_fraction,
-                  warmup_ratio=warmup_ratio,min_lr_ratio=min_lr_ratio)
+                  warmup_ratio=warmup_ratio,min_lr_ratio=min_lr_ratio,
+                  distill_weight=distill_weight)
 
 
 def load_model(checkpoint,device):
