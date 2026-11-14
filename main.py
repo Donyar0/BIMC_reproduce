@@ -91,6 +91,7 @@ def extend_cfg(cfg):
     cfg.FLOW.BANK_MODE = 'flow'
     cfg.FLOW.GAMMA_BASE = -1.0
     cfg.FLOW.GAMMA_INC = -1.0
+    cfg.FLOW.BIMC_BLEND_LAMBDA = -1.0
     cfg.FLOW.USE_GEOMETRY_PRIORS = False
     cfg.FLOW.NOISE_SCALE = 1.0
     cfg.FLOW.MAX_ANGLE = 0.5

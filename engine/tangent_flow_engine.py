@@ -36,6 +36,7 @@ class TangentFlowRunner(Runner):
         encoder_id = str((cfg.MODEL.BACKBONE.NAME, cfg.TRAINER.BiMC.PREC, str(cfg.DATASET),
                           METHOD, DIRECTION, str(cfg.TRAINER.BiMC)))
         rows, checkpoint, bank, memory = [], None, None, None
+        bimc_stats = []
         num_base = len(self.data_manager.class_index_in_task[0])
         print(f'Method: tangent_flow | Dataset: {cfg.DATASET.NAME} | Seed: {cfg.SEED}')
         print(f'Results directory: {output}')
@@ -50,7 +51,9 @@ class TangentFlowRunner(Runner):
             stats = model.build_task_statistics(
                 names, loader, class_index=class_ids,
                 calibrate_novel_vision_proto=cfg.TRAINER.BiMC.VISION_CALIBRATION,
-                calculate_covariance=False)
+                calculate_covariance=flow.BIMC_BLEND_LAMBDA >= 0)
+            if flow.BIMC_BLEND_LAMBDA >= 0:
+                bimc_stats.append(stats)
             current = distributions(stats, base=memory if task_id else None,
                                     shrink=flow.COV_SHRINK,
                                     transfer_temperature=flow.COV_TRANSFER_TEMPERATURE)
@@ -101,9 +104,10 @@ class TangentFlowRunner(Runner):
                               bank_mode=flow.BANK_MODE)
             torch.save(checkpoint, output / f'flow_session{task_id}.pt')
             torch.save(bank, output / f'bank_session{task_id}.pt')
+            bimc_state = self.merge_dicts(bimc_stats) if bimc_stats else None
             del stats, loader
             self._checkpoint = checkpoint
-            acc = self.inference_task_flow(task_id, bank, memory, model)
+            acc = self.inference_task_flow(task_id, bank, memory, model, bimc_state)
             elapsed = time.time() - start
             self.acc_list.append(acc['mean_acc'])
             self.task_acc_list.append(acc['task_acc'])
@@ -132,7 +136,7 @@ class TangentFlowRunner(Runner):
         raise NotImplementedError('Saved-run reevaluation is not implemented for tangent_flow')
 
     @torch.no_grad()
-    def inference_task_flow(self, task_id, bank, memory, model):
+    def inference_task_flow(self, task_id, bank, memory, model, bimc_state=None):
         # The existing evaluator interprets score column index as global class ID.
         expected = [int(c) for group in self.data_manager.class_index_in_task[:task_id+1]
                     for c in group]
@@ -140,6 +144,10 @@ class TangentFlowRunner(Runner):
             raise ValueError('BIMC evaluator requires ordered, contiguous seen-class IDs')
         loader = self.data_manager.get_dataloader(task_id, source='test', mode='test')
         scores, targets, errors = [], [], []
+        bimc_scores, flow_scores = [], []
+        blend_lambda = self.cfg.FLOW.BIMC_BLEND_LAMBDA
+        if blend_lambda >= 0 and not 0 <= blend_lambda <= 1:
+            raise ValueError('BIMC_BLEND_LAMBDA must be in [0,1]')
         ablations = {name: [] for name in ('visual', 'text', 'flow',
                                           'visual_real_new', 'visual_flow_new')} if task_id == 1 else None
         base_errors, incremental_errors = [], []
@@ -162,8 +170,8 @@ class TangentFlowRunner(Runner):
                                                steps=self.cfg.FLOW.STEPS,
                                                solver=self.cfg.FLOW.SOLVER,
                                                cycle_scale=self.cfg.FLOW.CYCLE_SCALE,
-                                               ensemble_alpha=(self.cfg.DATASET.ENSEMBLE_ALPHA
-                                                               if use_priors else 1.0),
+                                               ensemble_alpha=(1.0 if blend_lambda >= 0 else
+                                                               self.cfg.DATASET.ENSEMBLE_ALPHA if use_priors else 1.0),
                                                num_base=len(self.data_manager.class_index_in_task[0]),
                                                cov_inv=cov_inv,
                                                cycle_gate=self.cfg.FLOW.CYCLE_GATE,
@@ -182,6 +190,16 @@ class TangentFlowRunner(Runner):
                 ablations['visual_flow_new'].append((z @ flow_bank.T).cpu())
             else:
                 _, logits, cycle_error = result
+            if blend_lambda >= 0:
+                prob_bimc = model.forward_ours(
+                    images, len(bank['class_ids']), len(self.data_manager.class_index_in_task[0]),
+                    bimc_state['image_proto'], bimc_state['cov_image'],
+                    bimc_state['description_proto'], bimc_state['description_features'],
+                    bimc_state['description_targets'], bimc_state['text_features'],
+                    beta=self.cfg.DATASET.BETA)
+                bimc_scores.append(prob_bimc.cpu())
+                flow_scores.append(logits.cpu())
+                logits = (1-blend_lambda)*prob_bimc + blend_lambda*logits
             errors.append(cycle_error.cpu())
             base_mask = labels.cpu() < len(self.data_manager.class_index_in_task[0])
             base_errors.append(cycle_error.cpu()[base_mask])
@@ -191,6 +209,12 @@ class TangentFlowRunner(Runner):
         if not scores:
             raise ValueError('Empty test loader')
         acc = self.evaluator.calc_accuracy(torch.cat(scores), torch.cat(targets), task_id)
+        if blend_lambda >= 0:
+            all_targets = torch.cat(targets)
+            acc['bimc_mean_acc'] = self.evaluator.calc_accuracy(torch.cat(bimc_scores), all_targets, task_id)['mean_acc']
+            acc['flow_mean_acc'] = self.evaluator.calc_accuracy(torch.cat(flow_scores), all_targets, task_id)['mean_acc']
+            print(f'BiMC={acc["bimc_mean_acc"]:.2f}% Flow={acc["flow_mean_acc"]:.2f}% '
+                  f'Blend={acc["mean_acc"]:.2f}% lambda={blend_lambda:.2f}')
         acc['cycle_error_mean'] = torch.cat(errors).mean().item()
         acc['cycle_error_base_mean'] = torch.cat(base_errors).mean().item()
         acc['cycle_error_incremental_mean'] = (torch.cat(incremental_errors).mean().item()

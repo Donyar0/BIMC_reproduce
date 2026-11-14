@@ -353,3 +353,9 @@ Task 1 evaluation now prints `visual_real_new` and `visual_flow_new` accuracies 
 ### Symmetric pure-visual Bank comparison
 
 `configs/trainers/tangent_flow_pure_visual_symmetric.yaml` keeps the 16 Base + 16 historical-increment replay, distillation weight 1.0, no CE, Flow/KNN temperatures 500, and Cov divisor 2048. `BANK_MODE: pure_visual` stores Base real visual prototypes and incremental `soft_calibration` visual prototypes without text or generated Flow mixing. Both Base and incremental score columns use 0.5 visual / 0.5 reverse-text weighting before the unchanged geometry-prior blend. Generated Flow prototypes are retained for Task 1 diagnostics only. Results have a separate output directory.
+
+### Original BiMC probability plus bidirectional Flow probability
+
+`configs/trainers/tangent_flow_bimc_flow_blend.yaml` runs an independent probability blend (`BIMC_BLEND_LAMBDA: 0.4`). The BiMC branch uses the original `BiMC.forward_ours` on each test batch, including the original unnormalized text mixture in `beta * fused_text + (1-beta) * image_proto`, the original shared covariance softmax with divisor 512, and Description KNN with temperature 1. `USING_ENSEMBLE: True` activates the original Base covariance / incremental KNN mixture with `DATASET.ENSEMBLE_ALPHA`. The runner collects task statistics and covariance exactly as the original BiMC runner does.
+
+The Flow branch uses a pure visual Bank: Base real visual prototypes and incremental `soft_calibration` visual prototypes, with no generated `Flow(T)` admixture. Its visual and reverse-text cosine probabilities use temperature 500 and symmetric 0.5/0.5 weighting, with no second Cov/KNN blend. The final scores are `0.6 * prob_bimc + 0.4 * prob_flow`. Per-session BiMC-only, Flow-only, and blended accuracies are logged so the original baseline can be checked on the actual data. The user-provided 72.765% is a target for comparison, not a result reproduced here.
