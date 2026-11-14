@@ -47,7 +47,7 @@ FLOW:
   KNN_TEMPERATURE: 500.0  # match Flow cosine probability sharpness
   COV_DIVISOR: 2048.0  # weaker Mahalanobis prior than original /512
   USE_GEOMETRY_PRIORS: True
-  CONTRAST_WEIGHT: 0.1  # one-step endpoint CE against batch visual class means
+  CONTRAST_WEIGHT: 0.1  # one-step endpoint CE against all seen visual class means
   CONTRAST_TEMPERATURE: 20.0
   NOISE_SCALE: 0.25
   EPOCHS: 100
@@ -60,7 +60,7 @@ FLOW:
   HIDDEN: 0  # 0 uses CLIP feature dimension
   STEPS: 8
   SOLVER: "euler"  # euler, midpoint, heun, rk4; inference only
-  OUTPUT_DIR: "output/gaussian_text_visual_distill_t500_knn500_cov2048_ce01"
+  OUTPUT_DIR: "output/gaussian_text_visual_distill_t500_knn500_cov2048_allseen_ce01"
   ADAPT_STEPS: 100  # incremental FM plus previous-session velocity distillation
   DISTILL_WEIGHT: 1.0
   REPLAY_STRATEGY: "base_incremental_half"

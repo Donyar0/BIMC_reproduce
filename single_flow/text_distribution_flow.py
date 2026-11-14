@@ -128,6 +128,7 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
     distill_history=[]
     contrast_history=[]
     chol_all = torch.linalg.cholesky(memory['cov'].to(device))
+    visual_means = unit(memory['real'].to(device)) if contrast_weight else None
     for step in range(steps):
         if old_count == 0:
             rows = torch.randint(nclass,(batch_size,),device=device)
@@ -156,12 +157,10 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
             loss = loss + distill_weight*distill_loss
             distill_history.append(distill_loss.item())
         if contrast_weight:
-            # Duplicate class labels share one target column, avoiding false negatives.
-            unique_rows, targets = rows.unique(sorted=True, return_inverse=True)
-            visual_means = unit(memory['real'].to(device)[unique_rows])
+            # Prototype columns follow memory row order; rows are the class targets.
             end_hat = unit(xt+(1-t)*velocity)
             contrast_loss = F.cross_entropy(contrast_temperature*end_hat@visual_means.T,
-                                            targets)
+                                            rows)
             loss = loss + contrast_weight*contrast_loss
             contrast_history.append(contrast_loss.item())
         if not torch.isfinite(loss):
