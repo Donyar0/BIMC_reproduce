@@ -79,6 +79,7 @@ class TangentFlowRunner(Runner):
                                      max_radius=flow.MAX_RADIUS,
                                      contrast_weight=flow.CONTRAST_WEIGHT,
                                      contrast_temperature=flow.CONTRAST_TEMPERATURE,
+                                     funnel_mode=flow.FUNNEL_MODE,
                                      warmup_ratio=flow.WARMUP_RATIO,
                                      min_lr_ratio=flow.MIN_LR_RATIO)
                     torch.save(checkpoint, output / 'base_flow.pt')
@@ -94,6 +95,7 @@ class TangentFlowRunner(Runner):
                                        replay_strategy=flow.REPLAY_STRATEGY,
                                        contrast_weight=flow.CONTRAST_WEIGHT,
                                        contrast_temperature=flow.CONTRAST_TEMPERATURE,
+                                       funnel_mode=flow.FUNNEL_MODE,
                                        distill_weight=flow.DISTILL_WEIGHT,
                                        warmup_ratio=flow.WARMUP_RATIO,
                                        min_lr_ratio=flow.MIN_LR_RATIO)
@@ -180,6 +182,7 @@ class TangentFlowRunner(Runner):
                                                cov_divisor=self.cfg.FLOW.COV_DIVISOR,
                                                gamma_base=(self.cfg.FLOW.GAMMA_BASE if self.cfg.FLOW.GAMMA_BASE >= 0 else None),
                                                gamma_inc=(self.cfg.FLOW.GAMMA_INC if self.cfg.FLOW.GAMMA_INC >= 0 else None),
+                                               score_mode=self.cfg.FLOW.SCORE_MODE,
                                                return_components=task_id == 1)
             if task_id == 1:
                 _, logits, cycle_error, components = result
