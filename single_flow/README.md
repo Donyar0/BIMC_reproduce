@@ -385,3 +385,5 @@ Three configs share the ten-view prototype/test features, dual-funnel training, 
 - `tangent_flow_vis_whiten075_text_raw.yaml`: visual exponent `-0.75`, raw text cosine.
 
 Each branch L2-normalizes after its own scaling. These are scoring-only transforms; they do not alter the Flow velocity field or the Bank storage. None of these runs has been executed on CUB-200 in this workspace.
+
+The full 2×2 whitening comparison is completed by `tangent_flow_vis_whiten075_text_own.yaml`: visual scale `within_std_vis^-0.75` and separately estimated text scale `within_std_text^-0.5`. It has the same training and ten-view settings as the other three configurations and a separate output directory.
