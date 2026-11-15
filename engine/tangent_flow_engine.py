@@ -15,6 +15,7 @@ from single_flow.text_distribution_flow import (fit, adapt, distributions, combi
                                                 classify_bidirectional, load_model, METHOD, DIRECTION)
 from single_flow.image_text_flow import transport
 from utils.experiment_logger import log_metrics
+from engine.lora_base import train_base_vision_lora
 
 
 class TangentFlowRunner(Runner):
@@ -39,7 +40,7 @@ class TangentFlowRunner(Runner):
         output.mkdir(parents=True, exist_ok=False)
         (output / 'config.yaml').write_text(cfg.dump(), encoding='utf-8')
         encoder_id = str((cfg.MODEL.BACKBONE.NAME, cfg.TRAINER.BiMC.PREC, str(cfg.DATASET),
-                          METHOD, DIRECTION, str(cfg.TRAINER.BiMC)))
+                          METHOD, DIRECTION, str(cfg.TRAINER.BiMC), str(cfg.LORA)))
         rows, checkpoint, bank, memory = [], None, None, None
         bimc_stats = []
         num_base = len(self.data_manager.class_index_in_task[0])
@@ -49,6 +50,12 @@ class TangentFlowRunner(Runner):
 
         for task_id in range(self.data_manager.num_tasks):
             start = time.time()
+            if task_id == 0 and cfg.LORA.ENABLED:
+                devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+                with torch.random.fork_rng(devices=devices), torch.enable_grad():
+                    history = train_base_vision_lora(model, self.data_manager, cfg, output)
+                (output / 'base_lora_metrics.json').write_text(
+                    json.dumps({'loss_history': history}, indent=2), encoding='utf-8')
             class_ids = self.data_manager.class_index_in_task[task_id]
             names = np.array(self.data_manager.class_names)[class_ids]
             loader = self.data_manager.get_dataloader(
