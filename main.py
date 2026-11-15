@@ -112,7 +112,7 @@ def extend_cfg(cfg):
     cfg.FLOW.TARGET = 'prototype'
     cfg.FLOW.STEPS = 8
     cfg.FLOW.SOLVER = 'euler'
-    cfg.FLOW.OUTPUT_DIR = 'output/single_flow'
+    cfg.FLOW.OUTPUT_DIR = 'output/tangent_flow'
     cfg.FLOW.ADAPT_STEPS = 100
     cfg.FLOW.ADAPT_LR = 0.0002
     cfg.FLOW.ALPHA = 0.15
@@ -150,8 +150,6 @@ def main():
 
     parser.add_argument('--data_cfg', type=str, help="Path to the data configuration file")
     parser.add_argument('--train_cfg', type=str, help="Path to the training configuration file")
-    parser.add_argument('--trusted_checkpoints', action='store_true', help='Allow pickle loading for checkpoints you trust')
-    parser.add_argument('--eval_run', default='', help='Evaluate saved Flow checkpoints from this run directory without training')
     parser.add_argument('--use_swanlab', action='store_true', help="Enable SwanLab experiment logging")
     parser.add_argument('--swanlab_project', type=str, default='BIMC_reproduce', help="SwanLab project name")
     parser.add_argument('--swanlab_experiment', type=str, default='', help="SwanLab experiment name")
@@ -171,24 +169,12 @@ def main():
     set_gpu(cfg.DEVICE.GPU_ID)
 
     # Import and run the trainer
-    if cfg.METHOD.lower() == 'single_flow':
-        from engine.flow_engine import FlowRunner as Runner
-    elif cfg.METHOD.lower() == 'tangent_flow':
-        from engine.tangent_flow_engine import TangentFlowRunner as Runner
-    elif cfg.METHOD.lower() == 'unified_flow':
-        from engine.unified_flow_engine import UnifiedFlowRunner as Runner
-    elif cfg.METHOD.lower() in ('', 'bimc'):
-        from engine.engine import Runner
-    else:
-        raise ValueError(f'Unknown METHOD: {cfg.METHOD}')
+    if cfg.METHOD.lower() != 'tangent_flow':
+        raise ValueError('This branch supports METHOD: tangent_flow only')
+    from engine.tangent_flow_engine import TangentFlowRunner as Runner
     engine = Runner(cfg)
     try:
-        if args.eval_run:
-            if cfg.METHOD.lower() != 'unified_flow':
-                raise ValueError('--eval_run requires METHOD unified_flow')
-            engine.evaluate_saved(args.eval_run, trusted_checkpoints=args.trusted_checkpoints)
-        else:
-            engine.run()
+        engine.run()
     finally:
         finish()
 

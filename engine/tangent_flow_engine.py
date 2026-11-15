@@ -13,7 +13,7 @@ from tqdm import tqdm
 from engine.engine import Runner
 from single_flow.text_distribution_flow import (fit, adapt, distributions, combine, build_bank,
                                                 classify_bidirectional, load_model, METHOD, DIRECTION)
-from single_flow.image_text_flow import transport
+from single_flow.flow_utils import transport
 from utils.experiment_logger import log_metrics
 
 

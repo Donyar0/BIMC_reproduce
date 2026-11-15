@@ -1,61 +1,26 @@
-# BiMC
+# Tangent Flow: ten-view, visual whitening, raw text cosine, distillation
 
-This is the official implementation of paper **Enhancing Few-Shot Class-Incremental Learning via Training-Free Bi-Level Modality Calibration (CVPR 2025)**.
+This branch contains one experiment: `configs/trainers/tangent_flow_vis_whiten075_text_raw_distill1.yaml`. It starts from `biflow-no-lora` and retains the BiMC dataset/CLIP feature extraction needed by this experiment. Other Flow runners, ablation configs and remote scripts were removed.
 
-## Abstract
+## Run
 
-Few-shot Class-Incremental Learning (FSCIL) challenges models to adapt to new classes with limited samples, presenting greater difficulties than traditional class-incremental learning. While existing approaches rely heavily on visual models and require additional training during base or incremental phases, we propose a training-free framework that leverages pre-trained visual-language models like CLIP. At the core of our approach is a novel Bi-level Modality Calibration (BiMC) strategy. Our framework initially performs intra-modal calibration, combining LLM-generated fine-grained category descriptions with visual prototypes from the base session to achieve precise classifier estimation. This is further complemented by inter-modal calibration that fuses pre-trained linguistic knowledge with task-specific visual priors to mitigate modality-specific biases. To enhance prediction robustness, we introduce additional metrics and strategies that maximize the utilization of limited data. Extensive experimental results demonstrate that our approach significantly outperforms existing methods.
+Install `requirements.txt`, prepare CUB-200 and its GPT descriptions, and set `DATASET.ROOT` in `configs/datasets/cub200.yaml` to the local dataset path. Then run from the repository root:
 
-## Installation
+```bash
+python -u main.py --data_cfg configs/datasets/cub200.yaml \
+  --train_cfg configs/trainers/tangent_flow_vis_whiten075_text_raw_distill1.yaml
+```
 
-### Dataset
+Optional SwanLab logging: add `--use_swanlab`.
 
-Please follow [CEC](https://github.com/icoz69/CEC-CVPR2021) to download *mini*-ImageNet, CUB-200 and CIFAR-100.
+## Method
 
-### Requirement
+CLIP ViT-B/16 is frozen. Training/support images and test images use the normalized mean of ten CLIP views: original, four corner crops, and their horizontal flips. BiMC combines template and description text with equal weights. New-class visual prototypes receive BiMC soft calibration.
 
-- `torch==1.13.1`
-- `torchvision==0.14.1`
-- `yacs==0.1.8` 
-- `tqdm==4.66.1`
-- `ftfy==6.1.1`
-- `regex==2023.10.3`
-- `scikit-learn==1.3.2`
+For each class, description features determine an isotropic text noise scale and image features determine a visual mean and covariance. Base covariances are shrunk toward a pooled estimate. Incremental covariances blend empirical few-shot estimates with text-similarity-weighted Base covariances. The Flow predicts velocity from text to visual features. Dual-funnel training samples one half of each batch in the early time interval toward visual centers and the other half in the late interval toward real current-session support features or sampled old-class visual features.
 
-## Experiments
+Base training uses 100 epochs × 100 updates. Each incremental session uses 100 updates, with half of the batch drawn from old-class distributions. From the second incremental session onward, the 32 old-class rows split into 16 Base and 16 historical incremental rows. A frozen copy of the previous Flow supplies old-class velocity distillation with weight 1.0. No old image exemplars are retained for replay.
 
-First, remember to modify the data path `ROOT` in the `dataset` configuration file.
+The visual bank uses `normalize(0.8 * BiMC-calibrated visual prototype + 0.2 * Flow-generated prototype)`. Old bank rows are retained. Inference adds (1) visual cosine after scaling the query and bank by Base within-class standard deviation to the power `-0.75` and (2) raw text cosine after reverse Flow integration. This `cosine_sum` route does not use probability temperatures, covariance/KNN priors, gamma weights, or cycle gating.
 
-~~~BASH
-# CIFAR BIMC
-python main.py --data_cfg ./configs/datasets/cifar100.yaml --train_cfg ./configs/trainers/bimc.yaml
-
-# CIFAR BIMC_Ensemble
-python main.py --data_cfg ./configs/datasets/cifar100.yaml --train_cfg ./configs/trainers/bimc_ensemble.yaml
-
-# MiniImagenet BIMC
-python main.py --data_cfg ./configs/datasets/miniimagenet.yaml --train_cfg ./configs/trainers/bimc.yaml
-
-# MiniImagenet BIMC_Ensemble
-python main.py --data_cfg ./configs/datasets/miniimagenet.yaml --train_cfg ./configs/trainers/bimc_ensemble.yaml
-
-# CUB200 BIMC
-python main.py --data_cfg ./configs/datasets/cub200.yaml --train_cfg ./configs/trainers/bimc.yaml
-
-# CUB200 BIMC_Ensemble
-python main.py --data_cfg ./configs/datasets/cub200.yaml --train_cfg ./configs/trainers/bimc_ensemble.yaml
-~~~
-
-## Acknowledgment
-
-In this repository, we build our code based on the following excellent open-source projects. We sincerely thank all the authors for sharing their great work:
-
-- [LP-DiF](https://github.com/1170300714/LP-DiF)
-- [TEEN](https://github.com/wangkiw/TEEN)
-- [FeCAM](https://github.com/dipamgoswami/FeCAM)
-- [CuPL](https://github.com/sarahpratt/CuPL)
-- [AdaptCLIPZS](https://github.com/cvl-umass/AdaptCLIPZS)
-- [LibContinual](https://github.com/RL-VIG/LibContinual)
-- [LibFewShot](https://github.com/RL-VIG/LibFewShot)
-
-
+Results are written beneath `output/dual_funnel_vis_whiten075_text_raw_distill1/<dataset>/seed_<seed>_<timestamp>/`, including config, checkpoints, session banks, and CSV/JSON metrics. Real-dataset accuracy is not established by this repository; run on the prepared data to measure it.

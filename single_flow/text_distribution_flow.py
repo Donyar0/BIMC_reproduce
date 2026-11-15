@@ -4,8 +4,8 @@ import copy
 import torch
 import torch.nn.functional as F
 from .fm import DeepFlowMatchingNet
-from .image_text_flow import scheduled_lr, transport
-from .s1_flow import unit
+from .flow_utils import scheduled_lr, transport
+from .flow_utils import unit
 
 METHOD = 'gaussian-text-visual-v2'
 DIRECTION = 'text_to_visual'
