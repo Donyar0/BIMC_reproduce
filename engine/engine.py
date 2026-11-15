@@ -7,6 +7,7 @@ from tqdm import tqdm
 from utils.evaluator import AccuracyEvaluator
 from utils.experiment_logger import log_metrics
 from models.bimc import BiMC
+from utils.multicrop import predict_multicrop
 import numpy as np
 import time
 
@@ -30,6 +31,7 @@ class Runner:
             self.is_distributed = False
             
 
+        self.ten_crop_acc_list = []
         self.acc_list = []
         self.task_acc_list = []
         self.evaluator = AccuracyEvaluator(self.data_manager.class_index_in_task)
@@ -96,6 +98,18 @@ class Runner:
             start_time = time.time()
             acc = self.inference_task_covariance(i, merged_state_dict)
             end_time = time.time()
+            if self.cfg.DATALOADER.TEST.COMPARE_TEN_CROP:
+                crop_start = time.time()
+                crop_acc = self.inference_task_covariance(i, merged_state_dict, mode='ten_crop')
+                self.ten_crop_acc_list.append(crop_acc['mean_acc'])
+                log_metrics({
+                    **{f'ten_crop/{key}': value for key, value in crop_acc.items() if key != 'task_acc'},
+                    'ten_crop/elapsed_time': time.time() - crop_start,
+                    'ten_crop/delta_mean_acc': crop_acc['mean_acc'] - acc['mean_acc'],
+                }, step=i)
+                print(f"Task [{i}] center: {acc['mean_acc']:.2f}, "
+                      f"10-Crop: {crop_acc['mean_acc']:.2f}, "
+                      f"delta: {crop_acc['mean_acc'] - acc['mean_acc']:+.2f} pp")
             elapsed_time = end_time - start_time
             print(f'+++++++++++  task {i}, time: {elapsed_time} ++++++++++++++++')
 
@@ -111,6 +125,12 @@ class Runner:
                 'elapsed_time': elapsed_time,
             }, step=i)
 
+        if self.ten_crop_acc_list:
+            print(f'10-Crop acc: {self.ten_crop_acc_list}')
+            log_metrics({
+                'ten_crop/final_acc': self.ten_crop_acc_list[-1],
+                'ten_crop/avg_acc': sum(self.ten_crop_acc_list) / len(self.ten_crop_acc_list),
+            })
         print(f'Final acc:{self.acc_list}')
         print('Task-wise acc:')
         for i, task_acc in enumerate(self.task_acc_list):
@@ -123,7 +143,7 @@ class Runner:
     
 
     @torch.no_grad()
-    def inference_task_covariance(self, task_id, state_dict):
+    def inference_task_covariance(self, task_id, state_dict, mode='test'):
 
         beta = self.cfg.DATASET.BETA
 
@@ -137,13 +157,14 @@ class Runner:
         num_base_class = len(self.data_manager.class_index_in_task[0])
         num_accumulated_class = max(self.data_manager.class_index_in_task[task_id]) + 1
         
-        test_loader = self.data_manager.get_dataloader(task_id, source='test', mode='test')
+        test_loader = self.data_manager.get_dataloader(task_id, source='test', mode=mode)
         all_logits = []
         all_targets = []
 
         for i, batch in enumerate(tqdm(test_loader)):
             data, targets = self.parse_batch(batch)
-            logits = self.model.forward_ours(data, num_accumulated_class, num_base_class,
+            def predict(images):
+                return self.model.forward_ours(images, num_accumulated_class, num_base_class,
                                                    image_proto, 
                                                    cov_image,
                                                    description_proto,
@@ -151,6 +172,8 @@ class Runner:
                                                    description_targets,
                                                    text_features,
                                                    beta=beta)
+
+            logits = predict_multicrop(data, predict)
 
             all_logits.append(logits)
             all_targets.append(targets)

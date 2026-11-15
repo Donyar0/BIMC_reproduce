@@ -1,7 +1,20 @@
+import torch
 import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
+
+
+class StackNormalizedCrops:
+    """Picklable transform for DataLoader workers; returns [10, C, H, W]."""
+
+    def __init__(self, mean, std):
+        self.transform = transforms.Compose([
+            transforms.ToTensor(), transforms.Normalize(mean, std),
+        ])
+
+    def __call__(self, crops):
+        return torch.stack([self.transform(crop) for crop in crops])
 
 
 class DatasetManager:
@@ -84,6 +97,8 @@ class DatasetManager:
             transform = self.train_transform
         elif mode == 'test':
             transform = self.test_transform
+        elif mode == 'ten_crop' and source == 'test':
+            transform = self.ten_crop_transform
         else:
             raise ValueError(f'Invalid transform mode: {mode}')
 
@@ -197,6 +212,13 @@ class DatasetManager:
             transforms.CenterCrop(img_size),
             transforms.ToTensor(),
             transforms.Normalize(MEAN, STD),
+        ])
+        # Match the baseline resize exactly: five spatial crops and their flips.
+        # Support-set statistics always retain the original center-crop transform.
+        self.ten_crop_transform = transforms.Compose([
+            transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.TenCrop(img_size),
+            StackNormalizedCrops(MEAN, STD),
         ])
         return train_transform, test_transform
     

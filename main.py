@@ -51,6 +51,7 @@ def extend_cfg(cfg):
     cfg.DATALOADER.TRAIN.BATCH_SIZE_INC = -1
     cfg.DATALOADER.TEST = CN()
     cfg.DATALOADER.TEST.BATCH_SIZE = -1
+    cfg.DATALOADER.TEST.COMPARE_TEN_CROP = False
     cfg.DATALOADER.NUM_WORKERS = -1
 
     # For model
@@ -75,7 +76,7 @@ def extend_cfg(cfg):
 
     
 
-def setup_cfg(dataset_cfg_file, method_cfg_file):
+def setup_cfg(dataset_cfg_file, method_cfg_file, compare_ten_crop=False):
     cfg = CN()
     extend_cfg(cfg)
 
@@ -84,6 +85,9 @@ def setup_cfg(dataset_cfg_file, method_cfg_file):
 
     # 2. From the method config file
     cfg.merge_from_file(method_cfg_file)
+
+    if compare_ten_crop:
+        cfg.DATALOADER.TEST.COMPARE_TEN_CROP = True
 
     cfg.freeze()
     return cfg
@@ -95,6 +99,8 @@ def main():
 
     parser.add_argument('--data_cfg', type=str, help="Path to the data configuration file")
     parser.add_argument('--train_cfg', type=str, help="Path to the training configuration file")
+    parser.add_argument('--compare_ten_crop', action='store_true',
+                        help='Compare center crop and 10-Crop using identical task statistics')
     parser.add_argument('--use_swanlab', action='store_true', help="Enable SwanLab experiment logging")
     parser.add_argument('--swanlab_project', type=str, default='BIMC_reproduce', help="SwanLab project name")
     parser.add_argument('--swanlab_experiment', type=str, default='', help="SwanLab experiment name")
@@ -106,7 +112,7 @@ def main():
     data_cfg = args.data_cfg
     train_cfg = args.train_cfg
 
-    cfg = setup_cfg(data_cfg, train_cfg)
+    cfg = setup_cfg(data_cfg, train_cfg, args.compare_ten_crop)
     init_swanlab(cfg, args)
 
     # Set the random seed and GPU ID
