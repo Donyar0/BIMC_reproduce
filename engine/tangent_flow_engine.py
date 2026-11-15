@@ -18,6 +18,24 @@ from utils.experiment_logger import log_metrics
 
 class TangentFlowRunner(Runner):
     @torch.no_grad()
+    def extract_test_features(self, model, images):
+        if not self.cfg.FLOW.TTA:
+            return model.extract_img_feature(images)
+        height, width = images.shape[-2:]
+        crop_h, crop_w = round(height * 0.875), round(width * 0.875)
+        views = [images]
+        for top, left in ((0, 0), (0, width-crop_w),
+                          (height-crop_h, 0), (height-crop_h, width-crop_w)):
+            crop = images[:, :, top:top+crop_h, left:left+crop_w]
+            views.append(F.interpolate(crop, size=(height, width),
+                                       mode='bicubic', align_corners=False))
+        features = []
+        for view in views:
+            features.append(F.normalize(model.extract_img_feature(view).float(), dim=-1))
+            features.append(F.normalize(model.extract_img_feature(view.flip(-1)).float(), dim=-1))
+        return F.normalize(torch.stack(features).mean(0), dim=-1)
+
+    @torch.no_grad()
     def run(self):
         cfg = self.cfg
         flow = cfg.FLOW
@@ -166,7 +184,7 @@ class TangentFlowRunner(Runner):
             flow_bank[num_base:] = F.normalize(bank['generated'][num_base:].to(self.device), dim=-1)
         for batch in tqdm(loader):
             images, labels = self.parse_batch(batch)
-            features = model.extract_img_feature(images)
+            features = self.extract_test_features(model, images)
             result = classify_bidirectional(velocity, features, device_bank,
                                                alpha=self.cfg.FLOW.ALPHA, gamma=self.cfg.FLOW.GAMMA,
                                                steps=self.cfg.FLOW.STEPS,

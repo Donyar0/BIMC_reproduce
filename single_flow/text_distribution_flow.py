@@ -312,12 +312,6 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
     if score_mode == 'cosine_sum':
         visual=z@bank['prototypes'].to(z.device).T
         text=t_hat@bank['text'].to(z.device).T
-        descriptions=unit(bank['description_features'].to(z.device))
-        labels=bank['description_labels'].to(z.device)
-        similarities=t_hat@descriptions.T
-        desc_max=torch.stack([similarities[:,labels==c].max(-1).values
-                              for c in bank['class_ids']],dim=-1)
-        text=text+0.5*desc_max
         scores=visual+text
         error=torch.zeros(len(z),1,device=z.device)
         ids=torch.tensor(bank['class_ids'],device=z.device)

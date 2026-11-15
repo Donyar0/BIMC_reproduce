@@ -94,6 +94,7 @@ def extend_cfg(cfg):
     cfg.FLOW.BIMC_BLEND_LAMBDA = -1.0
     cfg.FLOW.FUNNEL_MODE = False
     cfg.FLOW.SCORE_MODE = 'probability'
+    cfg.FLOW.TTA = False
     cfg.FLOW.USE_GEOMETRY_PRIORS = False
     cfg.FLOW.NOISE_SCALE = 1.0
     cfg.FLOW.MAX_ANGLE = 0.5
