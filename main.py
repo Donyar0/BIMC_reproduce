@@ -97,6 +97,8 @@ def extend_cfg(cfg):
     cfg.FLOW.TTA = False
     cfg.FLOW.TTA_PROTOTYPES = False
     cfg.FLOW.DIAGONAL_WHITEN = False
+    cfg.FLOW.VIS_WHITEN_POWER = 0.5
+    cfg.FLOW.TEXT_WHITEN_MODE = 'visual'
     cfg.FLOW.USE_GEOMETRY_PRIORS = False
     cfg.FLOW.NOISE_SCALE = 1.0
     cfg.FLOW.MAX_ANGLE = 0.5

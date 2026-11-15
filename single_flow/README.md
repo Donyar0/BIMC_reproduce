@@ -375,3 +375,13 @@ Base and incremental training retain 16 Base + 16 historical-increment replay an
 `configs/trainers/tangent_flow_dual_funnel_tta_whiten.yaml` applies the same ten-view CLIP feature averaging to Base training images and each new-class support image when building statistics and prototypes. The ten views are the full image and four 87.5% corner crops, each with a horizontal flip. It retains test-time ten-view averaging, no description-max score, and incremental distillation weight 0.5.
 
 From the Base training image features, the runner subtracts each class mean and computes the per-dimension within-class standard deviation `sigma`, saved as `base_within_class_std.pt`. For raw cosine scoring only, it divides the query, visual Bank prototype, reverse-transported query, and text prototype by `sqrt(clamp(sigma, min=1e-4))`, then L2-normalizes each vector. The Flow network and its training pairs remain in the unwhitened CLIP feature space. No covariance matrix inverse or BiMC probability prior is used in this configuration. This choice of taking the square root of a standard deviation is intentional per the experiment specification; its effect must be measured against the unwhitened run.
+
+### Separate visual and text whitening controls
+
+Three configs share the ten-view prototype/test features, dual-funnel training, no description-max score, and distillation 0.5:
+
+- `tangent_flow_vis_whiten_text_raw.yaml`: visual query and Bank use `within_std_vis^-0.5`; reverse-text query and text prototypes use original cosine.
+- `tangent_flow_vis_whiten_text_own.yaml`: same visual scaling, while the text branch uses its own Base-only `within_std_text^-0.5`. To estimate that vector, Base training images are transported backward through the trained Base Flow and compared per dimension with their class's fixed `T_base`. It is saved as `base_text_space_std.pt` and reused for all sessions.
+- `tangent_flow_vis_whiten075_text_raw.yaml`: visual exponent `-0.75`, raw text cosine.
+
+Each branch L2-normalizes after its own scaling. These are scoring-only transforms; they do not alter the Flow velocity field or the Bank storage. None of these runs has been executed on CUB-200 in this workspace.

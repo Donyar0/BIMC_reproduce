@@ -13,6 +13,7 @@ from tqdm import tqdm
 from engine.engine import Runner
 from single_flow.text_distribution_flow import (fit, adapt, distributions, combine, build_bank,
                                                 classify_bidirectional, load_model, METHOD, DIRECTION)
+from single_flow.image_text_flow import transport
 from utils.experiment_logger import log_metrics
 
 
@@ -96,6 +97,19 @@ class TangentFlowRunner(Runner):
                                      warmup_ratio=flow.WARMUP_RATIO,
                                      min_lr_ratio=flow.MIN_LR_RATIO)
                     torch.save(checkpoint, output / 'base_flow.pt')
+                    if flow.DIAGONAL_WHITEN and flow.TEXT_WHITEN_MODE == 'own':
+                        inverse_model = load_model(checkpoint, self.device)
+                        base_mapped = []
+                        for part in base_features.split(256):
+                            base_mapped.append(transport(inverse_model, part.to(self.device),
+                                                         flow.STEPS, reverse=True,
+                                                         solver=flow.SOLVER).cpu())
+                        base_mapped = torch.cat(base_mapped)
+                        text_rows = {int(c): row for row, c in enumerate(current['class_ids'])}
+                        target_rows = torch.tensor([text_rows[int(c)] for c in base_labels])
+                        residual = base_mapped - current['text'][target_rows]
+                        self._text_whitening_sigma = residual.square().mean(0).sqrt().clamp_min(1e-4)
+                        torch.save(self._text_whitening_sigma, output / 'base_text_space_std.pt')
                 elif flow.ADAPT_STEPS:
                     checkpoint = adapt(checkpoint, memory, steps=flow.ADAPT_STEPS,
                                        batch_size=flow.BATCH_SIZE, lr=flow.ADAPT_LR,
@@ -178,9 +192,9 @@ class TangentFlowRunner(Runner):
             real_bank[num_base:] = F.normalize(bank['real'][num_base:].to(self.device), dim=-1)
             flow_bank[num_base:] = F.normalize(bank['generated'][num_base:].to(self.device), dim=-1)
             if self.cfg.FLOW.DIAGONAL_WHITEN:
-                diagnostic_scale = self._whitening_sigma.to(self.device).sqrt()
-                real_bank = F.normalize(real_bank / diagnostic_scale, dim=-1)
-                flow_bank = F.normalize(flow_bank / diagnostic_scale, dim=-1)
+                diagnostic_scale = self._whitening_sigma.to(self.device).pow(-self.cfg.FLOW.VIS_WHITEN_POWER)
+                real_bank = F.normalize(real_bank * diagnostic_scale, dim=-1)
+                flow_bank = F.normalize(flow_bank * diagnostic_scale, dim=-1)
         for batch in tqdm(loader):
             images, labels = self.parse_batch(batch)
             features = self.extract_test_features(model, images)
@@ -202,6 +216,11 @@ class TangentFlowRunner(Runner):
                                                score_mode=self.cfg.FLOW.SCORE_MODE,
                                                whitening_sigma=(self._whitening_sigma
                                                                 if self.cfg.FLOW.DIAGONAL_WHITEN else None),
+                                               visual_whitening_power=self.cfg.FLOW.VIS_WHITEN_POWER,
+                                               text_whitening_mode=self.cfg.FLOW.TEXT_WHITEN_MODE,
+                                               text_whitening_sigma=(self._text_whitening_sigma
+                                                                     if self.cfg.FLOW.DIAGONAL_WHITEN and
+                                                                        self.cfg.FLOW.TEXT_WHITEN_MODE == 'own' else None),
                                                return_components=task_id == 1)
             if task_id == 1:
                 _, logits, cycle_error, components = result
@@ -209,7 +228,7 @@ class TangentFlowRunner(Runner):
                     ablations[name].append(components[name].cpu())
                 z = F.normalize(features.float(), dim=-1)
                 if self.cfg.FLOW.DIAGONAL_WHITEN:
-                    z = F.normalize(z / diagnostic_scale, dim=-1)
+                    z = F.normalize(z * diagnostic_scale, dim=-1)
                 ablations['visual_real_new'].append((z @ real_bank.T).cpu())
                 ablations['visual_flow_new'].append((z @ flow_bank.T).cpu())
             else:
