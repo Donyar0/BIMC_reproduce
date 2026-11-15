@@ -19,21 +19,7 @@ from utils.experiment_logger import log_metrics
 class TangentFlowRunner(Runner):
     @torch.no_grad()
     def extract_test_features(self, model, images):
-        if not self.cfg.FLOW.TTA:
-            return model.extract_img_feature(images)
-        height, width = images.shape[-2:]
-        crop_h, crop_w = round(height * 0.875), round(width * 0.875)
-        views = [images]
-        for top, left in ((0, 0), (0, width-crop_w),
-                          (height-crop_h, 0), (height-crop_h, width-crop_w)):
-            crop = images[:, :, top:top+crop_h, left:left+crop_w]
-            views.append(F.interpolate(crop, size=(height, width),
-                                       mode='bicubic', align_corners=False))
-        features = []
-        for view in views:
-            features.append(F.normalize(model.extract_img_feature(view).float(), dim=-1))
-            features.append(F.normalize(model.extract_img_feature(view.flip(-1)).float(), dim=-1))
-        return F.normalize(torch.stack(features).mean(0), dim=-1)
+        return model.extract_img_feature(images, tta=self.cfg.FLOW.TTA)
 
     @torch.no_grad()
     def run(self):
@@ -70,6 +56,15 @@ class TangentFlowRunner(Runner):
                 names, loader, class_index=class_ids,
                 calibrate_novel_vision_proto=cfg.TRAINER.BiMC.VISION_CALIBRATION,
                 calculate_covariance=flow.BIMC_BLEND_LAMBDA >= 0)
+            if task_id == 0 and flow.DIAGONAL_WHITEN:
+                base_features = F.normalize(stats['images_features'].detach().float().cpu(), dim=-1)
+                base_labels = stats['images_targets'].detach().long().cpu()
+                centered = torch.empty_like(base_features)
+                for class_id in class_ids:
+                    mask = base_labels == int(class_id)
+                    centered[mask] = base_features[mask] - base_features[mask].mean(0)
+                self._whitening_sigma = centered.square().mean(0).sqrt().clamp_min(1e-4)
+                torch.save(self._whitening_sigma, output / 'base_within_class_std.pt')
             if flow.BIMC_BLEND_LAMBDA >= 0:
                 bimc_stats.append(stats)
             current = distributions(stats, base=memory if task_id else None,
@@ -182,6 +177,10 @@ class TangentFlowRunner(Runner):
             flow_bank = device_bank['prototypes'].clone()
             real_bank[num_base:] = F.normalize(bank['real'][num_base:].to(self.device), dim=-1)
             flow_bank[num_base:] = F.normalize(bank['generated'][num_base:].to(self.device), dim=-1)
+            if self.cfg.FLOW.DIAGONAL_WHITEN:
+                diagnostic_scale = self._whitening_sigma.to(self.device).sqrt()
+                real_bank = F.normalize(real_bank / diagnostic_scale, dim=-1)
+                flow_bank = F.normalize(flow_bank / diagnostic_scale, dim=-1)
         for batch in tqdm(loader):
             images, labels = self.parse_batch(batch)
             features = self.extract_test_features(model, images)
@@ -201,12 +200,16 @@ class TangentFlowRunner(Runner):
                                                gamma_base=(self.cfg.FLOW.GAMMA_BASE if self.cfg.FLOW.GAMMA_BASE >= 0 else None),
                                                gamma_inc=(self.cfg.FLOW.GAMMA_INC if self.cfg.FLOW.GAMMA_INC >= 0 else None),
                                                score_mode=self.cfg.FLOW.SCORE_MODE,
+                                               whitening_sigma=(self._whitening_sigma
+                                                                if self.cfg.FLOW.DIAGONAL_WHITEN else None),
                                                return_components=task_id == 1)
             if task_id == 1:
                 _, logits, cycle_error, components = result
                 for name in ('visual', 'text', 'flow'):
                     ablations[name].append(components[name].cpu())
                 z = F.normalize(features.float(), dim=-1)
+                if self.cfg.FLOW.DIAGONAL_WHITEN:
+                    z = F.normalize(z / diagnostic_scale, dim=-1)
                 ablations['visual_real_new'].append((z @ real_bank.T).cpu())
                 ablations['visual_flow_new'].append((z @ flow_bank.T).cpu())
             else:

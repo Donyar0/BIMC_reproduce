@@ -302,7 +302,8 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
                            num_base=0,covariance=None,cov_inv=None,
                            cycle_gate=False,cosine_temperature=1.,
                            knn_temperature=25.,cov_divisor=512.,return_components=False,
-                           gamma_base=None,gamma_inc=None,score_mode='probability'):
+                           gamma_base=None,gamma_inc=None,score_mode='probability',
+                           whitening_sigma=None):
     if not (0<=alpha<=1 and 0<=gamma<=1 and cycle_scale>0 and
             cosine_temperature>0 and knn_temperature>0 and cov_divisor>0 and
             0<=ensemble_alpha<=1):
@@ -310,8 +311,15 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
     z=unit(image_features)
     t_hat=transport(model,z,steps,reverse=True,solver=solver)
     if score_mode == 'cosine_sum':
-        visual=z@bank['prototypes'].to(z.device).T
-        text=t_hat@bank['text'].to(z.device).T
+        visual_bank=bank['prototypes'].to(z.device)
+        text_bank=bank['text'].to(z.device)
+        if whitening_sigma is not None:
+            scale=whitening_sigma.to(z.device).float().clamp_min(1e-4).sqrt()
+            visual=unit(z/scale)@unit(visual_bank/scale).T
+            text=unit(t_hat/scale)@unit(text_bank/scale).T
+        else:
+            visual=z@visual_bank.T
+            text=t_hat@text_bank.T
         scores=visual+text
         error=torch.zeros(len(z),1,device=z.device)
         ids=torch.tensor(bank['class_ids'],device=z.device)

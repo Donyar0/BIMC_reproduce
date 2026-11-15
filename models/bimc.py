@@ -77,7 +77,7 @@ class BiMC(nn.Module):
         all_labels = []
         for batch in loader:
             images, labels = self.parse_batch(batch)
-            features = self.clip_model.encode_image(images)
+            features = self.extract_img_feature(images, tta=self.cfg.FLOW.TTA_PROTOTYPES)
             features = F.normalize(features, dim=-1)
             all_features.append(features)
             all_labels.append(labels)
@@ -297,8 +297,22 @@ class BiMC(nn.Module):
 
 
     @torch.no_grad()
-    def extract_img_feature(self, images):
+    def extract_img_feature(self, images, tta=False):
         images = images.to(self.device)
+        if tta:
+            height, width = images.shape[-2:]
+            crop_h, crop_w = round(height * 0.875), round(width * 0.875)
+            views = [images]
+            for top, left in ((0, 0), (0, width-crop_w),
+                              (height-crop_h, 0), (height-crop_h, width-crop_w)):
+                crop = images[:, :, top:top+crop_h, left:left+crop_w]
+                views.append(F.interpolate(crop, size=(height, width),
+                                           mode='bicubic', align_corners=False))
+            features = []
+            for view in views:
+                features.append(F.normalize(self.clip_model.encode_image(view).float(), dim=-1))
+                features.append(F.normalize(self.clip_model.encode_image(view.flip(-1)).float(), dim=-1))
+            return F.normalize(torch.stack(features).mean(0), dim=-1)
         image_features = self.clip_model.encode_image(images)
         return image_features
 
