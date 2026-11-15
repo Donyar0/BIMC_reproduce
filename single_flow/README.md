@@ -387,3 +387,8 @@ Three configs share the ten-view prototype/test features, dual-funnel training, 
 Each branch L2-normalizes after its own scaling. These are scoring-only transforms; they do not alter the Flow velocity field or the Bank storage. None of these runs has been executed on CUB-200 in this workspace.
 
 The full 2×2 whitening comparison is completed by `tangent_flow_vis_whiten075_text_own.yaml`: visual scale `within_std_vis^-0.75` and separately estimated text scale `within_std_text^-0.5`. It has the same training and ten-view settings as the other three configurations and a separate output directory.
+## Support margin and query-adaptive text from commit 3339ac9
+
+`configs/trainers/tangent_flow_support_margin_adaptive_text.yaml` retains ten-view prototypes, visual whitening power 0.75, 16 Base + 16 historical-increment replay, and distillation weight 1.0. After each Bank is built, it measures correct-class visual cosine on that session's training/support features using the same whitening as inference. Each new class receives its session margin `mu_base - mu_incremental`; old margins remain unchanged. No test data is used to compute margins.
+
+The reverse-text branch weights each class's description features by softmax of query-description cosine at temperature 10. It mixes this weighted vector with the original text prototype using `QUERY_TEXT_LAMBDA: 0.5`, normalizes, and scores by cosine. The final raw score adds visual cosine, adaptive text cosine, and the stored support margin. This experiment's margin and mixture strength require validation on held-out data.

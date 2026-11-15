@@ -304,7 +304,8 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
                            knn_temperature=25.,cov_divisor=512.,return_components=False,
                            gamma_base=None,gamma_inc=None,score_mode='probability',
                            whitening_sigma=None,visual_whitening_power=0.5,
-                           text_whitening_mode='visual',text_whitening_sigma=None):
+                           text_whitening_mode='visual',text_whitening_sigma=None,
+                           query_text_lambda=0.,query_text_tau=10.):
     if not (0<=alpha<=1 and 0<=gamma<=1 and cycle_scale>0 and
             cosine_temperature>0 and knn_temperature>0 and cov_divisor>0 and
             0<=ensemble_alpha<=1):
@@ -332,7 +333,25 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
         else:
             visual=z@visual_bank.T
             text=t_hat@text_bank.T
+        if query_text_lambda:
+            if not 0<=query_text_lambda<=1 or query_text_tau<=0 or text_whitening_mode!='none':
+                raise ValueError('Query-adaptive text requires raw text cosine and valid parameters')
+            descriptions=unit(bank['description_features'].to(z.device))
+            labels=bank['description_labels'].to(z.device)
+            similarity=t_hat@descriptions.T
+            adaptive=[]
+            for row,class_id in enumerate(bank['class_ids']):
+                mask=labels==class_id
+                if not mask.any():
+                    raise ValueError(f'Missing descriptions for class {class_id}')
+                weights=F.softmax(query_text_tau*similarity[:,mask],dim=-1)
+                pooled=weights@descriptions[mask]
+                prototype=unit((1-query_text_lambda)*text_bank[row]+query_text_lambda*pooled)
+                adaptive.append((t_hat*prototype).sum(-1))
+            text=torch.stack(adaptive,dim=-1)
         scores=visual+text
+        if 'score_margin' in bank:
+            scores=scores+bank['score_margin'].to(z.device).view(1,-1)
         error=torch.zeros(len(z),1,device=z.device)
         ids=torch.tensor(bank['class_ids'],device=z.device)
         if return_components:

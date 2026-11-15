@@ -19,6 +19,17 @@ from utils.experiment_logger import log_metrics
 
 class TangentFlowRunner(Runner):
     @torch.no_grad()
+    def support_match_mean(self, stats, bank):
+        features = F.normalize(stats['images_features'].detach().float().cpu(), dim=-1)
+        labels = stats['images_targets'].detach().long().cpu()
+        prototypes = bank['prototypes'].float().cpu()[labels]
+        if self.cfg.FLOW.DIAGONAL_WHITEN:
+            scale = self._whitening_sigma.pow(-self.cfg.FLOW.VIS_WHITEN_POWER)
+            features = F.normalize(features * scale, dim=-1)
+            prototypes = F.normalize(prototypes * scale, dim=-1)
+        return (features * prototypes).sum(-1).mean().item()
+
+    @torch.no_grad()
     def extract_test_features(self, model, images):
         return model.extract_img_feature(images, tta=self.cfg.FLOW.TTA)
 
@@ -126,11 +137,23 @@ class TangentFlowRunner(Runner):
                                        distill_weight=flow.DISTILL_WEIGHT,
                                        warmup_ratio=flow.WARMUP_RATIO,
                                        min_lr_ratio=flow.MIN_LR_RATIO)
+            previous_margins = bank.get('score_margin') if bank is not None else None
             bank = build_bank(checkpoint, current, steps=flow.STEPS,
                               num_base=num_base if task_id == 0 else 0,
                               beta_base=flow.BETA_BASE, beta_inc=flow.BETA_INC,
                               device=self.device, previous_bank=bank, solver=flow.SOLVER,
                               bank_mode=flow.BANK_MODE)
+            if flow.SUPPORT_MARGIN:
+                matched = self.support_match_mean(stats, bank)
+                if task_id == 0:
+                    self._base_match_mean = matched
+                    bank['score_margin'] = torch.zeros(len(bank['class_ids']))
+                else:
+                    delta = self._base_match_mean - matched
+                    bank['score_margin'] = torch.cat((previous_margins,
+                        torch.full((len(current['class_ids']),), delta)))
+                    print(f'Support margin task={task_id}: base={self._base_match_mean:.5f} '
+                          f'incremental={matched:.5f} delta={delta:.5f}', flush=True)
             torch.save(checkpoint, output / f'flow_session{task_id}.pt')
             torch.save(bank, output / f'bank_session{task_id}.pt')
             bimc_state = self.merge_dicts(bimc_stats) if bimc_stats else None
@@ -221,6 +244,8 @@ class TangentFlowRunner(Runner):
                                                text_whitening_sigma=(self._text_whitening_sigma
                                                                      if self.cfg.FLOW.DIAGONAL_WHITEN and
                                                                         self.cfg.FLOW.TEXT_WHITEN_MODE == 'own' else None),
+                                               query_text_lambda=self.cfg.FLOW.QUERY_TEXT_LAMBDA,
+                                               query_text_tau=self.cfg.FLOW.QUERY_TEXT_TAU,
                                                return_components=task_id == 1)
             if task_id == 1:
                 _, logits, cycle_error, components = result
