@@ -102,6 +102,9 @@ def extend_cfg(cfg):
     cfg.FLOW.SUPPORT_MARGIN = False
     cfg.FLOW.QUERY_TEXT_LAMBDA = 0.0
     cfg.FLOW.QUERY_TEXT_TAU = 10.0
+    cfg.FLOW.QUERY_TEXT_MODE = 'mixture'
+    cfg.FLOW.VIS_CENTERING = False
+    cfg.FLOW.BRANCH_ZSCORE = False
     cfg.LORA = CN()
     cfg.LORA.ENABLED = False
     cfg.LORA.RANK = 2

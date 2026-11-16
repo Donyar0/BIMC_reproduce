@@ -100,7 +100,7 @@ def sample_pairs(memory, rows, noise_scale, visual_scale, max_radius, device, ch
     return x0,x1
 
 
-def sample_funnel_pairs(memory, rows, old, noise_scale, device, chol_all):
+def sample_funnel_pairs(memory, rows, old, noise_scale, max_radius, device, chol_all):
     """Forward half targets fixed visual centers; reverse half ends at images."""
     count=len(rows)
     forward=torch.randperm(count,device=device)[:count//2]
@@ -117,6 +117,8 @@ def sample_funnel_pairs(memory, rows, old, noise_scale, device, chol_all):
         picked=rows[reverse_old]
         chol=chol_all[picked]
         noise=torch.bmm(chol,torch.randn(len(picked),x1.shape[1],1,device=device)).squeeze(-1)
+        noise_norm=noise.norm(dim=-1,keepdim=True).clamp_min(1e-8)
+        noise=noise*(max_radius/noise_norm).clamp(max=1)
         x1[reverse_old]=unit(memory['visual_target'].to(device)[picked]+noise)
     reverse_current=reverse_mask & ~old
     if reverse_current.any():
@@ -183,7 +185,7 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
                 rows[old] = sample_old_rows(memory['session_lengths'],int(old.sum()),device)
             rows[~old] = torch.randint(old_count,nclass,(int((~old).sum()),),device=device)
         if funnel_mode:
-            x0,x1,reverse_mask=sample_funnel_pairs(memory,rows,old,noise_scale,device,chol_all)
+            x0,x1,reverse_mask=sample_funnel_pairs(memory,rows,old,noise_scale,max_radius,device,chol_all)
             t=torch.rand(batch_size,1,device=device)*0.5
             t[reverse_mask]+=0.5
         else:
@@ -305,7 +307,8 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
                            gamma_base=None,gamma_inc=None,score_mode='probability',
                            whitening_sigma=None,visual_whitening_power=0.5,
                            text_whitening_mode='visual',text_whitening_sigma=None,
-                           query_text_lambda=0.,query_text_tau=10.):
+                           query_text_lambda=0.,query_text_tau=10.,
+                           query_text_mode='mixture',visual_center=None,branch_zscore=False):
     if not (0<=alpha<=1 and 0<=gamma<=1 and cycle_scale>0 and
             cosine_temperature>0 and knn_temperature>0 and cov_divisor>0 and
             0<=ensemble_alpha<=1):
@@ -319,7 +322,8 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
             if not 0<=visual_whitening_power<=1 or text_whitening_mode not in ('visual','none','own'):
                 raise ValueError('Invalid whitening settings')
             vis_scale=whitening_sigma.to(z.device).float().clamp_min(1e-4).pow(-visual_whitening_power)
-            visual=unit(z*vis_scale)@unit(visual_bank*vis_scale).T
+            center=(visual_center.to(z.device).float() if visual_center is not None else 0)
+            visual=unit((z-center)*vis_scale)@unit((visual_bank-center)*vis_scale).T
             if text_whitening_mode == 'visual':
                 text_scale=vis_scale
             elif text_whitening_mode == 'own':
@@ -334,7 +338,7 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
             visual=z@visual_bank.T
             text=t_hat@text_bank.T
         if query_text_lambda:
-            if not 0<=query_text_lambda<=1 or query_text_tau<=0 or text_whitening_mode!='none':
+            if not 0<=query_text_lambda<=1 or query_text_tau<=0 or text_whitening_mode!='none' or query_text_mode not in ('mixture','residual'):
                 raise ValueError('Query-adaptive text requires raw text cosine and valid parameters')
             descriptions=unit(bank['description_features'].to(z.device))
             labels=bank['description_labels'].to(z.device)
@@ -346,12 +350,19 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
                     raise ValueError(f'Missing descriptions for class {class_id}')
                 weights=F.softmax(query_text_tau*similarity[:,mask],dim=-1)
                 pooled=weights@descriptions[mask]
-                prototype=unit((1-query_text_lambda)*text_bank[row]+query_text_lambda*pooled)
+                if query_text_mode == 'residual':
+                    mean_description=descriptions[mask].mean(0)
+                    prototype=unit(text_bank[row]+query_text_lambda*(pooled-mean_description))
+                else:
+                    prototype=unit((1-query_text_lambda)*text_bank[row]+query_text_lambda*pooled)
                 adaptive.append((t_hat*prototype).sum(-1))
             text=torch.stack(adaptive,dim=-1)
-        scores=visual+text
         if 'score_margin' in bank:
-            scores=scores+bank['score_margin'].to(z.device).view(1,-1)
+            visual=visual+bank['score_margin'].to(z.device).view(1,-1)
+        if branch_zscore:
+            visual=(visual-visual.mean(-1,keepdim=True))/(visual.std(-1,unbiased=False,keepdim=True)+1e-6)
+            text=(text-text.mean(-1,keepdim=True))/(text.std(-1,unbiased=False,keepdim=True)+1e-6)
+        scores=visual+text
         error=torch.zeros(len(z),1,device=z.device)
         ids=torch.tensor(bank['class_ids'],device=z.device)
         if return_components:
