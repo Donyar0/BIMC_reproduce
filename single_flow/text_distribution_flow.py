@@ -304,7 +304,7 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
                            cycle_gate=False,cosine_temperature=1.,
                            knn_temperature=25.,cov_divisor=512.,return_components=False,
                            gamma_base=None,gamma_inc=None,score_mode='probability',
-                           whitening_sigma=None,visual_whitening_power=0.5,
+                           whitening_matrix=None,visual_whitening_power=0.5,
                            text_whitening_mode='visual',text_whitening_sigma=None):
     if not (0<=alpha<=1 and 0<=gamma<=1 and cycle_scale>0 and
             cosine_temperature>0 and knn_temperature>0 and cov_divisor>0 and
@@ -315,22 +315,25 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
     if score_mode == 'cosine_sum':
         visual_bank=bank['prototypes'].to(z.device)
         text_bank=bank['text'].to(z.device)
-        if whitening_sigma is not None:
+        if whitening_matrix is not None:
             if not 0<=visual_whitening_power<=1 or text_whitening_mode not in ('visual','none','own'):
                 raise ValueError('Invalid whitening settings')
-            vis_scale=whitening_sigma.to(z.device).float().clamp_min(1e-4).pow(-visual_whitening_power)
-            visual=unit(z*vis_scale)@unit(visual_bank*vis_scale).T
+            zca=whitening_matrix.to(z.device).float()
+            if zca.shape != (z.shape[-1],z.shape[-1]):
+                raise ValueError('ZCA matrix has wrong shape')
+            visual=unit(z@zca)@unit(visual_bank@zca).T
             if text_whitening_mode == 'visual':
-                text_scale=vis_scale
+                text_query=unit(0.3*z+0.7*t_hat)
+                text=unit(text_query@zca)@unit(text_bank@zca).T
             elif text_whitening_mode == 'own':
                 if text_whitening_sigma is None:
                     raise ValueError('Text-space standard deviation required')
                 text_scale=text_whitening_sigma.to(z.device).float().clamp_min(1e-4).rsqrt()
+                text_query=unit(0.3*z+0.7*t_hat)
+                text=unit(text_query*text_scale)@unit(text_bank*text_scale).T
             else:
-                text_scale=None
-            text_query=unit(0.3*z+0.7*t_hat)
-            text=(unit(text_query*text_scale)@unit(text_bank*text_scale).T
-                  if text_scale is not None else text_query@text_bank.T)
+                text_query=unit(0.3*z+0.7*t_hat)
+                text=text_query@text_bank.T
         else:
             visual=z@visual_bank.T
             text_query=unit(0.3*z+0.7*t_hat)

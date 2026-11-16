@@ -53,7 +53,7 @@ FLOW:
   SCORE_MODE: "cosine_sum"
   TTA: True  # 5 views and their horizontal flips
   TTA_PROTOTYPES: True  # same ten-view feature average for Base and support prototypes
-  DIAGONAL_WHITEN: True  # Base within-class standard deviation
+  DIAGONAL_WHITEN: True  # enables regularized Base within-class ZCA matrix
   VIS_WHITEN_POWER: 0.75
   TEXT_WHITEN_MODE: "none"
   CONTRAST_TEMPERATURE: 20.0
@@ -68,7 +68,7 @@ FLOW:
   HIDDEN: 0  # 0 uses CLIP feature dimension
   STEPS: 8
   SOLVER: "euler"  # euler, midpoint, heun, rk4; inference only
-  OUTPUT_DIR: "output/dual_funnel_vis_whiten075_text_raw_distill1"
+  OUTPUT_DIR: "output/dual_funnel_zca075_text_raw_distill1"
   ADAPT_STEPS: 100  # incremental FM plus previous-session velocity distillation
   DISTILL_WEIGHT: 1.0
   REPLAY_STRATEGY: "base_incremental_half"

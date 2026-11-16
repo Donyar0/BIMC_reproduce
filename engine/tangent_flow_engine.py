@@ -64,8 +64,15 @@ class TangentFlowRunner(Runner):
                 for class_id in class_ids:
                     mask = base_labels == int(class_id)
                     centered[mask] = base_features[mask] - base_features[mask].mean(0)
-                self._whitening_sigma = centered.square().mean(0).sqrt().clamp_min(1e-4)
-                torch.save(self._whitening_sigma, output / 'base_within_class_std.pt')
+                cov = (centered.T @ centered) / max(len(centered) - len(class_ids), 1)
+                diag_mean = cov.diagonal().mean().clamp_min(1e-6)
+                cov_reg = ((1.0 - flow.COV_SHRINK) * cov +
+                           flow.COV_SHRINK * diag_mean * torch.eye(cov.shape[0]))
+                eigvals, eigvecs = torch.linalg.eigh(cov_reg)
+                eigvals = eigvals.clamp_min(1e-5)
+                self._zca_matrix = ((eigvecs * eigvals.pow(-0.5 * flow.VIS_WHITEN_POWER))
+                                    @ eigvecs.T).contiguous()
+                torch.save(self._zca_matrix, output / 'base_zca_matrix.pt')
             if flow.BIMC_BLEND_LAMBDA >= 0:
                 bimc_stats.append(stats)
             current = distributions(stats, base=memory if task_id else None,
@@ -192,9 +199,9 @@ class TangentFlowRunner(Runner):
             real_bank[num_base:] = F.normalize(bank['real'][num_base:].to(self.device), dim=-1)
             flow_bank[num_base:] = F.normalize(bank['generated'][num_base:].to(self.device), dim=-1)
             if self.cfg.FLOW.DIAGONAL_WHITEN:
-                diagnostic_scale = self._whitening_sigma.to(self.device).pow(-self.cfg.FLOW.VIS_WHITEN_POWER)
-                real_bank = F.normalize(real_bank * diagnostic_scale, dim=-1)
-                flow_bank = F.normalize(flow_bank * diagnostic_scale, dim=-1)
+                zca = self._zca_matrix.to(self.device)
+                real_bank = F.normalize(real_bank @ zca, dim=-1)
+                flow_bank = F.normalize(flow_bank @ zca, dim=-1)
         for batch in tqdm(loader):
             images, labels = self.parse_batch(batch)
             features = self.extract_test_features(model, images)
@@ -214,8 +221,8 @@ class TangentFlowRunner(Runner):
                                                gamma_base=(self.cfg.FLOW.GAMMA_BASE if self.cfg.FLOW.GAMMA_BASE >= 0 else None),
                                                gamma_inc=(self.cfg.FLOW.GAMMA_INC if self.cfg.FLOW.GAMMA_INC >= 0 else None),
                                                score_mode=self.cfg.FLOW.SCORE_MODE,
-                                               whitening_sigma=(self._whitening_sigma
-                                                                if self.cfg.FLOW.DIAGONAL_WHITEN else None),
+                                               whitening_matrix=(self._zca_matrix
+                                                                 if self.cfg.FLOW.DIAGONAL_WHITEN else None),
                                                visual_whitening_power=self.cfg.FLOW.VIS_WHITEN_POWER,
                                                text_whitening_mode=self.cfg.FLOW.TEXT_WHITEN_MODE,
                                                text_whitening_sigma=(self._text_whitening_sigma
@@ -228,7 +235,7 @@ class TangentFlowRunner(Runner):
                     ablations[name].append(components[name].cpu())
                 z = F.normalize(features.float(), dim=-1)
                 if self.cfg.FLOW.DIAGONAL_WHITEN:
-                    z = F.normalize(z * diagnostic_scale, dim=-1)
+                    z = F.normalize(z @ zca, dim=-1)
                 ablations['visual_real_new'].append((z @ real_bank.T).cpu())
                 ablations['visual_flow_new'].append((z @ flow_bank.T).cpu())
             else:
