@@ -59,7 +59,7 @@ FLOW:
   SUPPORT_MARGIN: False  # isolate centering and branch calibration
   QUERY_TEXT_LAMBDA: 0.15
   QUERY_TEXT_MODE: "residual"
-  VIS_CENTERING: True
+  VIS_CENTERING: False
   BRANCH_ZSCORE: True
   QUERY_TEXT_TAU: 3.0
   CONTRAST_TEMPERATURE: 20.0
@@ -74,7 +74,7 @@ FLOW:
   HIDDEN: 0  # 0 uses CLIP feature dimension
   STEPS: 8
   SOLVER: "midpoint"  # euler, midpoint, heun, rk4; inference only
-  OUTPUT_DIR: "output/centered_zscore_midpoint_residual"
+  OUTPUT_DIR: "output/no_center_zscore_midpoint_residual"
   ADAPT_STEPS: 100  # incremental FM plus previous-session velocity distillation
   DISTILL_WEIGHT: 1.0
   REPLAY_STRATEGY: "base_incremental_half"

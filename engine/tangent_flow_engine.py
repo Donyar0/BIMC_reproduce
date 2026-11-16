@@ -78,8 +78,9 @@ class TangentFlowRunner(Runner):
                 calculate_covariance=flow.BIMC_BLEND_LAMBDA >= 0)
             if task_id == 0 and flow.DIAGONAL_WHITEN:
                 base_features = F.normalize(stats['images_features'].detach().float().cpu(), dim=-1)
-                self._vis_center = base_features.mean(0)
-                torch.save(self._vis_center, output / 'base_visual_center.pt')
+                if flow.VIS_CENTERING:
+                    self._vis_center = base_features.mean(0)
+                    torch.save(self._vis_center, output / 'base_visual_center.pt')
                 base_labels = stats['images_targets'].detach().long().cpu()
                 centered = torch.empty_like(base_features)
                 for class_id in class_ids:

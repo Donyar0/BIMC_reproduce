@@ -406,3 +406,7 @@ This option requires a ViT backbone and `TRAINER.BiMC.PREC: fp32`. It is a separ
 The ODE solver is `midpoint` with eight integration steps. Old-class covariance noise in the dual-funnel reverse training half is now capped by the same `MAX_RADIUS` as the original sampler. This reduces large pseudo-feature offsets but does not guarantee higher accuracy.
 
 `tangent_flow_centered_residual_lora_cub200.yaml` adds Base-only visual Q/V LoRA with rank 2, last four blocks, five epochs, and anchor weight 0.1. `tangent_flow_centered_residual_lora_cifar100.yaml` uses rank 4 and ten epochs with the same anchor weight. Both use FP32 and keep CLIP frozen after merging LoRA. The LoRA and no-LoRA runs write to separate output directories. These settings are experimental; the previously quoted CUB-200 and CIFAR-100 accuracies were not reproduced in this workspace.
+
+### No global visual centering variant
+
+The `tangent_flow_centered_residual*.yaml` configurations now set `VIS_CENTERING: False`. They retain Base within-class visual scaling, per-query branch Z-Score, midpoint solver, clipped old-class replay radius, and the 0.15 zero-mean adaptive-description residual. Base visual global mean is no longer subtracted from queries or Bank prototypes, and it is not saved when centering is disabled. The output directories now begin with `no_center_` so previous centered results remain separate.
