@@ -38,7 +38,7 @@ FLOW:
   STEPS_PER_EPOCH: 100
   VISUAL_SCALE: 1.0
   MAX_RADIUS: 0.5
-  COV_SHRINK: 0.1
+  COV_SHRINK: 0.1  # distribution replay covariance; ZCA shrink is computed from sample count
   COV_TRANSFER_TEMPERATURE: 16.0
   REPLAY_FRACTION: 0.5
   CYCLE_SCALE: 0.01

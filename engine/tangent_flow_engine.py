@@ -64,10 +64,13 @@ class TangentFlowRunner(Runner):
                 for class_id in class_ids:
                     mask = base_labels == int(class_id)
                     centered[mask] = base_features[mask] - base_features[mask].mean(0)
-                cov = (centered.T @ centered) / max(len(centered) - len(class_ids), 1)
-                diag_mean = cov.diagonal().mean().clamp_min(1e-6)
-                cov_reg = ((1.0 - flow.COV_SHRINK) * cov +
-                           flow.COV_SHRINK * diag_mean * torch.eye(cov.shape[0]))
+                n_eff = max(len(centered) - len(class_ids), 1)
+                cov = (centered.T @ centered) / n_eff
+                diag_cov = torch.diag(cov.diagonal().clamp_min(1e-6))
+                dim = cov.shape[0]
+                shrink = (15.0 * dim) / (n_eff + 15.0 * dim)
+                print(f'Base ZCA covariance: n_eff={n_eff}, dim={dim}, shrink={shrink:.4f}')
+                cov_reg = (1.0 - shrink) * cov + shrink * diag_cov
                 eigvals, eigvecs = torch.linalg.eigh(cov_reg)
                 eigvals = eigvals.clamp_min(1e-5)
                 self._zca_matrix = ((eigvecs * eigvals.pow(-0.5 * flow.VIS_WHITEN_POWER))
