@@ -280,7 +280,8 @@ def build_bank(checkpoint,current,*,steps,num_base,beta_base,beta_inc,device,
     if bank_mode == 'pure_visual':
         prototypes=unit(real)
     elif bank_mode == 'calibrated_flow20':
-        prototypes=unit(0.8*real+0.2*generated)
+        flow_w=0.2 if previous_bank is None else 0.4
+        prototypes=unit((1.0-flow_w)*real+flow_w*generated)
     elif bank_mode == 'bimc_incremental' and previous_bank is not None:
         prototypes=unit(0.3*current['bank_text']+0.7*real)
     elif bank_mode not in ('flow','bimc_incremental'):
@@ -327,11 +328,13 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
                 text_scale=text_whitening_sigma.to(z.device).float().clamp_min(1e-4).rsqrt()
             else:
                 text_scale=None
-            text=(unit(t_hat*text_scale)@unit(text_bank*text_scale).T
-                  if text_scale is not None else t_hat@text_bank.T)
+            text_query=unit(0.3*z+0.7*t_hat)
+            text=(unit(text_query*text_scale)@unit(text_bank*text_scale).T
+                  if text_scale is not None else text_query@text_bank.T)
         else:
             visual=z@visual_bank.T
-            text=t_hat@text_bank.T
+            text_query=unit(0.3*z+0.7*t_hat)
+            text=text_query@text_bank.T
         scores=visual+text
         error=torch.zeros(len(z),1,device=z.device)
         ids=torch.tensor(bank['class_ids'],device=z.device)
