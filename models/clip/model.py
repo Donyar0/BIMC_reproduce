@@ -169,6 +169,45 @@ class QuickGELU(nn.Module):
         return x * torch.sigmoid(1.702 * x)
 
 
+class LoRAMultiheadAttention(nn.Module):
+    """Low-rank Q/V update for CLIP's packed MultiheadAttention projection."""
+
+    def __init__(self, orig_attn: nn.MultiheadAttention, r: int = 2, alpha: float = 2.0):
+        super().__init__()
+        if r < 1 or orig_attn.in_proj_weight is None:
+            raise ValueError('LoRA requires positive rank and packed Q/K/V projection')
+        self.orig_attn = orig_attn
+        self.scale = alpha / r
+        d = orig_attn.embed_dim
+        self.q_A = nn.Parameter(torch.randn(r, d) / r)
+        self.q_B = nn.Parameter(torch.zeros(d, r))
+        self.v_A = nn.Parameter(torch.randn(r, d) / r)
+        self.v_B = nn.Parameter(torch.zeros(d, r))
+        self.orig_attn.requires_grad_(False)
+
+    def delta(self):
+        dtype = self.orig_attn.in_proj_weight.dtype
+        dq = (self.q_B @ self.q_A).to(dtype) * self.scale
+        dv = (self.v_B @ self.v_A).to(dtype) * self.scale
+        return torch.cat((dq, torch.zeros_like(dq), dv), dim=0)
+
+    def forward(self, query, key, value, need_weights=False, attn_mask=None):
+        attn = self.orig_attn
+        return F.multi_head_attention_forward(
+            query, key, value, attn.embed_dim, attn.num_heads,
+            attn.in_proj_weight + self.delta(), attn.in_proj_bias,
+            attn.bias_k, attn.bias_v, attn.add_zero_attn, attn.dropout,
+            attn.out_proj.weight, attn.out_proj.bias,
+            training=self.training, key_padding_mask=None,
+            need_weights=need_weights, attn_mask=attn_mask,
+            use_separate_proj_weight=False)
+
+    @torch.no_grad()
+    def merge(self):
+        self.orig_attn.in_proj_weight.add_(self.delta())
+        return self.orig_attn
+
+
 class ResidualAttentionBlock(nn.Module):
     def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None):
         super().__init__()

@@ -125,6 +125,16 @@ def extend_cfg(cfg):
     cfg.FLOW.WARMUP_RATIO = 0.05
     cfg.FLOW.MIN_LR_RATIO = 0.01
 
+    cfg.LORA = CN()
+    cfg.LORA.ENABLED = False
+    cfg.LORA.RANK = 2
+    cfg.LORA.ALPHA = 2.0
+    cfg.LORA.LAST_BLOCKS = 4
+    cfg.LORA.EPOCHS = 5
+    cfg.LORA.LR = 0.0002
+    cfg.LORA.WEIGHT_DECAY = 0.0001
+    cfg.LORA.ANCHOR_WEIGHT = 0.1
+
 
 
 

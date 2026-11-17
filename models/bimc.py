@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import models.clip.clip as clip
+from models.clip.model import LoRAMultiheadAttention
 import json
 
 def load_clip_to_cpu(cfg):
@@ -39,9 +40,25 @@ class BiMC(nn.Module):
 
         clip_model.eval()
         self.clip_model = clip_model.to(self.device)
+        if cfg.LORA.ENABLED:
+            if not hasattr(self.clip_model.visual, 'transformer'):
+                raise ValueError('Vision LoRA requires a ViT CLIP backbone')
+            blocks = self.clip_model.visual.transformer.resblocks
+            if not 1 <= cfg.LORA.LAST_BLOCKS <= len(blocks):
+                raise ValueError('Invalid LORA.LAST_BLOCKS')
+            for block in list(blocks)[-cfg.LORA.LAST_BLOCKS:]:
+                block.attn = LoRAMultiheadAttention(block.attn, cfg.LORA.RANK,
+                                                     cfg.LORA.ALPHA).to(self.device)
         self.text_proto = None
         self.description_proto = None
         self.vision_proto = None
+
+    @torch.no_grad()
+    def merge_vision_lora(self):
+        for block in self.clip_model.visual.transformer.resblocks:
+            if isinstance(block.attn, LoRAMultiheadAttention):
+                block.attn = block.attn.merge()
+        self.clip_model.eval().requires_grad_(False)
 
 
     @torch.no_grad()
@@ -296,7 +313,6 @@ class BiMC(nn.Module):
 
 
 
-    @torch.no_grad()
     def extract_img_feature(self, images, tta=False):
         images = images.to(self.device)
         if tta:
