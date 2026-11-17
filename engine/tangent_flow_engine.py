@@ -140,7 +140,8 @@ class TangentFlowRunner(Runner):
                               num_base=num_base if task_id == 0 else 0,
                               beta_base=flow.BETA_BASE, beta_inc=flow.BETA_INC,
                               device=self.device, previous_bank=bank, solver=flow.SOLVER,
-                              bank_mode=flow.BANK_MODE)
+                              bank_mode=flow.BANK_MODE,
+                              inc_flow_weight=flow.INC_FLOW_WEIGHT)
             torch.save(checkpoint, output / f'flow_session{task_id}.pt')
             torch.save(bank, output / f'bank_session{task_id}.pt')
             bimc_state = self.merge_dicts(bimc_stats) if bimc_stats else None
@@ -224,6 +225,7 @@ class TangentFlowRunner(Runner):
                                                gamma_base=(self.cfg.FLOW.GAMMA_BASE if self.cfg.FLOW.GAMMA_BASE >= 0 else None),
                                                gamma_inc=(self.cfg.FLOW.GAMMA_INC if self.cfg.FLOW.GAMMA_INC >= 0 else None),
                                                score_mode=self.cfg.FLOW.SCORE_MODE,
+                                               text_score_weight=self.cfg.FLOW.TEXT_SCORE_WEIGHT,
                                                whitening_matrix=(self._zca_matrix
                                                                  if self.cfg.FLOW.DIAGONAL_WHITEN else None),
                                                visual_whitening_power=self.cfg.FLOW.VIS_WHITEN_POWER,
