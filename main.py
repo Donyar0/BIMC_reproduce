@@ -89,11 +89,14 @@ def extend_cfg(cfg):
     cfg.FLOW.CONTRAST_WEIGHT = 0.0
     cfg.FLOW.CONTRAST_TEMPERATURE = 20.0
     cfg.FLOW.BANK_MODE = 'flow'
+    cfg.FLOW.INC_FLOW_WEIGHT = 0.4
     cfg.FLOW.GAMMA_BASE = -1.0
     cfg.FLOW.GAMMA_INC = -1.0
     cfg.FLOW.BIMC_BLEND_LAMBDA = -1.0
     cfg.FLOW.FUNNEL_MODE = False
     cfg.FLOW.SCORE_MODE = 'probability'
+    cfg.FLOW.TEXT_SCORE_WEIGHT = 1.0
+    cfg.FLOW.HUB_WEIGHT = 0.0
     cfg.FLOW.TTA = False
     cfg.FLOW.TTA_PROTOTYPES = False
     cfg.FLOW.DIAGONAL_WHITEN = False

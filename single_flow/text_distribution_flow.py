@@ -266,7 +266,7 @@ def load_model(checkpoint,device):
 
 @torch.no_grad()
 def build_bank(checkpoint,current,*,steps,num_base,beta_base,beta_inc,device,
-               previous_bank=None,solver='euler',bank_mode='flow'):
+               previous_bank=None,solver='euler',bank_mode='flow',inc_flow_weight=0.4):
     ids=current['class_ids']
     if previous_bank is not None and set(ids)&set(previous_bank['class_ids']):
         raise ValueError('Repeated class IDs')
@@ -280,7 +280,9 @@ def build_bank(checkpoint,current,*,steps,num_base,beta_base,beta_inc,device,
     if bank_mode == 'pure_visual':
         prototypes=unit(real)
     elif bank_mode == 'calibrated_flow20':
-        flow_w=0.2 if previous_bank is None else 0.4
+        if not 0 <= inc_flow_weight <= 1:
+            raise ValueError('INC_FLOW_WEIGHT must be in [0, 1]')
+        flow_w=0.2 if previous_bank is None else inc_flow_weight
         prototypes=unit((1.0-flow_w)*real+flow_w*generated)
     elif bank_mode == 'bimc_incremental' and previous_bank is not None:
         prototypes=unit(0.3*current['bank_text']+0.7*real)
@@ -305,7 +307,8 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
                            knn_temperature=25.,cov_divisor=512.,return_components=False,
                            gamma_base=None,gamma_inc=None,score_mode='probability',
                            whitening_matrix=None,visual_whitening_power=0.5,
-                           text_whitening_mode='visual',text_whitening_sigma=None):
+                           text_whitening_mode='visual',text_whitening_sigma=None,
+                           text_score_weight=1.0,hub_weight=0.0):
     if not (0<=alpha<=1 and 0<=gamma<=1 and cycle_scale>0 and
             cosine_temperature>0 and knn_temperature>0 and cov_divisor>0 and
             0<=ensemble_alpha<=1):
@@ -313,32 +316,46 @@ def classify_bidirectional(model,image_features,bank,*,alpha,gamma,steps,
     z=unit(image_features)
     t_hat=transport(model,z,steps,reverse=True,solver=solver)
     if score_mode == 'cosine_sum':
+        if text_score_weight <= 0 or not 0 <= hub_weight <= 1:
+            raise ValueError('Invalid text score or hub weight')
         visual_bank=bank['prototypes'].to(z.device)
         text_bank=bank['text'].to(z.device)
+        text_query=unit(0.3*z+0.7*t_hat)
         if whitening_matrix is not None:
             if not 0<=visual_whitening_power<=1 or text_whitening_mode not in ('visual','none','own'):
                 raise ValueError('Invalid whitening settings')
             zca=whitening_matrix.to(z.device).float()
             if zca.shape != (z.shape[-1],z.shape[-1]):
                 raise ValueError('ZCA matrix has wrong shape')
-            visual=unit(z@zca)@unit(visual_bank@zca).T
+            visual_basis=unit(visual_bank@zca)
+            visual=unit(z@zca)@visual_basis.T
             if text_whitening_mode == 'visual':
-                text_query=unit(0.3*z+0.7*t_hat)
-                text=unit(text_query@zca)@unit(text_bank@zca).T
+                text_basis=unit(text_bank@zca)
+                text=unit(text_query@zca)@text_basis.T
             elif text_whitening_mode == 'own':
                 if text_whitening_sigma is None:
                     raise ValueError('Text-space standard deviation required')
                 text_scale=text_whitening_sigma.to(z.device).float().clamp_min(1e-4).rsqrt()
-                text_query=unit(0.3*z+0.7*t_hat)
-                text=unit(text_query*text_scale)@unit(text_bank*text_scale).T
+                text_basis=unit(text_bank*text_scale)
+                text=unit(text_query*text_scale)@text_basis.T
             else:
-                text_query=unit(0.3*z+0.7*t_hat)
-                text=text_query@text_bank.T
+                text_basis=text_bank
+                text=text_query@text_basis.T
         else:
-            visual=z@visual_bank.T
-            text_query=unit(0.3*z+0.7*t_hat)
-            text=text_query@text_bank.T
-        scores=visual+text
+            visual_basis=visual_bank
+            text_basis=text_bank
+            visual=z@visual_basis.T
+            text=text_query@text_basis.T
+        if hub_weight and len(visual_basis)>1:
+            # Class-specific hubness comes only from the prototype library.
+            # Exclude the diagonal self-similarity from each class mean.
+            visual_basis=unit(visual_basis)
+            text_basis=unit(text_basis)
+            visual_hub=((visual_basis@visual_basis.T).sum(-1)-1)/(len(visual_basis)-1)
+            text_hub=((text_basis@text_basis.T).sum(-1)-1)/(len(text_basis)-1)
+            visual=visual-hub_weight*visual_hub.unsqueeze(0)
+            text=text-hub_weight*text_hub.unsqueeze(0)
+        scores=visual+text_score_weight*text
         error=torch.zeros(len(z),1,device=z.device)
         ids=torch.tensor(bank['class_ids'],device=z.device)
         if return_components:
