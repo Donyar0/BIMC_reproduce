@@ -10,6 +10,8 @@ from models.clip.model import LoRAMultiheadAttention
 def train_base_vision_lora(model, data_manager, cfg, output):
     if cfg.TRAINER.BiMC.PREC != 'fp32':
         raise ValueError('Base LoRA training requires BiMC.PREC: fp32')
+    if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
+        raise RuntimeError('Base LoRA bfloat16 autocast requires a CUDA GPU with bfloat16 support')
     base_ids = list(data_manager.class_index_in_task[0])
     if base_ids != list(range(len(base_ids))):
         raise ValueError('Base labels must be zero-based and contiguous')
@@ -47,13 +49,18 @@ def train_base_vision_lora(model, data_manager, cfg, output):
         total, count = 0., 0
         for batch in loader:
             images, labels = model.parse_batch(batch)
-            image = F.normalize(model.extract_img_feature(images, tta=False).float(), dim=-1)
-            logits = scale * image @ text.T
-            ce = F.cross_entropy(logits, labels)
-            with torch.no_grad():
-                reference = F.normalize(teacher(images).float(), dim=-1)
-            anchor = F.mse_loss(image, reference)
-            loss = ce + cfg.LORA.ANCHOR_WEIGHT * anchor
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                image = model.extract_img_feature(images, tta=False)
+                with torch.no_grad():
+                    reference = teacher(images)
+            # LoRA weights, logits, losses and optimizer updates remain float32.
+            with torch.cuda.amp.autocast(enabled=False):
+                image = F.normalize(image.float(), dim=-1)
+                reference = F.normalize(reference.float(), dim=-1)
+                logits = scale * image @ text.T
+                ce = F.cross_entropy(logits, labels)
+                anchor = F.mse_loss(image, reference)
+                loss = ce + cfg.LORA.ANCHOR_WEIGHT * anchor
             if not torch.isfinite(loss):
                 raise RuntimeError('Nonfinite Base LoRA loss')
             optimizer.zero_grad(set_to_none=True)

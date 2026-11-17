@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from engine.engine import Runner
@@ -22,6 +23,33 @@ class TangentFlowRunner(Runner):
     @torch.no_grad()
     def extract_test_features(self, model, images):
         return model.extract_img_feature(images, tta=self.cfg.FLOW.TTA)
+
+    @torch.no_grad()
+    def cache_test_features(self, task_id, model):
+        """Encode the newly introduced test classes once after Base LoRA is frozen."""
+        dataset = self.data_manager.get_dataset(task_id, source='test', mode='test')
+        class_ids = self.data_manager.class_index_in_task[task_id]
+        indices = np.flatnonzero(np.isin(dataset.labels, class_ids)).tolist()
+        if not indices:
+            raise ValueError(f'No test examples for task {task_id}')
+        loader = DataLoader(Subset(dataset, indices),
+                            batch_size=self.cfg.DATALOADER.TEST.BATCH_SIZE,
+                            shuffle=False, num_workers=self.cfg.DATALOADER.NUM_WORKERS,
+                            pin_memory=True, drop_last=False)
+        features, targets = [], []
+        for batch in tqdm(loader, desc=f'Cache test task {task_id}'):
+            images, labels = self.parse_batch(batch)
+            features.append(self.extract_test_features(model, images).float().cpu())
+            targets.append(labels.cpu())
+        self._test_feature_cache[task_id] = (torch.cat(features), torch.cat(targets))
+
+    def cached_test_batches(self, task_id):
+        batch_size = self.cfg.DATALOADER.TEST.BATCH_SIZE
+        for seen_task in range(task_id + 1):
+            features, targets = self._test_feature_cache[seen_task]
+            for start in range(0, len(targets), batch_size):
+                end = start + batch_size
+                yield features[start:end].to(self.device), targets[start:end].to(self.device)
 
     @torch.no_grad()
     def run(self):
@@ -42,6 +70,7 @@ class TangentFlowRunner(Runner):
         encoder_id = str((cfg.MODEL.BACKBONE.NAME, cfg.TRAINER.BiMC.PREC, str(cfg.DATASET),
                           METHOD, DIRECTION, str(cfg.TRAINER.BiMC), str(cfg.LORA)))
         rows, checkpoint, bank, memory = [], None, None, None
+        self._test_feature_cache = {}
         bimc_stats = []
         num_base = len(self.data_manager.class_index_in_task[0])
         print(f'Method: tangent_flow | Dataset: {cfg.DATASET.NAME} | Seed: {cfg.SEED}')
@@ -56,6 +85,8 @@ class TangentFlowRunner(Runner):
                     history = train_base_vision_lora(model, self.data_manager, cfg, output)
                 (output / 'base_lora_metrics.json').write_text(
                     json.dumps({'loss_history': history}, indent=2), encoding='utf-8')
+            if flow.BIMC_BLEND_LAMBDA < 0:
+                self.cache_test_features(task_id, model)
             class_ids = self.data_manager.class_index_in_task[task_id]
             names = np.array(self.data_manager.class_names)[class_ids]
             loader = self.data_manager.get_dataloader(
@@ -188,7 +219,9 @@ class TangentFlowRunner(Runner):
                     for c in group]
         if bank['class_ids'] != expected or expected != list(range(len(expected))):
             raise ValueError('BIMC evaluator requires ordered, contiguous seen-class IDs')
-        loader = self.data_manager.get_dataloader(task_id, source='test', mode='test')
+        use_cache = self.cfg.FLOW.BIMC_BLEND_LAMBDA < 0
+        loader = (self.cached_test_batches(task_id) if use_cache else
+                  self.data_manager.get_dataloader(task_id, source='test', mode='test'))
         scores, targets, errors = [], [], []
         bimc_scores, flow_scores = [], []
         blend_lambda = self.cfg.FLOW.BIMC_BLEND_LAMBDA
@@ -213,8 +246,12 @@ class TangentFlowRunner(Runner):
                 real_bank = F.normalize(real_bank @ zca, dim=-1)
                 flow_bank = F.normalize(flow_bank @ zca, dim=-1)
         for batch in tqdm(loader):
-            images, labels = self.parse_batch(batch)
-            features = self.extract_test_features(model, images)
+            if use_cache:
+                features, labels = batch
+                images = None
+            else:
+                images, labels = self.parse_batch(batch)
+                features = self.extract_test_features(model, images)
             result = classify_bidirectional(velocity, features, device_bank,
                                                alpha=self.cfg.FLOW.ALPHA, gamma=self.cfg.FLOW.GAMMA,
                                                steps=self.cfg.FLOW.STEPS,
