@@ -96,6 +96,7 @@ def extend_cfg(cfg):
     cfg.FLOW.FUNNEL_MODE = False
     cfg.FLOW.SCORE_MODE = 'probability'
     cfg.FLOW.TEXT_SCORE_WEIGHT = 1.0
+    cfg.FLOW.HUB_WEIGHT = 0.0
     cfg.FLOW.TTA = False
     cfg.FLOW.TTA_PROTOTYPES = False
     cfg.FLOW.DIAGONAL_WHITEN = False
