@@ -1,15 +1,35 @@
 """Base-session vision-only CLIP LoRA training and merge."""
 import copy
 import time
+from contextlib import nullcontext
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 from models.clip.model import LoRAMultiheadAttention
 
 
+class AlignedAnchorDataset(Dataset):
+    """Return a centered image and the index of its optional horizontal flip."""
+
+    def __init__(self, source, center_transform):
+        self.source = copy.copy(source)
+        self.source.transform = center_transform
+
+    def __len__(self):
+        return len(self.source)
+
+    def __getitem__(self, index):
+        item = self.source[index]
+        view = int(torch.rand(()) < 0.5)
+        if view:
+            item['image'] = item['image'].flip(-1)
+        item['anchor_view'] = view
+        return item
+
+
 def cache_base_anchor_features(teacher, dataset, data_manager, cfg, device, feature_dim):
-    """Cache fixed center-view teacher features for the selected Base images."""
+    """Cache center and flipped teacher views for the selected Base images."""
     anchor_dataset = copy.copy(dataset)
     anchor_dataset.transform = data_manager.test_transform
     loader = DataLoader(anchor_dataset,
@@ -17,17 +37,27 @@ def cache_base_anchor_features(teacher, dataset, data_manager, cfg, device, feat
                         shuffle=False, drop_last=False,
                         **data_manager.loader_kwargs())
     # Allocate outside inference_mode so indexed targets can be used by autograd.
-    cache = torch.empty((len(dataset), feature_dim), device=device, dtype=torch.bfloat16)
+    num_views = 2 if cfg.LORA.ALIGN_ANCHOR_VIEW else 1
+    cache = torch.empty((len(dataset), num_views, feature_dim),
+                        device=device, dtype=torch.bfloat16)
     started = time.time()
+    use_cuda = torch.device(device).type == 'cuda'
     with torch.inference_mode():
         for batch in loader:
             images = batch['image'].to(device, non_blocking=True)
             indices = batch['idx'].to(device, non_blocking=True)
-            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-                features = teacher(images)
-            cache[indices] = F.normalize(features.float(), dim=-1).to(torch.bfloat16)
-    torch.cuda.synchronize()
-    print(f'Cached {len(dataset)} Base anchor features (fixed center view) '
+            inputs = (torch.cat((images, images.flip(-1)), dim=0)
+                      if num_views == 2 else images)
+            autocast = (torch.cuda.amp.autocast(dtype=torch.bfloat16)
+                        if use_cuda else nullcontext())
+            with autocast:
+                features = teacher(inputs)
+            features = F.normalize(features.float(), dim=-1)
+            by_sample = features.reshape(num_views, len(images), feature_dim).permute(1, 0, 2)
+            cache[indices] = by_sample.to(torch.bfloat16)
+    if use_cuda:
+        torch.cuda.synchronize(device)
+    print(f'Cached {len(dataset)} Base anchor features ({num_views} views/image) '
           f'in {time.time() - started:.1f}s', flush=True)
     return cache
 
@@ -57,14 +87,18 @@ def train_base_vision_lora(model, data_manager, cfg, output):
         text, _ = model.inference_text_feature(names, model.template, 0)
         text = F.normalize(text.float(), dim=-1).to(model.device)
         scale = model.clip_model.logit_scale.exp().float().detach()
-    dataset = data_manager.get_dataset(0, source='train', mode='train')
+    source_dataset = data_manager.get_dataset(0, source='train', mode='train')
+    dataset = (AlignedAnchorDataset(source_dataset, data_manager.test_transform)
+               if cfg.LORA.ALIGN_ANCHOR_VIEW else source_dataset)
+    if cfg.LORA.ALIGN_ANCHOR_VIEW:
+        print('Base LoRA augmentation: center crop with random horizontal flip', flush=True)
     loader = DataLoader(dataset, batch_size=cfg.DATALOADER.TRAIN.BATCH_SIZE_BASE,
                         shuffle=True, drop_last=False,
                         **data_manager.loader_kwargs())
     anchor_cache = None
     if cfg.LORA.ANCHOR_WEIGHT > 0 and cfg.LORA.CACHE_ANCHOR:
         anchor_cache = cache_base_anchor_features(
-            teacher, dataset, data_manager, cfg, model.device, text.shape[-1])
+            teacher, source_dataset, data_manager, cfg, model.device, text.shape[-1])
         del teacher
     optimizer = torch.optim.AdamW(parameters, lr=cfg.LORA.LR,
                                   weight_decay=cfg.LORA.WEIGHT_DECAY)
@@ -91,7 +125,10 @@ def train_base_vision_lora(model, data_manager, cfg, output):
                 ce = F.cross_entropy(logits, labels)
                 if cfg.LORA.ANCHOR_WEIGHT > 0:
                     if anchor_cache is not None:
-                        reference = anchor_cache[batch['idx'].to(model.device)].float()
+                        indices = batch['idx'].to(model.device, non_blocking=True)
+                        views = (batch['anchor_view'].to(model.device, non_blocking=True)
+                                 if cfg.LORA.ALIGN_ANCHOR_VIEW else torch.zeros_like(indices))
+                        reference = anchor_cache[indices, views].float()
                     else:
                         reference = F.normalize(reference.float(), dim=-1)
                     loss = ce + cfg.LORA.ANCHOR_WEIGHT * F.mse_loss(image, reference)

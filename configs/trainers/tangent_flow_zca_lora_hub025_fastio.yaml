@@ -39,7 +39,8 @@ FLOW:
   HUB_WEIGHT: 0.25
   TTA: True
   TTA_PROTOTYPES: True  # keep ten views for incremental 5-shot prototypes
-  BASE_PROTO_ONE_VIEW: True  # one view for Base prototypes only
+  BASE_PROTO_ONE_VIEW: True
+  BASE_PROTO_ONE_VIEW_MIN_SHOTS: 100  # Base <100 shots/class keeps ten views
   FEATURE_AMP: True
   TTA_VIEW_CHUNK: 2  # pack two views per CLIP forward; lower if GPU memory is tight
   DIAGONAL_WHITEN: True
@@ -55,7 +56,7 @@ FLOW:
   BLOCKS: 8
   STEPS: 8
   SOLVER: "euler"
-  OUTPUT_DIR: "output/dual_funnel_zca075_lora_rank4_hub025_fastio"
+  OUTPUT_DIR: "output/dual_funnel_zca075_lora_rank4_hub025_aligned_anchor"
   ADAPT_STEPS: 100
   DISTILL_WEIGHT: 1.0
   REPLAY_STRATEGY: "base_incremental_half"
@@ -69,4 +70,5 @@ LORA:
   LR: 0.0002
   WEIGHT_DECAY: 0.0001
   ANCHOR_WEIGHT: 0.1
-  CACHE_ANCHOR: True  # fixed center-view teacher feature; changes the anchor target
+  CACHE_ANCHOR: True
+  ALIGN_ANCHOR_VIEW: True  # center crop plus flip; match cached teacher view exactly

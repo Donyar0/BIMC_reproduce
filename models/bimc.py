@@ -90,11 +90,15 @@ class BiMC(nn.Module):
 
 
     @torch.no_grad()
-    def inference_all_img_feature(self, loader, cls_begin_index):
+    def inference_all_img_feature(self, loader, cls_begin_index, num_classes):
         all_features = []
         all_labels = []
-        tta = (False if cls_begin_index == 0 and self.cfg.FLOW.BASE_PROTO_ONE_VIEW
-               else self.cfg.FLOW.TTA_PROTOTYPES)
+        tta = self.cfg.FLOW.TTA_PROTOTYPES
+        if cls_begin_index == 0 and self.cfg.FLOW.BASE_PROTO_ONE_VIEW:
+            average_shots = len(loader.dataset) / num_classes
+            tta = tta and average_shots < self.cfg.FLOW.BASE_PROTO_ONE_VIEW_MIN_SHOTS
+            print(f'Base prototypes: {average_shots:.1f} images/class, '
+                  f'{"10-view" if tta else "single-view"}', flush=True)
         for batch in loader:
             images, labels = self.parse_batch(batch)
             features = self.extract_img_feature(
@@ -195,7 +199,8 @@ class BiMC(nn.Module):
                                   cls_begin_index=cls_begin_index)
         
         images_features, images_targets, images_proto = \
-                                    self.inference_all_img_feature(loader, cls_begin_index)
+                                    self.inference_all_img_feature(loader, cls_begin_index,
+                                                                   len(class_index))
 
         if cls_begin_index != 0:
             if calibrate_novel_vision_proto:

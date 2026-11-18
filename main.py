@@ -100,6 +100,7 @@ def extend_cfg(cfg):
     cfg.FLOW.TTA = False
     cfg.FLOW.TTA_PROTOTYPES = False
     cfg.FLOW.BASE_PROTO_ONE_VIEW = False
+    cfg.FLOW.BASE_PROTO_ONE_VIEW_MIN_SHOTS = 0
     cfg.FLOW.FEATURE_AMP = False
     cfg.FLOW.TTA_VIEW_CHUNK = 1
     cfg.FLOW.DIAGONAL_WHITEN = False
@@ -141,6 +142,7 @@ def extend_cfg(cfg):
     cfg.LORA.WEIGHT_DECAY = 0.0001
     cfg.LORA.ANCHOR_WEIGHT = 0.1
     cfg.LORA.CACHE_ANCHOR = False
+    cfg.LORA.ALIGN_ANCHOR_VIEW = False
 
 
 
