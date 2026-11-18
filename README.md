@@ -32,8 +32,9 @@ logging is needed.
   features. Incremental sessions adapt it using current support features,
   generated old-class feature replay, and previous-session velocity
   distillation. No old training images are retained for replay.
-- The visual Bank mixes calibrated visual prototypes with Flow-generated
-  prototypes: 20% Flow for Base and 40% for new classes. Classification adds
+- The visual Bank mixes image-mean visual prototypes with Flow-generated
+  prototypes: 20% Flow for Base and 40% for new classes. BiMC visual
+  `soft_calibration` is disabled (`VISION_CALIBRATION: False`). Classification adds
   ZCA-scaled visual cosine and raw reverse-Flow text cosine. The configured
   `cosine_sum` route does not use Cov/KNN probability fusion or Hub correction.
 - LoRA training uses one image view. Prototype construction and evaluation

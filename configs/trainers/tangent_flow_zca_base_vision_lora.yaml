@@ -23,7 +23,7 @@ TRAINER:
   BiMC:
     PREC: "fp32"  # required by the Base Vision LoRA trainer
 
-    VISION_CALIBRATION: True
+    VISION_CALIBRATION: False
     LAMBDA_I: 0.1
     TAU: 16
 
