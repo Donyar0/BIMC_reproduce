@@ -1,10 +1,35 @@
 """Base-session vision-only CLIP LoRA training and merge."""
 import copy
+import time
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from models.clip.model import LoRAMultiheadAttention
+
+
+def cache_base_anchor_features(teacher, dataset, data_manager, cfg, device, feature_dim):
+    """Cache fixed center-view teacher features for the selected Base images."""
+    anchor_dataset = copy.copy(dataset)
+    anchor_dataset.transform = data_manager.test_transform
+    loader = DataLoader(anchor_dataset,
+                        batch_size=cfg.DATALOADER.TRAIN.BATCH_SIZE_BASE,
+                        shuffle=False, drop_last=False,
+                        **data_manager.loader_kwargs())
+    # Allocate outside inference_mode so indexed targets can be used by autograd.
+    cache = torch.empty((len(dataset), feature_dim), device=device, dtype=torch.bfloat16)
+    started = time.time()
+    with torch.inference_mode():
+        for batch in loader:
+            images = batch['image'].to(device, non_blocking=True)
+            indices = batch['idx'].to(device, non_blocking=True)
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                features = teacher(images)
+            cache[indices] = F.normalize(features.float(), dim=-1).to(torch.bfloat16)
+    torch.cuda.synchronize()
+    print(f'Cached {len(dataset)} Base anchor features (fixed center view) '
+          f'in {time.time() - started:.1f}s', flush=True)
+    return cache
 
 
 def train_base_vision_lora(model, data_manager, cfg, output):
@@ -34,8 +59,13 @@ def train_base_vision_lora(model, data_manager, cfg, output):
         scale = model.clip_model.logit_scale.exp().float().detach()
     dataset = data_manager.get_dataset(0, source='train', mode='train')
     loader = DataLoader(dataset, batch_size=cfg.DATALOADER.TRAIN.BATCH_SIZE_BASE,
-                        shuffle=True, num_workers=cfg.DATALOADER.NUM_WORKERS,
-                        pin_memory=True, drop_last=False)
+                        shuffle=True, drop_last=False,
+                        **data_manager.loader_kwargs())
+    anchor_cache = None
+    if cfg.LORA.ANCHOR_WEIGHT > 0 and cfg.LORA.CACHE_ANCHOR:
+        anchor_cache = cache_base_anchor_features(
+            teacher, dataset, data_manager, cfg, model.device, text.shape[-1])
+        del teacher
     optimizer = torch.optim.AdamW(parameters, lr=cfg.LORA.LR,
                                   weight_decay=cfg.LORA.WEIGHT_DECAY)
     total_steps = cfg.LORA.EPOCHS * len(loader)
@@ -51,16 +81,22 @@ def train_base_vision_lora(model, data_manager, cfg, output):
             images, labels = model.parse_batch(batch)
             with torch.cuda.amp.autocast(dtype=torch.bfloat16):
                 image = model.extract_img_feature(images, tta=False)
-                with torch.no_grad():
-                    reference = teacher(images)
+                if anchor_cache is None and cfg.LORA.ANCHOR_WEIGHT > 0:
+                    with torch.no_grad():
+                        reference = teacher(images)
             # LoRA weights, logits, losses and optimizer updates remain float32.
             with torch.cuda.amp.autocast(enabled=False):
                 image = F.normalize(image.float(), dim=-1)
-                reference = F.normalize(reference.float(), dim=-1)
                 logits = scale * image @ text.T
                 ce = F.cross_entropy(logits, labels)
-                anchor = F.mse_loss(image, reference)
-                loss = ce + cfg.LORA.ANCHOR_WEIGHT * anchor
+                if cfg.LORA.ANCHOR_WEIGHT > 0:
+                    if anchor_cache is not None:
+                        reference = anchor_cache[batch['idx'].to(model.device)].float()
+                    else:
+                        reference = F.normalize(reference.float(), dim=-1)
+                    loss = ce + cfg.LORA.ANCHOR_WEIGHT * F.mse_loss(image, reference)
+                else:
+                    loss = ce
             if not torch.isfinite(loss):
                 raise RuntimeError('Nonfinite Base LoRA loss')
             optimizer.zero_grad(set_to_none=True)

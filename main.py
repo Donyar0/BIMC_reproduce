@@ -99,6 +99,9 @@ def extend_cfg(cfg):
     cfg.FLOW.HUB_WEIGHT = 0.0
     cfg.FLOW.TTA = False
     cfg.FLOW.TTA_PROTOTYPES = False
+    cfg.FLOW.BASE_PROTO_ONE_VIEW = False
+    cfg.FLOW.FEATURE_AMP = False
+    cfg.FLOW.TTA_VIEW_CHUNK = 1
     cfg.FLOW.DIAGONAL_WHITEN = False
     cfg.FLOW.VIS_WHITEN_POWER = 0.5
     cfg.FLOW.TEXT_WHITEN_MODE = 'visual'
@@ -137,6 +140,7 @@ def extend_cfg(cfg):
     cfg.LORA.LR = 0.0002
     cfg.LORA.WEIGHT_DECAY = 0.0001
     cfg.LORA.ANCHOR_WEIGHT = 0.1
+    cfg.LORA.CACHE_ANCHOR = False
 
 
 

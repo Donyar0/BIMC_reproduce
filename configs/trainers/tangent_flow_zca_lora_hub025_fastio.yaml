@@ -1,0 +1,72 @@
+METHOD: "tangent_flow"
+SEED: 1
+
+DEVICE:
+  DEVICE_NAME: "cuda"
+  GPU_ID: "0;"
+
+DATALOADER:
+  TRAIN:
+    BATCH_SIZE_BASE: 64
+    BATCH_SIZE_INC: 64
+  TEST:
+    BATCH_SIZE: 100
+  NUM_WORKERS: 8
+
+MODEL:
+  BACKBONE:
+    NAME: "ViT-B/16"
+
+TRAINER:
+  BiMC:
+    PREC: "fp32"
+    VISION_CALIBRATION: True
+    LAMBDA_I: 0.1
+    TAU: 16
+    TEXT_CALIBRATION: True
+    LAMBDA_T: 0.5
+
+FLOW:
+  STEPS_PER_EPOCH: 100
+  COV_SHRINK: 0.1
+  COV_TRANSFER_TEMPERATURE: 16.0
+  REPLAY_FRACTION: 0.5
+  BANK_MODE: "calibrated_flow20"
+  INC_FLOW_WEIGHT: 0.5
+  FUNNEL_MODE: True
+  SCORE_MODE: "cosine_sum"
+  TEXT_SCORE_WEIGHT: 1.2
+  HUB_WEIGHT: 0.25
+  TTA: True
+  TTA_PROTOTYPES: True  # keep ten views for incremental 5-shot prototypes
+  BASE_PROTO_ONE_VIEW: True  # one view for Base prototypes only
+  FEATURE_AMP: True
+  TTA_VIEW_CHUNK: 2  # pack two views per CLIP forward; lower if GPU memory is tight
+  DIAGONAL_WHITEN: True
+  VIS_WHITEN_POWER: 0.75
+  TEXT_WHITEN_MODE: "none"
+  NOISE_SCALE: 0.25
+  EPOCHS: 100
+  BATCH_SIZE: 64
+  LR: 0.0002
+  WEIGHT_DECAY: 0.0001
+  WARMUP_RATIO: 0.05
+  MIN_LR_RATIO: 0.01
+  BLOCKS: 8
+  STEPS: 8
+  SOLVER: "euler"
+  OUTPUT_DIR: "output/dual_funnel_zca075_lora_rank4_hub025_fastio"
+  ADAPT_STEPS: 100
+  DISTILL_WEIGHT: 1.0
+  REPLAY_STRATEGY: "base_incremental_half"
+
+LORA:
+  ENABLED: True
+  RANK: 4
+  ALPHA: 2.0
+  LAST_BLOCKS: 4
+  EPOCHS: 5
+  LR: 0.0002
+  WEIGHT_DECAY: 0.0001
+  ANCHOR_WEIGHT: 0.1
+  CACHE_ANCHOR: True  # fixed center-view teacher feature; changes the anchor target

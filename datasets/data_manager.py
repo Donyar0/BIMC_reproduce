@@ -132,19 +132,23 @@ class DatasetManager:
             loader = DataLoader(dataset,
                                 batch_size=batchsize,
                                 shuffle=False,
-                                num_workers=self.num_workers,
                                 drop_last=False,
-                                pin_memory=True)
+                                **self.loader_kwargs())
         elif source == 'test':
             loader = DataLoader(dataset,
                                 batch_size=self.test_batchsize,
                                 shuffle=False,
-                                num_workers=self.num_workers,
                                 drop_last=False,
-                                pin_memory=True)
+                                **self.loader_kwargs())
         else:
             raise ValueError(f'Invalid data source: {source}')
         return loader
+
+    def loader_kwargs(self):
+        kwargs = dict(num_workers=self.num_workers, pin_memory=True)
+        if self.num_workers > 0:
+            kwargs.update(persistent_workers=True, prefetch_factor=4)
+        return kwargs
     
 
 

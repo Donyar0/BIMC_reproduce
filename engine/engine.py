@@ -78,7 +78,7 @@ class Runner:
     def parse_batch(self, batch):
         data = batch['image']
         targets = batch['label']
-        data = data.to(self.device)
-        targets = targets.to(self.device)
+        data = data.to(self.device, non_blocking=True)
+        targets = targets.to(self.device, non_blocking=True)
         return data, targets
 

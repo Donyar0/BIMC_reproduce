@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import models.clip.clip as clip
 from models.clip.model import LoRAMultiheadAttention
 import json
+from contextlib import nullcontext
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -92,9 +93,13 @@ class BiMC(nn.Module):
     def inference_all_img_feature(self, loader, cls_begin_index):
         all_features = []
         all_labels = []
+        tta = (False if cls_begin_index == 0 and self.cfg.FLOW.BASE_PROTO_ONE_VIEW
+               else self.cfg.FLOW.TTA_PROTOTYPES)
         for batch in loader:
             images, labels = self.parse_batch(batch)
-            features = self.extract_img_feature(images, tta=self.cfg.FLOW.TTA_PROTOTYPES)
+            features = self.extract_img_feature(
+                images, tta=tta, amp=self.cfg.FLOW.FEATURE_AMP,
+                tta_view_chunk=self.cfg.FLOW.TTA_VIEW_CHUNK)
             features = F.normalize(features, dim=-1)
             all_features.append(features)
             all_labels.append(labels)
@@ -313,24 +318,34 @@ class BiMC(nn.Module):
 
 
 
-    def extract_img_feature(self, images, tta=False):
+    def extract_img_feature(self, images, tta=False, amp=False, tta_view_chunk=1):
         images = images.to(self.device)
-        if tta:
-            height, width = images.shape[-2:]
-            crop_h, crop_w = round(height * 0.875), round(width * 0.875)
-            views = [images]
-            for top, left in ((0, 0), (0, width-crop_w),
-                              (height-crop_h, 0), (height-crop_h, width-crop_w)):
-                crop = images[:, :, top:top+crop_h, left:left+crop_w]
-                views.append(F.interpolate(crop, size=(height, width),
-                                           mode='bicubic', align_corners=False))
-            features = []
-            for view in views:
-                features.append(F.normalize(self.clip_model.encode_image(view).float(), dim=-1))
-                features.append(F.normalize(self.clip_model.encode_image(view.flip(-1)).float(), dim=-1))
-            return F.normalize(torch.stack(features).mean(0), dim=-1)
-        image_features = self.clip_model.encode_image(images)
-        return image_features
+        if tta_view_chunk < 1:
+            raise ValueError('TTA_VIEW_CHUNK must be positive')
+        autocast = (torch.cuda.amp.autocast(
+            dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16)
+            if amp and images.is_cuda else nullcontext())
+        with autocast:
+            if tta:
+                height, width = images.shape[-2:]
+                crop_h, crop_w = round(height * 0.875), round(width * 0.875)
+                views = [images]
+                for top, left in ((0, 0), (0, width-crop_w),
+                                  (height-crop_h, 0), (height-crop_h, width-crop_w)):
+                    crop = images[:, :, top:top+crop_h, left:left+crop_w]
+                    views.append(F.interpolate(crop, size=(height, width),
+                                               mode='bicubic', align_corners=False))
+                total = None
+                batch_size = len(images)
+                for start in range(0, 2 * len(views), tta_view_chunk):
+                    group = [(views[i//2] if i % 2 == 0 else views[i//2].flip(-1))
+                             for i in range(start, min(start+tta_view_chunk, 2*len(views)))]
+                    packed = torch.cat(group, dim=0) if len(group) > 1 else group[0]
+                    encoded = F.normalize(self.clip_model.encode_image(packed).float(), dim=-1)
+                    for feature in encoded.split(batch_size, dim=0):
+                        total = feature if total is None else total + feature
+                return F.normalize(total / (2 * len(views)), dim=-1)
+            return self.clip_model.encode_image(images).float()
 
 
     @torch.no_grad()
@@ -346,6 +361,6 @@ class BiMC(nn.Module):
     def parse_batch(self, batch):
         data = batch['image']
         targets = batch['label']
-        data = data.to(self.device)
-        targets = targets.to(self.device)
+        data = data.to(self.device, non_blocking=True)
+        targets = targets.to(self.device, non_blocking=True)
         return data, targets

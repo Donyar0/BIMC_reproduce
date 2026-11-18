@@ -22,7 +22,14 @@ from engine.lora_base import train_base_vision_lora
 class TangentFlowRunner(Runner):
     @torch.no_grad()
     def extract_test_features(self, model, images):
-        return model.extract_img_feature(images, tta=self.cfg.FLOW.TTA)
+        return model.extract_img_feature(
+            images, tta=self.cfg.FLOW.TTA, amp=self.cfg.FLOW.FEATURE_AMP,
+            tta_view_chunk=self.cfg.FLOW.TTA_VIEW_CHUNK)
+
+    def stage_seconds(self, started):
+        if torch.cuda.is_available() and str(self.device).startswith('cuda'):
+            torch.cuda.synchronize()
+        return time.time() - started
 
     @torch.no_grad()
     def cache_test_features(self, task_id, model):
@@ -34,14 +41,20 @@ class TangentFlowRunner(Runner):
             raise ValueError(f'No test examples for task {task_id}')
         loader = DataLoader(Subset(dataset, indices),
                             batch_size=self.cfg.DATALOADER.TEST.BATCH_SIZE,
-                            shuffle=False, num_workers=self.cfg.DATALOADER.NUM_WORKERS,
-                            pin_memory=True, drop_last=False)
+                            shuffle=False, drop_last=False,
+                            **self.data_manager.loader_kwargs())
         features, targets = [], []
         for batch in tqdm(loader, desc=f'Cache test task {task_id}'):
             images, labels = self.parse_batch(batch)
             features.append(self.extract_test_features(model, images).float().cpu())
             targets.append(labels.cpu())
-        self._test_feature_cache[task_id] = (torch.cat(features), torch.cat(targets))
+        cached_features, cached_targets = torch.cat(features), torch.cat(targets)
+        if torch.cuda.is_available():
+            cached_features = cached_features.pin_memory()
+            cached_targets = cached_targets.pin_memory()
+        self._test_feature_cache[task_id] = (cached_features, cached_targets)
+        total = sum(len(labels) for _, labels in self._test_feature_cache.values())
+        print(f'Test feature cache: new={len(indices)}, total={total} images', flush=True)
 
     def cached_test_batches(self, task_id):
         batch_size = self.cfg.DATALOADER.TEST.BATCH_SIZE
@@ -49,7 +62,8 @@ class TangentFlowRunner(Runner):
             features, targets = self._test_feature_cache[seen_task]
             for start in range(0, len(targets), batch_size):
                 end = start + batch_size
-                yield features[start:end].to(self.device), targets[start:end].to(self.device)
+                yield (features[start:end].to(self.device, non_blocking=True),
+                       targets[start:end].to(self.device, non_blocking=True))
 
     @torch.no_grad()
     def run(self):
@@ -79,14 +93,19 @@ class TangentFlowRunner(Runner):
 
         for task_id in range(self.data_manager.num_tasks):
             start = time.time()
+            timings = {'lora': 0.0}
             if task_id == 0 and cfg.LORA.ENABLED:
                 devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
                 with torch.random.fork_rng(devices=devices), torch.enable_grad():
                     history = train_base_vision_lora(model, self.data_manager, cfg, output)
                 (output / 'base_lora_metrics.json').write_text(
                     json.dumps({'loss_history': history}, indent=2), encoding='utf-8')
+                timings['lora'] = self.stage_seconds(start)
+            stage_start = time.time()
             if flow.BIMC_BLEND_LAMBDA < 0:
                 self.cache_test_features(task_id, model)
+            timings['test_feature_cache'] = self.stage_seconds(stage_start)
+            stage_start = time.time()
             class_ids = self.data_manager.class_index_in_task[task_id]
             names = np.array(self.data_manager.class_names)[class_ids]
             loader = self.data_manager.get_dataloader(
@@ -128,6 +147,8 @@ class TangentFlowRunner(Runner):
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 torch.save(current, cache_dir / f'session_{task_id}.pt')
             memory = current if memory is None else combine(memory, current)
+            timings['task_statistics'] = self.stage_seconds(stage_start)
+            stage_start = time.time()
             devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
             with torch.random.fork_rng(devices=devices), torch.enable_grad():
                 if task_id == 0:
@@ -174,6 +195,8 @@ class TangentFlowRunner(Runner):
                                        distill_weight=flow.DISTILL_WEIGHT,
                                        warmup_ratio=flow.WARMUP_RATIO,
                                        min_lr_ratio=flow.MIN_LR_RATIO)
+            timings['flow_training'] = self.stage_seconds(stage_start)
+            stage_start = time.time()
             bank = build_bank(checkpoint, current, steps=flow.STEPS,
                               num_base=num_base if task_id == 0 else 0,
                               beta_base=flow.BETA_BASE, beta_inc=flow.BETA_INC,
@@ -186,18 +209,24 @@ class TangentFlowRunner(Runner):
             bimc_state = self.merge_dicts(bimc_stats) if bimc_stats else None
             del stats, loader
             self._checkpoint = checkpoint
+            timings['bank_and_save'] = self.stage_seconds(stage_start)
+            stage_start = time.time()
             acc = self.inference_task_flow(task_id, bank, memory, model, bimc_state)
-            elapsed = time.time() - start
+            timings['evaluation'] = self.stage_seconds(stage_start)
+            elapsed = self.stage_seconds(start)
             self.acc_list.append(acc['mean_acc'])
             self.task_acc_list.append(acc['task_acc'])
             row = dict(task_id=task_id, seen_classes=len(bank['class_ids']),
-                       **acc, elapsed_time=elapsed)
+                       **acc, elapsed_time=elapsed,
+                       **{f'time_{name}': seconds for name, seconds in timings.items()})
             rows.append(row)
             print(f'=> Task [{task_id}], Acc: {acc["mean_acc"]:.3f}')
             print(f'Base Acc: {acc["base_avg_acc"]:.2f} | '
                   f'Incremental Acc: {acc["inc_avg_acc"]:.2f} | '
                   f'Harmonic Acc: {acc["harmonic_acc"]:.2f}')
             print(f'+++++++++++  task {task_id}, time: {elapsed:.3f} ++++++++++++++++')
+            print('Stage time (s): ' + ', '.join(
+                f'{name}={seconds:.1f}' for name, seconds in timings.items()), flush=True)
             log_metrics({k:v for k,v in row.items() if k != 'task_acc'}, step=task_id)
             self.save_results(output, rows)
 
