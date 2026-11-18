@@ -58,7 +58,7 @@ FLOW:
   BLOCKS: 8
   STEPS: 8
   SOLVER: "euler"  # euler, midpoint, heun, rk4; inference only
-  OUTPUT_DIR: "output/dual_funnel_zca075_lora_rank4_hub025"
+  OUTPUT_DIR: "output/dual_funnel_zca075_lora_rank4_hub025_bf16_cache"
   ADAPT_STEPS: 100  # incremental FM plus previous-session velocity distillation
   DISTILL_WEIGHT: 1.0
   REPLAY_STRATEGY: "base_incremental_half"
