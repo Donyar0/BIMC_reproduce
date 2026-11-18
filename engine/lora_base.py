@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
+import models.clip.clip as clip
 from models.clip.model import LoRAMultiheadAttention
 
 
@@ -62,16 +63,24 @@ def cache_base_anchor_features(teacher, dataset, data_manager, cfg, device, feat
     return cache
 
 
+def encode_base_prompts(clip_model, tokens, num_classes, num_templates):
+    features = F.normalize(clip_model.encode_text(tokens).float(), dim=-1)
+    return F.normalize(features.reshape(num_classes, num_templates, -1).mean(1), dim=-1)
+
+
 def train_base_vision_lora(model, data_manager, cfg, output):
     if cfg.TRAINER.BiMC.PREC != 'fp32':
         raise ValueError('Base LoRA training requires BiMC.PREC: fp32')
+    if cfg.LORA.ANCHOR_WEIGHT < 0 or cfg.LORA.TEXT_ANCHOR_WEIGHT < 0:
+        raise ValueError('LoRA anchor weights must be nonnegative')
     if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
         raise RuntimeError('Base LoRA bfloat16 autocast requires a CUDA GPU with bfloat16 support')
     base_ids = list(data_manager.class_index_in_task[0])
     if base_ids != list(range(len(base_ids))):
         raise ValueError('Base labels must be zero-based and contiguous')
-    # The model is still at its pretrained state: Q/V updates are initialized to zero.
-    teacher = copy.deepcopy(model.clip_model.visual).eval().requires_grad_(False)
+    # Q/V updates start at zero, so the optional teacher is the original CLIP vision tower.
+    teacher = (copy.deepcopy(model.clip_model.visual).eval().requires_grad_(False)
+               if cfg.LORA.ANCHOR_WEIGHT > 0 else None)
     model.clip_model.requires_grad_(False)
     lora_layers = [block.attn for block in model.clip_model.visual.transformer.resblocks
                    if isinstance(block.attn, LoRAMultiheadAttention)]
@@ -82,10 +91,21 @@ def train_base_vision_lora(model, data_manager, cfg, output):
         for parameter in (layer.q_A, layer.q_B, layer.v_A, layer.v_B):
             parameter.requires_grad_(True)
             parameters.append(parameter)
+    if cfg.LORA.TEXT_ENABLED:
+        text_layers = [block.attn for block in model.clip_model.transformer.resblocks
+                       if isinstance(block.attn, LoRAMultiheadAttention)]
+        if not text_layers:
+            raise ValueError('Text LoRA was enabled but no text attention layers were installed')
+        for layer in text_layers:
+            for parameter in (layer.q_A, layer.q_B, layer.v_A, layer.v_B):
+                parameter.requires_grad_(True)
+                parameters.append(parameter)
     names = [data_manager.class_names[c] for c in base_ids]
+    prompts = [template.format(name.replace('_', ' ').replace('-', ' '))
+               for name in names for template in model.template]
+    tokens = clip.tokenize(prompts).to(model.device)
     with torch.no_grad():
-        text, _ = model.inference_text_feature(names, model.template, 0)
-        text = F.normalize(text.float(), dim=-1).to(model.device)
+        text_anchor = encode_base_prompts(model.clip_model, tokens, len(names), len(model.template))
         scale = model.clip_model.logit_scale.exp().float().detach()
     source_dataset = data_manager.get_dataset(0, source='train', mode='train')
     dataset = (AlignedAnchorDataset(source_dataset, data_manager.test_transform)
@@ -98,7 +118,7 @@ def train_base_vision_lora(model, data_manager, cfg, output):
     anchor_cache = None
     if cfg.LORA.ANCHOR_WEIGHT > 0 and cfg.LORA.CACHE_ANCHOR:
         anchor_cache = cache_base_anchor_features(
-            teacher, source_dataset, data_manager, cfg, model.device, text.shape[-1])
+            teacher, source_dataset, data_manager, cfg, model.device, text_anchor.shape[-1])
         del teacher
     optimizer = torch.optim.AdamW(parameters, lr=cfg.LORA.LR,
                                   weight_decay=cfg.LORA.WEIGHT_DECAY)
@@ -107,6 +127,8 @@ def train_base_vision_lora(model, data_manager, cfg, output):
         raise ValueError('Empty Base LoRA training loader')
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
     model.clip_model.visual.train()
+    if cfg.LORA.TEXT_ENABLED:
+        model.clip_model.transformer.train()
     history = []
     step = 0
     for epoch in range(cfg.LORA.EPOCHS):
@@ -115,6 +137,8 @@ def train_base_vision_lora(model, data_manager, cfg, output):
             images, labels = model.parse_batch(batch)
             with torch.cuda.amp.autocast(dtype=torch.bfloat16):
                 image = model.extract_img_feature(images, tta=False)
+                text = (encode_base_prompts(model.clip_model, tokens, len(names), len(model.template))
+                        if cfg.LORA.TEXT_ENABLED else text_anchor)
                 if anchor_cache is None and cfg.LORA.ANCHOR_WEIGHT > 0:
                     with torch.no_grad():
                         reference = teacher(images)
@@ -134,6 +158,8 @@ def train_base_vision_lora(model, data_manager, cfg, output):
                     loss = ce + cfg.LORA.ANCHOR_WEIGHT * F.mse_loss(image, reference)
                 else:
                     loss = ce
+                if cfg.LORA.TEXT_ENABLED and cfg.LORA.TEXT_ANCHOR_WEIGHT > 0:
+                    loss = loss + cfg.LORA.TEXT_ANCHOR_WEIGHT * F.mse_loss(text, text_anchor)
             if not torch.isfinite(loss):
                 raise RuntimeError('Nonfinite Base LoRA loss')
             optimizer.zero_grad(set_to_none=True)
@@ -149,5 +175,10 @@ def train_base_vision_lora(model, data_manager, cfg, output):
     torch.save({key: value.detach().cpu().clone()
                 for key, value in model.clip_model.visual.state_dict().items()},
                output / 'base_lora_merged_visual.pt')
-    print(f'Base Vision LoRA merged after {step} updates', flush=True)
+    if cfg.LORA.TEXT_ENABLED:
+        torch.save({key: value.detach().cpu().clone()
+                    for key, value in model.clip_model.transformer.state_dict().items()},
+                   output / 'base_lora_merged_text.pt')
+    print(f'Base {"Vision+Text" if cfg.LORA.TEXT_ENABLED else "Vision"} LoRA '
+          f'merged after {step} updates', flush=True)
     return history

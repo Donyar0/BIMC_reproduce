@@ -2,7 +2,8 @@
 import unittest
 import torch
 from torch import nn
-from models.clip.model import LoRAMultiheadAttention
+from models.clip.model import CLIP, LoRAMultiheadAttention
+from engine.lora_base import encode_base_prompts
 
 
 class LoRAAttentionTests(unittest.TestCase):
@@ -29,6 +30,25 @@ class LoRAAttentionTests(unittest.TestCase):
         self.assertIsNotNone(adapter.q_B.grad)
         self.assertIsNotNone(adapter.v_B.grad)
         self.assertIsNone(adapter.orig_attn.in_proj_weight.grad)
+
+    def test_text_encoder_prompt_loss_reaches_text_lora(self):
+        torch.manual_seed(5)
+        clip_model = CLIP(embed_dim=16, image_resolution=32, vision_layers=2,
+                          vision_width=64, vision_patch_size=16, context_length=8,
+                          vocab_size=100, transformer_width=32, transformer_heads=4,
+                          transformer_layers=2)
+        block = clip_model.transformer.resblocks[-1]
+        block.attn = LoRAMultiheadAttention(block.attn, r=2)
+        clip_model.requires_grad_(False)
+        block.attn.q_B.requires_grad_(True)
+        block.attn.v_B.requires_grad_(True)
+        tokens = torch.tensor([[1, 8, 99, 0, 0, 0, 0, 0],
+                               [1, 9, 99, 0, 0, 0, 0, 0]])
+        text = encode_base_prompts(clip_model, tokens, num_classes=2, num_templates=1)
+        (text[0] - text[1]).square().sum().backward()
+        self.assertIsNotNone(block.attn.q_B.grad)
+        self.assertIsNotNone(block.attn.v_B.grad)
+        self.assertGreater(block.attn.q_B.grad.norm().item(), 0.0)
 
 
 if __name__ == '__main__':

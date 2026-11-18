@@ -120,6 +120,7 @@ def extend_cfg(cfg):
     cfg.FLOW.STEPS = 8
     cfg.FLOW.SOLVER = 'euler'
     cfg.FLOW.OUTPUT_DIR = 'output/tangent_flow'
+    cfg.FLOW.MAX_TASK_ID = -1
     cfg.FLOW.ADAPT_STEPS = 100
     cfg.FLOW.ADAPT_LR = 0.0002
     cfg.FLOW.ALPHA = 0.15
@@ -143,13 +144,27 @@ def extend_cfg(cfg):
     cfg.LORA.ANCHOR_WEIGHT = 0.1
     cfg.LORA.CACHE_ANCHOR = False
     cfg.LORA.ALIGN_ANCHOR_VIEW = False
+    cfg.LORA.TEXT_ENABLED = False
+    cfg.LORA.TEXT_RANK = 2
+    cfg.LORA.TEXT_ALPHA = 2.0
+    cfg.LORA.TEXT_LAST_BLOCKS = 2
+    cfg.LORA.TEXT_ANCHOR_WEIGHT = 0.02
+
+    cfg.CALIBRATION = CN()
+    cfg.CALIBRATION.ENABLED = False
+    cfg.CALIBRATION.PSEUDO_PER_CLASS = 5
+    cfg.CALIBRATION.STEPS = 100
+    cfg.CALIBRATION.BATCH_SIZE = 64
+    cfg.CALIBRATION.LR = 0.01
+    cfg.CALIBRATION.TEMPERATURE = 20.0
+    cfg.CALIBRATION.REG_WEIGHT = 0.1
 
 
 
 
     
 
-def setup_cfg(dataset_cfg_file, method_cfg_file):
+def setup_cfg(dataset_cfg_file, method_cfg_file, overrides=None):
     cfg = CN()
     extend_cfg(cfg)
 
@@ -158,6 +173,9 @@ def setup_cfg(dataset_cfg_file, method_cfg_file):
 
     # 2. From the method config file
     cfg.merge_from_file(method_cfg_file)
+
+    if overrides:
+        cfg.merge_from_list(overrides)
 
     cfg.freeze()
     return cfg
@@ -174,13 +192,15 @@ def main():
     parser.add_argument('--swanlab_experiment', type=str, default='', help="SwanLab experiment name")
     parser.add_argument('--swanlab_mode', type=str, default='online', choices=['online', 'offline', 'local', 'disabled'],
                         help="SwanLab running mode")
+    parser.add_argument('--opts', nargs=argparse.REMAINDER, default=[],
+                        help='Optional configuration overrides as KEY VALUE pairs')
 
     args = parser.parse_args()
 
     data_cfg = args.data_cfg
     train_cfg = args.train_cfg
 
-    cfg = setup_cfg(data_cfg, train_cfg)
+    cfg = setup_cfg(data_cfg, train_cfg, args.opts)
     init_swanlab(cfg, args)
 
     # Set the random seed and GPU ID

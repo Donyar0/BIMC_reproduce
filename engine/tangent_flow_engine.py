@@ -15,11 +15,31 @@ from engine.engine import Runner
 from single_flow.text_distribution_flow import (fit, adapt, distributions, combine, build_bank,
                                                 classify_bidirectional, load_model, METHOD, DIRECTION)
 from single_flow.flow_utils import transport
+from single_flow.prototype_calibrator import fit_prototype_calibrator
 from utils.experiment_logger import log_metrics
 from engine.lora_base import train_base_vision_lora
 
 
 class TangentFlowRunner(Runner):
+    def flow_scoring_kwargs(self):
+        flow = self.cfg.FLOW
+        return dict(alpha=flow.ALPHA, gamma=flow.GAMMA,
+                    steps=flow.STEPS, solver=flow.SOLVER,
+                    cycle_scale=flow.CYCLE_SCALE, cycle_gate=flow.CYCLE_GATE,
+                    cosine_temperature=flow.COSINE_TEMPERATURE,
+                    knn_temperature=flow.KNN_TEMPERATURE,
+                    cov_divisor=flow.COV_DIVISOR,
+                    gamma_base=flow.GAMMA_BASE if flow.GAMMA_BASE >= 0 else None,
+                    gamma_inc=flow.GAMMA_INC if flow.GAMMA_INC >= 0 else None,
+                    score_mode=flow.SCORE_MODE, text_score_weight=flow.TEXT_SCORE_WEIGHT,
+                    hub_weight=flow.HUB_WEIGHT,
+                    whitening_matrix=self._zca_matrix if flow.DIAGONAL_WHITEN else None,
+                    visual_whitening_power=flow.VIS_WHITEN_POWER,
+                    text_whitening_mode=flow.TEXT_WHITEN_MODE,
+                    text_whitening_sigma=(self._text_whitening_sigma
+                                          if flow.DIAGONAL_WHITEN and flow.TEXT_WHITEN_MODE == 'own'
+                                          else None))
+
     @torch.no_grad()
     def extract_test_features(self, model, images):
         return model.extract_img_feature(
@@ -75,6 +95,12 @@ class TangentFlowRunner(Runner):
             raise ValueError('Unknown FLOW.SOLVER')
         if not cfg.TRAINER.BiMC.TEXT_CALIBRATION:
             raise ValueError('Enable original BiMC description fusion: TEXT_CALIBRATION: True')
+        if cfg.LORA.TEXT_ENABLED and not cfg.LORA.ENABLED:
+            raise ValueError('Text LoRA requires LORA.ENABLED: True')
+        if cfg.CALIBRATION.ENABLED and (flow.SCORE_MODE != 'cosine_sum'
+                                        or flow.BIMC_BLEND_LAMBDA >= 0
+                                        or flow.USE_GEOMETRY_PRIORS):
+            raise ValueError('Prototype calibration requires pure cosine_sum Flow scoring')
         model = self.model.module if self.is_distributed else self.model
         model.eval().requires_grad_(False)
         run_name = f'seed_{cfg.SEED}_{datetime.now().strftime("%Y%m%d_%H%M%S_%f")}'
@@ -85,15 +111,21 @@ class TangentFlowRunner(Runner):
                           METHOD, DIRECTION, str(cfg.TRAINER.BiMC), str(cfg.LORA)))
         rows, checkpoint, bank, memory = [], None, None, None
         self._test_feature_cache = {}
+        self._calibrator = None
         bimc_stats = []
         num_base = len(self.data_manager.class_index_in_task[0])
+        last_task = (self.data_manager.num_tasks - 1 if flow.MAX_TASK_ID == -1
+                     else flow.MAX_TASK_ID)
+        if not 0 <= last_task < self.data_manager.num_tasks:
+            raise ValueError('FLOW.MAX_TASK_ID must be -1 or a valid task index')
         print(f'Method: tangent_flow | Dataset: {cfg.DATASET.NAME} | Seed: {cfg.SEED}')
         print(f'Results directory: {output}')
-        print(f'Start inferencing on all tasks: [0, {self.data_manager.num_tasks - 1}]')
+        print(f'Start inferencing on tasks: [0, {last_task}]')
 
-        for task_id in range(self.data_manager.num_tasks):
+        for task_id in range(last_task + 1):
             start = time.time()
             timings = {'lora': 0.0}
+            base_prompt_acc = None
             if task_id == 0 and cfg.LORA.ENABLED:
                 devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
                 with torch.random.fork_rng(devices=devices), torch.enable_grad():
@@ -114,6 +146,13 @@ class TangentFlowRunner(Runner):
                 names, loader, class_index=class_ids,
                 calibrate_novel_vision_proto=cfg.TRAINER.BiMC.VISION_CALIBRATION,
                 calculate_covariance=flow.BIMC_BLEND_LAMBDA >= 0)
+            if task_id == 0 and cfg.LORA.ENABLED and 0 in self._test_feature_cache:
+                base_test_features, base_test_targets = self._test_feature_cache[0]
+                prompts = F.normalize(stats['text_features'].detach().float().cpu(), dim=-1)
+                prompt_scores = F.normalize(base_test_features.float(), dim=-1) @ prompts.T
+                base_prompt_acc = self.evaluator.calc_accuracy(
+                    prompt_scores, base_test_targets, 0)['mean_acc']
+                print(f'Base CLIP prompt accuracy after LoRA: {base_prompt_acc:.3f}%', flush=True)
             if task_id == 0 and flow.DIAGONAL_WHITEN:
                 base_features = F.normalize(stats['images_features'].detach().float().cpu(), dim=-1)
                 base_labels = stats['images_targets'].detach().long().cpu()
@@ -211,6 +250,25 @@ class TangentFlowRunner(Runner):
             self._checkpoint = checkpoint
             timings['bank_and_save'] = self.stage_seconds(stage_start)
             stage_start = time.time()
+            if task_id > 0 and cfg.CALIBRATION.ENABLED:
+                devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+                with torch.random.fork_rng(devices=devices), torch.enable_grad():
+                    torch.manual_seed(cfg.SEED + 1000 + task_id)
+                    self._calibrator, calibration_losses = fit_prototype_calibrator(
+                        checkpoint, memory, bank, device=self.device, num_base=num_base,
+                        pseudo_per_class=cfg.CALIBRATION.PSEUDO_PER_CLASS,
+                        noise_scale=flow.NOISE_SCALE, flow_steps=flow.STEPS,
+                        solver=flow.SOLVER, scoring_kwargs=self.flow_scoring_kwargs(),
+                        steps=cfg.CALIBRATION.STEPS, batch_size=cfg.CALIBRATION.BATCH_SIZE,
+                        lr=cfg.CALIBRATION.LR, temperature=cfg.CALIBRATION.TEMPERATURE,
+                        reg_weight=cfg.CALIBRATION.REG_WEIGHT,
+                        whitening_matrix=self._zca_matrix if flow.DIAGONAL_WHITEN else None)
+                torch.save({'state_dict': {key: value.detach().cpu().clone()
+                                           for key, value in self._calibrator.state_dict().items()},
+                            'class_ids': bank['class_ids'], 'loss_history': calibration_losses},
+                           output / f'calibrator_session{task_id}.pt')
+            timings['calibration'] = self.stage_seconds(stage_start)
+            stage_start = time.time()
             acc = self.inference_task_flow(task_id, bank, memory, model, bimc_state)
             timings['evaluation'] = self.stage_seconds(stage_start)
             elapsed = self.stage_seconds(start)
@@ -219,6 +277,8 @@ class TangentFlowRunner(Runner):
             row = dict(task_id=task_id, seen_classes=len(bank['class_ids']),
                        **acc, elapsed_time=elapsed,
                        **{f'time_{name}': seconds for name, seconds in timings.items()})
+            if base_prompt_acc is not None:
+                row['base_clip_prompt_acc'] = base_prompt_acc
             rows.append(row)
             print(f'=> Task [{task_id}], Acc: {acc["mean_acc"]:.3f}')
             print(f'Base Acc: {acc["base_avg_acc"]:.2f} | '
@@ -237,6 +297,7 @@ class TangentFlowRunner(Runner):
         average = sum(self.acc_list) / len(self.acc_list)
         print(f'Final session Acc: {self.acc_list[-1]:.3f}')
         print(f'Average session Acc: {average:.3f}')
+        print(f'Evaluated sessions: {len(self.acc_list)}/{self.data_manager.num_tasks}')
         print(f'Results saved to: {output / "metrics.csv"}')
         log_metrics({'final_acc': self.acc_list[-1], 'avg_acc': average})
 
@@ -255,6 +316,7 @@ class TangentFlowRunner(Runner):
                   self.data_manager.get_dataloader(task_id, source='test', mode='test'))
         scores, targets, errors = [], [], []
         bimc_scores, flow_scores = [], []
+        uncalibrated_scores = []
         blend_lambda = self.cfg.FLOW.BIMC_BLEND_LAMBDA
         if blend_lambda >= 0 and not 0 <= blend_lambda <= 1:
             raise ValueError('BIMC_BLEND_LAMBDA must be in [0,1]')
@@ -284,30 +346,11 @@ class TangentFlowRunner(Runner):
                 images, labels = self.parse_batch(batch)
                 features = self.extract_test_features(model, images)
             result = classify_bidirectional(velocity, features, device_bank,
-                                               alpha=self.cfg.FLOW.ALPHA, gamma=self.cfg.FLOW.GAMMA,
-                                               steps=self.cfg.FLOW.STEPS,
-                                               solver=self.cfg.FLOW.SOLVER,
-                                               cycle_scale=self.cfg.FLOW.CYCLE_SCALE,
+                                               **self.flow_scoring_kwargs(),
                                                ensemble_alpha=(1.0 if blend_lambda >= 0 else
                                                                self.cfg.DATASET.ENSEMBLE_ALPHA if use_priors else 1.0),
                                                num_base=len(self.data_manager.class_index_in_task[0]),
                                                cov_inv=cov_inv,
-                                               cycle_gate=self.cfg.FLOW.CYCLE_GATE,
-                                               cosine_temperature=self.cfg.FLOW.COSINE_TEMPERATURE,
-                                               knn_temperature=self.cfg.FLOW.KNN_TEMPERATURE,
-                                               cov_divisor=self.cfg.FLOW.COV_DIVISOR,
-                                               gamma_base=(self.cfg.FLOW.GAMMA_BASE if self.cfg.FLOW.GAMMA_BASE >= 0 else None),
-                                               gamma_inc=(self.cfg.FLOW.GAMMA_INC if self.cfg.FLOW.GAMMA_INC >= 0 else None),
-                                               score_mode=self.cfg.FLOW.SCORE_MODE,
-                                               text_score_weight=self.cfg.FLOW.TEXT_SCORE_WEIGHT,
-                                               hub_weight=self.cfg.FLOW.HUB_WEIGHT,
-                                               whitening_matrix=(self._zca_matrix
-                                                                 if self.cfg.FLOW.DIAGONAL_WHITEN else None),
-                                               visual_whitening_power=self.cfg.FLOW.VIS_WHITEN_POWER,
-                                               text_whitening_mode=self.cfg.FLOW.TEXT_WHITEN_MODE,
-                                               text_whitening_sigma=(self._text_whitening_sigma
-                                                                     if self.cfg.FLOW.DIAGONAL_WHITEN and
-                                                                        self.cfg.FLOW.TEXT_WHITEN_MODE == 'own' else None),
                                                return_components=task_id == 1)
             if task_id == 1:
                 _, logits, cycle_error, components = result
@@ -320,6 +363,9 @@ class TangentFlowRunner(Runner):
                 ablations['visual_flow_new'].append((z @ flow_bank.T).cpu())
             else:
                 _, logits, cycle_error = result
+            if self._calibrator is not None:
+                uncalibrated_scores.append(logits.cpu())
+                logits = self._calibrator(features, logits)
             if blend_lambda >= 0:
                 prob_bimc = model.forward_ours(
                     images, len(bank['class_ids']), len(self.data_manager.class_index_in_task[0]),
@@ -339,6 +385,17 @@ class TangentFlowRunner(Runner):
         if not scores:
             raise ValueError('Empty test loader')
         acc = self.evaluator.calc_accuracy(torch.cat(scores), torch.cat(targets), task_id)
+        if uncalibrated_scores:
+            uncalibrated = self.evaluator.calc_accuracy(
+                torch.cat(uncalibrated_scores), torch.cat(targets), task_id)
+            acc['uncalibrated_mean_acc'] = uncalibrated['mean_acc']
+            acc['uncalibrated_base_avg_acc'] = uncalibrated['base_avg_acc']
+            acc['uncalibrated_inc_avg_acc'] = uncalibrated['inc_avg_acc']
+            print(f'Flow before/after calibration: overall '
+                  f'{uncalibrated["mean_acc"]:.2f}/{acc["mean_acc"]:.2f}%, '
+                  f'Base {uncalibrated["base_avg_acc"]:.2f}/{acc["base_avg_acc"]:.2f}%, '
+                  f'Incremental {uncalibrated["inc_avg_acc"]:.2f}/{acc["inc_avg_acc"]:.2f}%',
+                  flush=True)
         if blend_lambda >= 0:
             all_targets = torch.cat(targets)
             acc['bimc_mean_acc'] = self.evaluator.calc_accuracy(torch.cat(bimc_scores), all_targets, task_id)['mean_acc']

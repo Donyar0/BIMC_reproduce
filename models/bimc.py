@@ -50,6 +50,13 @@ class BiMC(nn.Module):
             for block in list(blocks)[-cfg.LORA.LAST_BLOCKS:]:
                 block.attn = LoRAMultiheadAttention(block.attn, cfg.LORA.RANK,
                                                      cfg.LORA.ALPHA).to(self.device)
+            if cfg.LORA.TEXT_ENABLED:
+                text_blocks = self.clip_model.transformer.resblocks
+                if not 1 <= cfg.LORA.TEXT_LAST_BLOCKS <= len(text_blocks):
+                    raise ValueError('Invalid LORA.TEXT_LAST_BLOCKS')
+                for block in list(text_blocks)[-cfg.LORA.TEXT_LAST_BLOCKS:]:
+                    block.attn = LoRAMultiheadAttention(
+                        block.attn, cfg.LORA.TEXT_RANK, cfg.LORA.TEXT_ALPHA).to(self.device)
         self.text_proto = None
         self.description_proto = None
         self.vision_proto = None
@@ -57,6 +64,9 @@ class BiMC(nn.Module):
     @torch.no_grad()
     def merge_vision_lora(self):
         for block in self.clip_model.visual.transformer.resblocks:
+            if isinstance(block.attn, LoRAMultiheadAttention):
+                block.attn = block.attn.merge()
+        for block in self.clip_model.transformer.resblocks:
             if isinstance(block.attn, LoRAMultiheadAttention):
                 block.attn = block.attn.merge()
         self.clip_model.eval().requires_grad_(False)
