@@ -25,9 +25,9 @@ logging is needed.
   anchor loss of weight 0.1. LoRA is merged and the encoder is frozen before
   incremental sessions. Text LoRA is not used.
 - Class-name prompts and GPT descriptions form text prototypes. Training
-  images form visual prototypes. Base image statistics provide the visual
-  covariance and a regularized within-class ZCA matrix. Support images are
-  used to estimate new-class prototypes and covariances.
+  images form visual prototypes. Per-class visual covariances support old-class
+  feature replay; visual ZCA and diagonal whitening are disabled. Support
+  images are used to estimate new-class prototypes and covariances.
 - An eight-block Flow is trained from sampled text features toward visual
   features. Incremental sessions adapt it using current support features,
   generated old-class feature replay, and previous-session velocity
@@ -35,10 +35,10 @@ logging is needed.
 - The visual Bank mixes image-mean visual prototypes with Flow-generated
   prototypes: 20% Flow for Base and 40% for new classes. BiMC visual
   `soft_calibration` is disabled (`VISION_CALIBRATION: False`). Classification adds
-  ZCA-scaled visual cosine and raw reverse-Flow text cosine. The configured
+  raw visual cosine and raw reverse-Flow text cosine. The configured
   `cosine_sum` route does not use Cov/KNN probability fusion or Hub correction.
-- LoRA training uses one image view. Prototype construction and evaluation
-  use the mean of ten views (five crops and their horizontal flips).
+- LoRA training, prototype construction, and evaluation use one image view;
+  ten-view test-time augmentation is disabled.
 
 Results are saved under
-`output/dual_funnel_zca075_base_vision_lora_rank4/<dataset>/seed_<seed>_<timestamp>/`.
+`output/dual_funnel_no_zca_no_tta_no_vision_cal_rank4/<dataset>/seed_<seed>_<timestamp>/`.
