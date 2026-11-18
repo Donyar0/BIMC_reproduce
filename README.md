@@ -1,26 +1,43 @@
-# Tangent Flow: ten-view, visual whitening, raw text cosine, distillation
+# Tangent Flow with Base Vision LoRA (rank 4)
 
-This branch contains one experiment: `configs/trainers/tangent_flow_vis_whiten075_text_raw_distill1.yaml`. It starts from `biflow-no-lora` and retains the BiMC dataset/CLIP feature extraction needed by this experiment. Other Flow runners, ablation configs and remote scripts were removed.
+This branch runs the method from commit `52a2e91`. Its only trainer configuration is
+`configs/trainers/tangent_flow_zca_base_vision_lora.yaml`. The three dataset YAMLs
+remain because they define the CUB200, miniImageNet, and CIFAR100 splits and paths.
 
 ## Run
 
-Install `requirements.txt`, prepare CUB-200 and its GPT descriptions, and set `DATASET.ROOT` in `configs/datasets/cub200.yaml` to the local dataset path. Then run from the repository root:
+Install `requirements.txt` and adjust `DATASET.ROOT` and `DATASET.GPT_PATH` for
+your machine. From the repository root, choose a dataset configuration:
 
 ```bash
 python -u main.py --data_cfg configs/datasets/cub200.yaml \
-  --train_cfg configs/trainers/tangent_flow_vis_whiten075_text_raw_distill1.yaml
+  --train_cfg configs/trainers/tangent_flow_zca_base_vision_lora.yaml
 ```
 
-Optional SwanLab logging: add `--use_swanlab`.
+Replace `cub200.yaml` with `miniimagenet.yaml` or `cifar100.yaml` for those
+datasets. The runner evaluates every session. Add `--use_swanlab` if experiment
+logging is needed.
 
-## Method
+## Method in this configuration
 
-CLIP ViT-B/16 is frozen. Training/support images and test images use the normalized mean of ten CLIP views: original, four corner crops, and their horizontal flips. BiMC combines template and description text with equal weights. New-class visual prototypes receive BiMC soft calibration.
+- Base CLIP ViT-B/16 visual attention uses Q/V LoRA in its last four blocks,
+  rank 4, for five epochs. The frozen original visual encoder supplies an
+  anchor loss of weight 0.1. LoRA is merged and the encoder is frozen before
+  incremental sessions. Text LoRA is not used.
+- Class-name prompts and GPT descriptions form text prototypes. Training
+  images form visual prototypes. Base image statistics provide the visual
+  covariance and a regularized within-class ZCA matrix. Support images are
+  used to estimate new-class prototypes and covariances.
+- An eight-block Flow is trained from sampled text features toward visual
+  features. Incremental sessions adapt it using current support features,
+  generated old-class feature replay, and previous-session velocity
+  distillation. No old training images are retained for replay.
+- The visual Bank mixes calibrated visual prototypes with Flow-generated
+  prototypes: 20% Flow for Base and 40% for new classes. Classification adds
+  ZCA-scaled visual cosine and raw reverse-Flow text cosine. The configured
+  `cosine_sum` route does not use Cov/KNN probability fusion or Hub correction.
+- LoRA training uses one image view. Prototype construction and evaluation
+  use the mean of ten views (five crops and their horizontal flips).
 
-For each class, description features determine an isotropic text noise scale and image features determine a visual mean and covariance. Base covariances are shrunk toward a pooled estimate. Incremental covariances blend empirical few-shot estimates with text-similarity-weighted Base covariances. The Flow predicts velocity from text to visual features. Dual-funnel training samples one half of each batch in the early time interval toward visual centers and the other half in the late interval toward real current-session support features or sampled old-class visual features.
-
-Base training uses 100 epochs × 100 updates. Each incremental session uses 100 updates, with half of the batch drawn from old-class distributions. From the second incremental session onward, the 32 old-class rows split into 16 Base and 16 historical incremental rows. A frozen copy of the previous Flow supplies old-class velocity distillation with weight 1.0. No old image exemplars are retained for replay.
-
-The visual bank uses `normalize(0.8 * BiMC-calibrated visual prototype + 0.2 * Flow-generated prototype)`. Old bank rows are retained. Inference adds (1) visual cosine after scaling the query and bank by Base within-class standard deviation to the power `-0.75` and (2) raw text cosine after reverse Flow integration. This `cosine_sum` route does not use probability temperatures, covariance/KNN priors, gamma weights, or cycle gating.
-
-Results are written beneath `output/dual_funnel_vis_whiten075_text_raw_distill1/<dataset>/seed_<seed>_<timestamp>/`, including config, checkpoints, session banks, and CSV/JSON metrics. Real-dataset accuracy is not established by this repository; run on the prepared data to measure it.
+Results are saved under
+`output/dual_funnel_zca075_base_vision_lora_rank4/<dataset>/seed_<seed>_<timestamp>/`.
