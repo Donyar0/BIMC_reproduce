@@ -11,6 +11,21 @@ Set the dataset root in `configs/datasets/*.yaml`, install `requirements.txt`,
 then run from the repository root. Replace `cub200.yaml` with
 `miniimagenet.yaml` or `cifar100.yaml` as needed.
 
+To run the complete comparison with **one command**:
+
+```bash
+python -u scripts/run_staged_experiments.py
+```
+
+This runs four CUB200 Stage 1 ridge values, selects the one with the highest
+CUB200 average session accuracy, then runs Stage 1 on miniImageNet and
+CIFAR100 and Stages 2 and 3 on all three datasets with that same ridge value
+(12 runs total). Each run has a separate output directory. Results are
+collected in `output/staged_balanced_kernel/summary.csv`; console logs are
+under `output/staged_balanced_kernel/logs/`. Rerunning the command skips
+complete experiments and resumes the remaining plan. Use
+`python scripts/run_staged_experiments.py --dry-run` to inspect the commands.
+
 ```bash
 # 1. Class-balanced ridge with the Base-trained, frozen MLP Flow.
 python -u main.py --data_cfg configs/datasets/cub200.yaml \
