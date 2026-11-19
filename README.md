@@ -1,47 +1,47 @@
-# Tangent Flow with Base Vision LoRA (rank 4)
+# Frozen CLIP, Base Flow, and incremental random-feature ridge regression
 
-This branch builds on commit `b16cf3b`. Its only trainer configuration is
-`configs/trainers/tangent_flow_zca_base_vision_lora.yaml`. The three dataset YAMLs
-remain because they define the CUB200, miniImageNet, and CIFAR100 splits and paths.
+This experiment starts from `7de9a53` and replaces Base Vision LoRA with an
+analytic classifier. The CLIP image and text encoders remain frozen. Only the
+Base Flow is trained; later sessions do not update Flow or replay old images.
 
 ## Run
 
-Install `requirements.txt` and adjust `DATASET.ROOT` and `DATASET.GPT_PATH` for
-your machine. From the repository root, choose a dataset configuration:
+Install `requirements.txt`, prepare the dataset and description JSON, and set
+`DATASET.ROOT` in the dataset YAML. From the repository root:
 
 ```bash
 python -u main.py --data_cfg configs/datasets/cub200.yaml \
-  --train_cfg configs/trainers/tangent_flow_zca_base_vision_lora.yaml
+  --train_cfg configs/trainers/frozen_random_ridge_flow.yaml
 ```
 
-Replace `cub200.yaml` with `miniimagenet.yaml` or `cifar100.yaml` for those
-datasets. The runner evaluates every session. Add `--use_swanlab` if experiment
-logging is needed.
+Replace `cub200.yaml` with `miniimagenet.yaml` or `cifar100.yaml` to run those
+datasets. All sessions are evaluated. Add `--use_swanlab` for SwanLab logging.
 
-## Method in this configuration
+## Method
 
-- Base CLIP ViT-B/16 visual attention uses Q/V LoRA in its last four blocks,
-  rank 4, for five epochs. The frozen original visual encoder supplies an
-  MSE anchor loss of weight 0.1 and a same-view cosine semantic loss of weight
-  0.01. LoRA is merged and the encoder is frozen before incremental sessions.
-  Text LoRA is not used. Since both features are normalized, the cosine and
-  MSE terms constrain the same image direction at different scales.
-- Class-name prompts and GPT descriptions form text prototypes. Training
-  images form visual prototypes. Per-class visual covariances support old-class
-  feature replay. A Base within-class covariance with fixed 0.2 shrinkage
-  supplies the visual ZCA transform. Support images are used to estimate
-  new-class prototypes and covariances.
-- An eight-block Flow is trained from sampled text features toward visual
-  features. Incremental sessions adapt it using current support features,
-  generated old-class feature replay, and previous-session velocity
-  distillation. No old training images are retained for replay.
-- The visual Bank mixes image-mean visual prototypes with Flow-generated
-  prototypes: 20% Flow for Base and 40% for new classes. BiMC visual
-  `soft_calibration` is disabled (`VISION_CALIBRATION: False`). Classification adds
-  ZCA-scaled visual cosine and raw reverse-Flow text cosine. The configured
-  `cosine_sum` route does not use Cov/KNN probability fusion or Hub correction.
-- LoRA training, prototype construction, and evaluation use one image view;
-  ten-view test-time augmentation is disabled.
+1. Session 0 trains the eight-block text-to-visual Flow once from frozen CLIP
+   features. It is then permanently frozen. Base training images initialize
+   the random-feature ridge classifier.
+2. A fixed, seeded Gaussian matrix maps each normalized 512-dimensional CLIP
+   image feature to `ReLU(z @ W_rand)` in 8192 dimensions. Only
+   `G = sum(phi.T @ phi)` and `C = sum(phi.T @ one_hot(label))` are accumulated
+   across sessions. A Cholesky solve obtains `(G + lambda I)^-1 C` with
+   `lambda = 1.0` after each session.
+3. Every later session adds only its five real support images per class and
+   virtual visual features obtained by transporting **each available new-class
+   LLM description** through the frozen Flow. Description counts differ among
+   the supplied datasets; they are not always 25. No old images, Flow replay,
+   Flow distillation, or Flow adaptation are used.
+4. The existing visual Bank and reverse-text Flow branch are retained as a
+   geometric prior. Their cosine scores and the ridge scores are standardized
+   separately across seen classes for each query, then fused equally. This
+   avoids combining raw scores with different scales.
 
-Results are saved under
-`output/dual_funnel_zca02_singleview_cosreg001_rank4/<dataset>/seed_<seed>_<timestamp>/`.
+Single-view feature extraction and original visual prototypes are used:
+`VISION_CALIBRATION`, `TTA`, `TTA_PROTOTYPES`, and `DIAGONAL_WHITEN` are all
+disabled. The `VIS_WHITEN_POWER` setting is absent. The 8192 x 8192 float32
+Gram matrix occupies 256 MiB, and solving it at every session can be expensive.
+
+Each run writes configuration, Base Flow, session banks, ridge heads, final
+ridge statistics, and CSV/JSON accuracy metrics beneath
+`output/frozen_random_ridge_flow8192/<dataset>/seed_<seed>_<timestamp>/`.

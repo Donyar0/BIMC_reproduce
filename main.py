@@ -136,6 +136,12 @@ def extend_cfg(cfg):
     cfg.LORA.ANCHOR_WEIGHT = 0.1
     cfg.LORA.SEMANTIC_REG_WEIGHT = 0.0
 
+    cfg.RIDGE = CN()
+    cfg.RIDGE.FEATURE_DIM = 8192
+    cfg.RIDGE.LAMBDA = 1.0
+    cfg.RIDGE.BATCH_SIZE = 256
+    cfg.RIDGE.BLEND_WEIGHT = 0.5
+
 
 
 
@@ -180,9 +186,12 @@ def main():
     set_gpu(cfg.DEVICE.GPU_ID)
 
     # Import and run the trainer
-    if cfg.METHOD.lower() != 'tangent_flow':
-        raise ValueError('This branch supports METHOD: tangent_flow only')
-    from engine.tangent_flow_engine import TangentFlowRunner as Runner
+    if cfg.METHOD.lower() == 'frozen_ridge_flow':
+        from engine.frozen_ridge_flow_engine import FrozenRidgeFlowRunner as Runner
+    elif cfg.METHOD.lower() == 'tangent_flow':
+        from engine.tangent_flow_engine import TangentFlowRunner as Runner
+    else:
+        raise ValueError('Unknown method: ' + cfg.METHOD)
     engine = Runner(cfg)
     try:
         engine.run()

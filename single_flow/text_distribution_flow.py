@@ -11,7 +11,8 @@ METHOD = 'gaussian-text-visual-v2'
 DIRECTION = 'text_to_visual'
 
 
-def distributions(stats, base=None, shrink=0.1, transfer_temperature=16.):
+def distributions(stats, base=None, shrink=0.1, transfer_temperature=16.,
+                  include_covariance=True):
     """Only class statistics are retained; no image exemplars are stored."""
     ids = [int(x) for x in stats['class_index']]
     text = unit(stats['text_proto'].detach().float()).cpu()
@@ -29,33 +30,35 @@ def distributions(stats, base=None, shrink=0.1, transfer_temperature=16.):
         residual = group-text[row]
         residual -= (residual @ text[row]).unsqueeze(1)*text[row]
         text_sigma.append(residual.square().sum(-1).mean().sqrt()/math.sqrt(dim))
-        images = features[labels == c]
-        centered = images-images.mean(0)
-        empirical.append(centered.T @ centered / max(len(images)-1, 1))
+        if include_covariance:
+            images = features[labels == c]
+            centered = images-images.mean(0)
+            empirical.append(centered.T @ centered / max(len(images)-1, 1))
     sigma = torch.stack(text_sigma).clamp_min(1e-4)
-    empirical = torch.stack(empirical)
-    if base is None:
-        pooled = empirical.mean(0)
-        cov = (1-shrink)*empirical+shrink*pooled.unsqueeze(0)
-        base_cov, base_text = cov.clone(), text.clone()
-    else:
-        base_cov, base_text = base['base_cov'], base['base_text']
-        weights = torch.softmax(transfer_temperature*text@base_text.T, dim=-1)
-        transferred = torch.einsum('cb,bij->cij', weights, base_cov)
-        counts = torch.tensor([(labels == c).sum().item() for c in ids], dtype=torch.float32)
-        support_weight = ((counts-1).clamp_min(0)/(counts-1+dim)).view(-1,1,1)
-        cov = support_weight*empirical+(1-support_weight)*transferred
-    diag = cov.diagonal(dim1=-2, dim2=-1).mean(-1).clamp_min(1e-6)
-    eye = torch.eye(dim).unsqueeze(0)
-    cov = cov + (0.05*diag).view(-1,1,1)*eye + 1e-6*eye
     calibrated=unit(stats['image_proto'].detach().float()).cpu()
-    return dict(class_ids=ids, text=text, real=visual,
-                bank_real=calibrated, visual_target=calibrated,
-                support_features=features, support_labels=labels,
-                sigma=sigma, cov=cov,
-                base_cov=base_cov, base_text=base_text,
-                session_lengths=[len(ids)],
-                description_features=desc, description_labels=desc_labels)
+    result = dict(class_ids=ids, text=text, real=visual,
+                  bank_real=calibrated, visual_target=calibrated,
+                  support_features=features, support_labels=labels,
+                  sigma=sigma, session_lengths=[len(ids)],
+                  description_features=desc, description_labels=desc_labels)
+    if include_covariance:
+        empirical = torch.stack(empirical)
+        if base is None:
+            pooled = empirical.mean(0)
+            cov = (1-shrink)*empirical+shrink*pooled.unsqueeze(0)
+            base_cov, base_text = cov.clone(), text.clone()
+        else:
+            base_cov, base_text = base['base_cov'], base['base_text']
+            weights = torch.softmax(transfer_temperature*text@base_text.T, dim=-1)
+            transferred = torch.einsum('cb,bij->cij', weights, base_cov)
+            counts = torch.tensor([(labels == c).sum().item() for c in ids], dtype=torch.float32)
+            support_weight = ((counts-1).clamp_min(0)/(counts-1+dim)).view(-1,1,1)
+            cov = support_weight*empirical+(1-support_weight)*transferred
+        diag = cov.diagonal(dim1=-2, dim2=-1).mean(-1).clamp_min(1e-6)
+        eye = torch.eye(dim).unsqueeze(0)
+        cov = cov + (0.05*diag).view(-1,1,1)*eye + 1e-6*eye
+        result.update(cov=cov, base_cov=base_cov, base_text=base_text)
+    return result
 
 
 def combine(old, new):
@@ -165,7 +168,8 @@ def _train(checkpoint, memory, *, steps, batch_size, lr, weight_decay, seed, dev
     history=[]
     distill_history=[]
     contrast_history=[]
-    chol_all = torch.linalg.cholesky(memory['cov'].to(device))
+    chol_all = (torch.linalg.cholesky(memory['cov'].to(device))
+                if not funnel_mode or old_count else None)
     visual_means = unit(memory['real'].to(device)) if contrast_weight else None
     for step in range(steps):
         if old_count == 0:
