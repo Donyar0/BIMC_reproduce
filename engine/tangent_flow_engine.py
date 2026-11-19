@@ -75,7 +75,7 @@ class TangentFlowRunner(Runner):
                 cov = (centered.T @ centered) / n_eff
                 diag_cov = torch.diag(cov.diagonal().clamp_min(1e-6))
                 dim = cov.shape[0]
-                shrink = min(1.0, (20.0 * dim) / n_eff)
+                shrink = 0.2
                 print(f'Base ZCA covariance: n_eff={n_eff}, dim={dim}, shrink={shrink:.4f}')
                 cov_reg = (1.0 - shrink) * cov + shrink * diag_cov
                 eigvals, eigvecs = torch.linalg.eigh(cov_reg)

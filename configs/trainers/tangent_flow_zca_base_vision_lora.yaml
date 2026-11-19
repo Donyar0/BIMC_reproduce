@@ -34,7 +34,7 @@ TRAINER:
 # Distributional text-to-visual Flow with exemplar-free incremental replay.
 FLOW:
   STEPS_PER_EPOCH: 100
-  COV_SHRINK: 0.1  # distribution replay covariance; ZCA shrink is computed from sample count
+  COV_SHRINK: 0.1  # distribution replay covariance; ZCA uses fixed shrink=0.2
   COV_TRANSFER_TEMPERATURE: 16.0
   REPLAY_FRACTION: 0.5
   BANK_MODE: "calibrated_flow20"
@@ -42,7 +42,7 @@ FLOW:
   SCORE_MODE: "cosine_sum"  # raw visual and reverse-text cosine scores; no Cov/KNN probabilities
   TTA: False  # single-view evaluation
   TTA_PROTOTYPES: False  # single-view Base and support prototypes
-  DIAGONAL_WHITEN: False  # no ZCA or diagonal visual scaling
+  DIAGONAL_WHITEN: True  # regularized Base within-class ZCA matrix
   VIS_WHITEN_POWER: 0.75
   TEXT_WHITEN_MODE: "none"
   NOISE_SCALE: 0.25
@@ -55,7 +55,7 @@ FLOW:
   BLOCKS: 8
   STEPS: 8
   SOLVER: "euler"  # euler, midpoint, heun, rk4; inference only
-  OUTPUT_DIR: "output/dual_funnel_no_zca_no_tta_no_vision_cal_rank4"
+  OUTPUT_DIR: "output/dual_funnel_zca02_singleview_cosreg001_rank4"
   ADAPT_STEPS: 100  # incremental FM plus previous-session velocity distillation
   DISTILL_WEIGHT: 1.0
   REPLAY_STRATEGY: "base_incremental_half"
@@ -69,3 +69,4 @@ LORA:
   LR: 0.0002
   WEIGHT_DECAY: 0.0001
   ANCHOR_WEIGHT: 0.1
+  SEMANTIC_REG_WEIGHT: 0.01

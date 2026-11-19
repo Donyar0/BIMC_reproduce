@@ -134,6 +134,7 @@ def extend_cfg(cfg):
     cfg.LORA.LR = 0.0002
     cfg.LORA.WEIGHT_DECAY = 0.0001
     cfg.LORA.ANCHOR_WEIGHT = 0.1
+    cfg.LORA.SEMANTIC_REG_WEIGHT = 0.0
 
 
 

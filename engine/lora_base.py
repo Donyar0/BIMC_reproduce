@@ -10,6 +10,8 @@ from models.clip.model import LoRAMultiheadAttention
 def train_base_vision_lora(model, data_manager, cfg, output):
     if cfg.TRAINER.BiMC.PREC != 'fp32':
         raise ValueError('Base LoRA training requires BiMC.PREC: fp32')
+    if cfg.LORA.SEMANTIC_REG_WEIGHT < 0:
+        raise ValueError('LORA.SEMANTIC_REG_WEIGHT must be nonnegative')
     base_ids = list(data_manager.class_index_in_task[0])
     if base_ids != list(range(len(base_ids))):
         raise ValueError('Base labels must be zero-based and contiguous')
@@ -53,7 +55,9 @@ def train_base_vision_lora(model, data_manager, cfg, output):
             with torch.no_grad():
                 reference = F.normalize(teacher(images).float(), dim=-1)
             anchor = F.mse_loss(image, reference)
-            loss = ce + cfg.LORA.ANCHOR_WEIGHT * anchor
+            semantic_reg = (1.0 - F.cosine_similarity(image, reference, dim=-1)).mean()
+            loss = (ce + cfg.LORA.ANCHOR_WEIGHT * anchor
+                    + cfg.LORA.SEMANTIC_REG_WEIGHT * semantic_reg)
             if not torch.isfinite(loss):
                 raise RuntimeError('Nonfinite Base LoRA loss')
             optimizer.zero_grad(set_to_none=True)
