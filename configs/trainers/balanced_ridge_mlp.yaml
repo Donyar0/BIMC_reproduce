@@ -1,0 +1,51 @@
+# Stage 1: balanced ridge; the Base-trained MLP Flow is frozen after Session 0.
+METHOD: "balanced_kernel_flow"
+SEED: 1
+DEVICE:
+  DEVICE_NAME: "cuda"
+  GPU_ID: "0;"
+DATALOADER:
+  TRAIN:
+    BATCH_SIZE_BASE: 64
+    BATCH_SIZE_INC: 64
+  TEST:
+    BATCH_SIZE: 100
+  NUM_WORKERS: 4
+MODEL:
+  BACKBONE:
+    NAME: "ViT-B/16"
+TRAINER:
+  BiMC:
+    PREC: "fp32"
+    VISION_CALIBRATION: False
+    TEXT_CALIBRATION: True
+    LAMBDA_T: 0.5
+LORA:
+  ENABLED: False
+FLOW:
+  EPOCHS: 100
+  STEPS_PER_EPOCH: 100
+  BATCH_SIZE: 64
+  LR: 0.0002
+  WEIGHT_DECAY: 0.0001
+  NOISE_SCALE: 0.25
+  BLOCKS: 8
+  STEPS: 8
+  SOLVER: "euler"
+  ADAPT_STEPS: 0
+  TTA: False
+  TTA_PROTOTYPES: False
+  DIAGONAL_WHITEN: False
+  OUTPUT_DIR: "output/balanced_ridge_mlp"
+GEOMETRY:
+  FLOW_TYPE: "mlp"
+  KAPPA: 5.0
+RIDGE:
+  FEATURE_DIM: 8192
+  LAMBDA: 10.0
+  BATCH_SIZE: 256
+  TARGET_MODE: "prototype"
+  BLEND_WEIGHT: 0.5
+FEATURE:
+  MULTILAYER: False
+  PATCH_POOLING: False

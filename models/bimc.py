@@ -52,6 +52,7 @@ class BiMC(nn.Module):
         self.text_proto = None
         self.description_proto = None
         self.vision_proto = None
+        self._patch_description_bank = None
 
     @torch.no_grad()
     def merge_vision_lora(self):
@@ -188,6 +189,10 @@ class BiMC(nn.Module):
                                   self.inference_all_description_feature(class_names=class_names, 
                                   gpt_path=self.cfg.DATASET.GPT_PATH,
                                   cls_begin_index=cls_begin_index)
+        if self.cfg.FEATURE.PATCH_POOLING and cls_begin_index == 0:
+            # Fix the attribute dictionary at Base so all sessions share one image space.
+            self._patch_description_bank = F.normalize(
+                description_features.detach().float(), dim=-1).to(self.device)
         
         images_features, images_targets, images_proto = \
                                     self.inference_all_img_feature(loader, cls_begin_index)
@@ -313,6 +318,34 @@ class BiMC(nn.Module):
 
 
 
+    def _encode_single_view(self, images):
+        if not self.cfg.FEATURE.MULTILAYER:
+            return self.clip_model.encode_image(images).float()
+        if not hasattr(self.clip_model.visual, 'transformer'):
+            raise ValueError('Multilayer image features require a ViT backbone')
+        layers = self.cfg.FEATURE.LAST_LAYERS
+        if not 1 <= layers <= len(self.clip_model.visual.transformer.resblocks):
+            raise ValueError('FEATURE.LAST_LAYERS is outside the ViT depth')
+        output = self.clip_model.encode_image(
+            images, all_layer_outputs=True,
+            return_patch_tokens=self.cfg.FEATURE.PATCH_POOLING)
+        cls_layers, patches = output if self.cfg.FEATURE.PATCH_POOLING else (output, None)
+        global_feature = F.normalize(torch.stack([
+            F.normalize(layer.float(), dim=-1) for layer in cls_layers[-layers:]
+        ]).mean(0), dim=-1)
+        if patches is None:
+            return global_feature
+        if self._patch_description_bank is None:
+            raise ValueError('Base description dictionary must be set before patch pooling')
+        patches = F.normalize(patches.float(), dim=-1)
+        response = torch.full(patches.shape[:2], -torch.inf, device=patches.device)
+        for descriptions in self._patch_description_bank.split(self.cfg.FEATURE.DESCRIPTION_CHUNK):
+            response = torch.maximum(response, (patches @ descriptions.T).max(-1).values)
+        attention = F.softmax(self.cfg.FEATURE.PATCH_TEMPERATURE * response, dim=-1)
+        local_feature = F.normalize((patches * attention[:, :, None]).sum(1), dim=-1)
+        weight = self.cfg.FEATURE.PATCH_WEIGHT
+        return F.normalize((1 - weight) * global_feature + weight * local_feature, dim=-1)
+
     def extract_img_feature(self, images, tta=False):
         images = images.to(self.device)
         if tta:
@@ -326,10 +359,10 @@ class BiMC(nn.Module):
                                            mode='bicubic', align_corners=False))
             features = []
             for view in views:
-                features.append(F.normalize(self.clip_model.encode_image(view).float(), dim=-1))
-                features.append(F.normalize(self.clip_model.encode_image(view.flip(-1)).float(), dim=-1))
+                features.append(F.normalize(self._encode_single_view(view), dim=-1))
+                features.append(F.normalize(self._encode_single_view(view.flip(-1)), dim=-1))
             return F.normalize(torch.stack(features).mean(0), dim=-1)
-        image_features = self.clip_model.encode_image(images)
+        image_features = self._encode_single_view(images)
         return image_features
 
 

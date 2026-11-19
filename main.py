@@ -141,13 +141,27 @@ def extend_cfg(cfg):
     cfg.RIDGE.LAMBDA = 1.0
     cfg.RIDGE.BATCH_SIZE = 256
     cfg.RIDGE.BLEND_WEIGHT = 0.5
+    cfg.RIDGE.TARGET_MODE = 'prototype'
+
+    cfg.GEOMETRY = CN()
+    cfg.GEOMETRY.FLOW_TYPE = 'mlp'
+    cfg.GEOMETRY.KERNEL_BANDWIDTH = 0.4
+    cfg.GEOMETRY.KAPPA = 5.0
+
+    cfg.FEATURE = CN()
+    cfg.FEATURE.MULTILAYER = False
+    cfg.FEATURE.LAST_LAYERS = 4
+    cfg.FEATURE.PATCH_POOLING = False
+    cfg.FEATURE.PATCH_TEMPERATURE = 10.0
+    cfg.FEATURE.PATCH_WEIGHT = 0.25
+    cfg.FEATURE.DESCRIPTION_CHUNK = 256
 
 
 
 
     
 
-def setup_cfg(dataset_cfg_file, method_cfg_file):
+def setup_cfg(dataset_cfg_file, method_cfg_file, opts=None):
     cfg = CN()
     extend_cfg(cfg)
 
@@ -156,6 +170,9 @@ def setup_cfg(dataset_cfg_file, method_cfg_file):
 
     # 2. From the method config file
     cfg.merge_from_file(method_cfg_file)
+
+    if opts:
+        cfg.merge_from_list(opts)
 
     cfg.freeze()
     return cfg
@@ -167,6 +184,8 @@ def main():
 
     parser.add_argument('--data_cfg', type=str, help="Path to the data configuration file")
     parser.add_argument('--train_cfg', type=str, help="Path to the training configuration file")
+    parser.add_argument('--opts', nargs=argparse.REMAINDER, default=[],
+                        help="YACS overrides as KEY VALUE pairs; place last")
     parser.add_argument('--use_swanlab', action='store_true', help="Enable SwanLab experiment logging")
     parser.add_argument('--swanlab_project', type=str, default='BIMC_reproduce', help="SwanLab project name")
     parser.add_argument('--swanlab_experiment', type=str, default='', help="SwanLab experiment name")
@@ -178,7 +197,7 @@ def main():
     data_cfg = args.data_cfg
     train_cfg = args.train_cfg
 
-    cfg = setup_cfg(data_cfg, train_cfg)
+    cfg = setup_cfg(data_cfg, train_cfg, args.opts)
     init_swanlab(cfg, args)
 
     # Set the random seed and GPU ID
@@ -188,6 +207,8 @@ def main():
     # Import and run the trainer
     if cfg.METHOD.lower() == 'frozen_ridge_flow':
         from engine.frozen_ridge_flow_engine import FrozenRidgeFlowRunner as Runner
+    elif cfg.METHOD.lower() == 'balanced_kernel_flow':
+        from engine.balanced_kernel_flow_engine import BalancedKernelFlowRunner as Runner
     elif cfg.METHOD.lower() == 'tangent_flow':
         from engine.tangent_flow_engine import TangentFlowRunner as Runner
     else:

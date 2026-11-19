@@ -261,7 +261,7 @@ class VisionTransformer(nn.Module):
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
     # Modified by Torres Yu in Oct 5, 2022
-    def forward(self, x: torch.Tensor, all_layer_outputs=False):
+    def forward(self, x: torch.Tensor, all_layer_outputs=False, return_patch_tokens=False):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
@@ -310,6 +310,11 @@ class VisionTransformer(nn.Module):
                 if self.proj is not None:
                     cur_output = cur_output @ self.proj
                 outputs.append(cur_output)
+            if return_patch_tokens:
+                patch_tokens = self.ln_post(x.permute(1, 0, 2)[:, 1:, :])
+                if self.proj is not None:
+                    patch_tokens = patch_tokens @ self.proj
+                return outputs, patch_tokens
             return outputs
 
 
@@ -411,8 +416,12 @@ class CLIP(nn.Module):
     def dtype(self):
         return self.visual.conv1.weight.dtype
 
-    def encode_image(self, image):
-        return self.visual(image.type(self.dtype))
+    def encode_image(self, image, all_layer_outputs=False, return_patch_tokens=False):
+        if not all_layer_outputs and not return_patch_tokens:
+            return self.visual(image.type(self.dtype))
+        return self.visual(image.type(self.dtype),
+                           all_layer_outputs=all_layer_outputs,
+                           return_patch_tokens=return_patch_tokens)
 
     def encode_text(self, text):
         x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
