@@ -26,7 +26,6 @@ TRAINER:
 
 FLOW:
   STEPS_PER_EPOCH: 100
-  COV_SHRINK: 0.1
   BANK_MODE: "calibrated_flow20"
   FUNNEL_MODE: True
   SCORE_MODE: "cosine_sum"
